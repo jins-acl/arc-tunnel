@@ -20,16 +20,18 @@ describe('WebSocketServer', () => {
 
   it('should handle client connection', (done) => {
     server = new WebSocketServer(8766);
-    let client: WebSocket;
 
     server.on('connection', (ws) => {
       expect(ws).toBeDefined();
-      client.close();
       done();
     });
 
     server.start().then(() => {
-      client = new WebSocket('ws://localhost:8766');
+      const client = new WebSocket('ws://localhost:8766');
+      client.on('open', () => {
+        // Connection established, close it
+        client.close();
+      });
     });
   });
 });
