@@ -115,9 +115,10 @@ export class CommandHandler {
       case 'replay_recording':
         let replayTabId = params.tabId;
         if (replayTabId == null) {
-          const tabs = this.tabManager.listTabs();
-          if (tabs.length > 0) {
-            replayTabId = tabs[0].id;
+          // Query Chrome directly so we see all open tabs
+          const allTabs = await chrome.tabs.query({});
+          if (allTabs.length > 0) {
+            replayTabId = allTabs[0].id;
           } else {
             replayTabId = await this.tabManager.createTab();
           }

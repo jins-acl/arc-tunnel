@@ -60,6 +60,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     if (wsClient.isConnected()) {
       wsClient.sendEvent({ type: 'event', event: 'heartbeat', data: {}, timestamp: Date.now() });
     }
+  } else if (alarm.name === 'ws-reconnect') {
+    // SW was terminated during a reconnect delay — retry now
+    if (!wsClient.isConnected()) {
+      console.log('[alarm] SW wakeup — attempting reconnect');
+      // Direct connection attempt (WebSocketClient.handleReconnect will be
+      // called via onclose; this is just for the case where SW died mid-delay)
+      initialize();
+    }
   }
 });
 

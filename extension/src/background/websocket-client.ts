@@ -5,6 +5,7 @@ export class WebSocketClient {
   private ws: WebSocket | null = null;
   private url: string;
   private reconnectAttempts = 0;
+  private maxReconnectAttempts = 10;
   private reconnectDelay = 1000;
   private maxReconnectDelay = 30000;
   private messageHandlers: Map<string, (message: any) => void> = new Map();
@@ -83,20 +84,30 @@ export class WebSocketClient {
   private async handleReconnect(): Promise<void> {
     if (this.intentionalClose) return;
 
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error(`Reconnect failed after ${this.maxReconnectAttempts} attempts — giving up. Reload the extension to retry.`);
+      return;
+    }
+
     const delay = Math.min(
       this.reconnectDelay * Math.pow(2, this.reconnectAttempts) + Math.random() * 1000,
       this.maxReconnectDelay
     );
     this.reconnectAttempts++;
 
-    console.log(`Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts})`);
+    console.log(`Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
 
     setTimeout(async () => {
+      // Re-check flag — disconnect() may have been called during the delay
+      if (this.intentionalClose) return;
       try {
         await this.connect();
       } catch (error) {
         console.error('Reconnect failed:', error);
       }
     }, delay);
+
+    // Fallback: schedule chrome.alarms in case SW is terminated during setTimeout
+    chrome.alarms.create('ws-reconnect', { delayInMinutes: Math.ceil(delay / 60000) || 1 });
   }
 }

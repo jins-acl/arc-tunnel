@@ -48,11 +48,13 @@ export class WebBridgeMCPServer {
           console.error(`Port ${this.port} in use (attempt ${i + 1}/${maxRetries}), retrying in 3s...`);
           await new Promise(resolve => setTimeout(resolve, 3000));
         } else {
+          // Non-EADDRINUSE errors (EACCES, etc.) — log and stop retrying
+          console.error(`WebSocket server error (attempt ${i + 1}/${maxRetries}):`, error.message);
           throw error;
         }
       }
     }
-    throw new Error(`Failed to start WebSocket server after ${maxRetries} attempts`);
+    throw new Error(`Port ${this.port} still in use after ${maxRetries} attempts — check for stale processes`);
   }
 
   private setupHandlers(): void {
@@ -102,9 +104,10 @@ export class WebBridgeMCPServer {
         content: [{
           type: 'text',
           text: JSON.stringify({
-            error: 'Extension not connected'
+            error: 'Extension not connected — open the browser extension popup to check status'
           })
-        }]
+        }],
+        isError: true
       };
     }
 

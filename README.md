@@ -219,7 +219,8 @@ git add mcp-server/dist/ extension/dist/
 - WebSocket 仅监听 localhost，不暴露到网络
 - `JSON.stringify()` 防注入，所有用户输入安全编码
 - 扩展权限最小化（debugger, tabs, storage, cookies）
-- 密码字段自动标记不记录
+- `get_content(html)` 返回原始 HTML（包含可见字段值及已填充的密码），调用者自行过滤敏感信息
+- `execute_script` 具有完整页面访问权限，仅在可信 AI 助手中使用
 
 ## 版本
 

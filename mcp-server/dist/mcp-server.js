@@ -19285,7 +19285,7 @@ function getToolDefinitions() {
     },
     {
       name: "execute_script",
-      description: "Execute JavaScript in the tab",
+      description: "Execute JavaScript in the tab. WARNING: scripts have full page access (DOM, cookies, storage, network). Use with caution.",
       inputSchema: {
         type: "object",
         properties: {
@@ -19343,7 +19343,7 @@ function getToolDefinitions() {
     // Recording and playback
     {
       name: "start_recording",
-      description: "Start recording user actions",
+      description: "[EXPERIMENTAL] Start recording user actions. Currently records action metadata only \u2014 DOM event capture not yet implemented.",
       inputSchema: {
         type: "object",
         properties: {
@@ -19354,18 +19354,16 @@ function getToolDefinitions() {
     },
     {
       name: "stop_recording",
-      description: "Stop recording and return the recording",
+      description: "[EXPERIMENTAL] Stop recording and return the recording.",
       inputSchema: {
         type: "object",
-        properties: {
-          tabId: { type: "number", description: "Tab ID" }
-        },
-        required: ["tabId"]
-      }
+        properties: {}
+      },
+      required: []
     },
     {
       name: "replay_recording",
-      description: "Replay a recorded session",
+      description: "[EXPERIMENTAL] Replay a recorded session. Uses blind timing \u2014 no DOM verification between steps.",
       inputSchema: {
         type: "object",
         properties: {
@@ -19434,11 +19432,12 @@ var WebBridgeMCPServer = class {
           console.error(`Port ${this.port} in use (attempt ${i + 1}/${maxRetries}), retrying in 3s...`);
           await new Promise((resolve) => setTimeout(resolve, 3e3));
         } else {
+          console.error(`WebSocket server error (attempt ${i + 1}/${maxRetries}):`, error2.message);
           throw error2;
         }
       }
     }
-    throw new Error(`Failed to start WebSocket server after ${maxRetries} attempts`);
+    throw new Error(`Port ${this.port} still in use after ${maxRetries} attempts \u2014 check for stale processes`);
   }
   setupHandlers() {
     this.wsServer.on("response", (message) => {
@@ -19477,9 +19476,10 @@ var WebBridgeMCPServer = class {
         content: [{
           type: "text",
           text: JSON.stringify({
-            error: "Extension not connected"
+            error: "Extension not connected \u2014 open the browser extension popup to check status"
           })
-        }]
+        }],
+        isError: true
       };
     }
     try {
@@ -19530,13 +19530,15 @@ async function main() {
   const server = new WebBridgeMCPServer(port);
   await server.startMCP();
   server.startWebSocketWithRetry().catch((error2) => {
-    console.error("WebSocket server failed to start:", error2);
+    console.error("WebSocket server failed to start:", error2.message);
   });
-  process.on("SIGINT", async () => {
-    console.log("Shutting down...");
+  const shutdown = async (signal) => {
+    console.log(`${signal} received, shutting down...`);
     await server.stop();
     process.exit(0);
-  });
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 main();
 //# sourceMappingURL=mcp-server.js.map

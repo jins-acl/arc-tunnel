@@ -9,15 +9,18 @@ async function main() {
 
   // Start WebSocket with retry — port may be held by a stale process
   server.startWebSocketWithRetry().catch((error) => {
-    console.error('WebSocket server failed to start:', error);
+    console.error('WebSocket server failed to start:', error.message);
+    // Keep process alive — MCP stdio is still functional
   });
 
-  // Handle shutdown
-  process.on('SIGINT', async () => {
-    console.log('Shutting down...');
+  // Handle graceful shutdown
+  const shutdown = async (signal: string) => {
+    console.log(`${signal} received, shutting down...`);
     await server.stop();
     process.exit(0);
-  });
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 main();

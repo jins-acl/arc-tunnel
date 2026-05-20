@@ -78,7 +78,7 @@ export function getToolDefinitions(): ToolDefinition[] {
     },
     {
       name: 'execute_script',
-      description: 'Execute JavaScript in the tab',
+      description: 'Execute JavaScript in the tab. WARNING: scripts have full page access (DOM, cookies, storage, network). Use with caution.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -136,7 +136,7 @@ export function getToolDefinitions(): ToolDefinition[] {
     // Recording and playback
     {
       name: 'start_recording',
-      description: 'Start recording user actions',
+      description: '[EXPERIMENTAL] Start recording user actions. Currently records action metadata only — DOM event capture not yet implemented.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -147,18 +147,16 @@ export function getToolDefinitions(): ToolDefinition[] {
     },
     {
       name: 'stop_recording',
-      description: 'Stop recording and return the recording',
+      description: '[EXPERIMENTAL] Stop recording and return the recording.',
       inputSchema: {
         type: 'object',
-        properties: {
-          tabId: { type: 'number', description: 'Tab ID' }
-        },
-        required: ['tabId']
-      }
+        properties: {}
+      },
+      required: []
     },
     {
       name: 'replay_recording',
-      description: 'Replay a recorded session',
+      description: '[EXPERIMENTAL] Replay a recorded session. Uses blind timing — no DOM verification between steps.',
       inputSchema: {
         type: 'object',
         properties: {

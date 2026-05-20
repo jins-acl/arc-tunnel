@@ -16,6 +16,8 @@ export class SessionManager {
           console.warn(`Failed to get cookies for ${tab.url}:`, error);
         }
 
+        // NOTE: localStorage/sessionStorage are NOT captured — reading them
+        // requires CDP Runtime.evaluate per tab. Only cookies are persisted.
         tabStates.push({
           url: tab.url,
           cookies,

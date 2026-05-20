@@ -15,6 +15,7 @@ var init_websocket_client = __esm({
       constructor(url = "ws://localhost:8765") {
         this.ws = null;
         this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 10;
         this.reconnectDelay = 1e3;
         this.maxReconnectDelay = 3e4;
         this.messageHandlers = /* @__PURE__ */ new Map();
@@ -78,19 +79,25 @@ var init_websocket_client = __esm({
       }
       async handleReconnect() {
         if (this.intentionalClose) return;
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+          console.error(`Reconnect failed after ${this.maxReconnectAttempts} attempts \u2014 giving up. Reload the extension to retry.`);
+          return;
+        }
         const delay = Math.min(
           this.reconnectDelay * Math.pow(2, this.reconnectAttempts) + Math.random() * 1e3,
           this.maxReconnectDelay
         );
         this.reconnectAttempts++;
-        console.log(`Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts})`);
+        console.log(`Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
         setTimeout(async () => {
+          if (this.intentionalClose) return;
           try {
             await this.connect();
           } catch (error) {
             console.error("Reconnect failed:", error);
           }
         }, delay);
+        chrome.alarms.create("ws-reconnect", { delayInMinutes: Math.ceil(delay / 6e4) || 1 });
       }
     };
   }
@@ -676,9 +683,9 @@ var init_command_handler = __esm({
           case "replay_recording":
             let replayTabId = params.tabId;
             if (replayTabId == null) {
-              const tabs = this.tabManager.listTabs();
-              if (tabs.length > 0) {
-                replayTabId = tabs[0].id;
+              const allTabs = await chrome.tabs.query({});
+              if (allTabs.length > 0) {
+                replayTabId = allTabs[0].id;
               } else {
                 replayTabId = await this.tabManager.createTab();
               }
@@ -753,6 +760,11 @@ var require_service_worker = __commonJS({
       if (alarm.name === "keepAlive") {
         if (wsClient.isConnected()) {
           wsClient.sendEvent({ type: "event", event: "heartbeat", data: {}, timestamp: Date.now() });
+        }
+      } else if (alarm.name === "ws-reconnect") {
+        if (!wsClient.isConnected()) {
+          console.log("[alarm] SW wakeup \u2014 attempting reconnect");
+          initialize();
         }
       }
     });
