@@ -5,9 +5,10 @@ export class WebSocketClient {
   private ws: WebSocket | null = null;
   private url: string;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
   private reconnectDelay = 1000;
+  private maxReconnectDelay = 30000;
   private messageHandlers: Map<string, (message: any) => void> = new Map();
+  private intentionalClose = false;
 
   constructor(url: string = 'ws://localhost:8765') {
     this.url = url;
@@ -45,6 +46,7 @@ export class WebSocketClient {
   }
 
   disconnect(): void {
+    this.intentionalClose = true;
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -79,15 +81,15 @@ export class WebSocketClient {
   }
 
   private async handleReconnect(): Promise<void> {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('Max reconnect attempts reached');
-      return;
-    }
+    if (this.intentionalClose) return;
 
+    const delay = Math.min(
+      this.reconnectDelay * Math.pow(2, this.reconnectAttempts) + Math.random() * 1000,
+      this.maxReconnectDelay
+    );
     this.reconnectAttempts++;
-    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
 
-    console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+    console.log(`Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts})`);
 
     setTimeout(async () => {
       try {

@@ -51,16 +51,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 });
 
-// Keep service worker alive — Chrome clamps alarm periods to >=1 minute
-// The heartbeat ping also prevents NAT/router/proxy timeouts on the WebSocket
+// Keep service worker alive via alarm (Chrome clamps to >=1 minute)
+// The WebSocket connection itself keeps the SW alive while connected;
+// this alarm catches the gap when WebSocket drops and SW would die
 chrome.alarms.create('keepAlive', { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'keepAlive') {
-    // Lightweight ping — keeps SW and WebSocket alive
     if (wsClient.isConnected()) {
       wsClient.sendEvent({ type: 'event', event: 'heartbeat', data: {}, timestamp: Date.now() });
     }
   }
+});
+
+// Handle SW suspension — clean up before being killed
+chrome.runtime.onSuspend.addListener(() => {
+  console.log('Service worker suspending');
+  wsClient.disconnect();
 });
 
 // Initialize on startup

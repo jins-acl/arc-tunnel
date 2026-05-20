@@ -15,9 +15,10 @@ var init_websocket_client = __esm({
       constructor(url = "ws://localhost:8765") {
         this.ws = null;
         this.reconnectAttempts = 0;
-        this.maxReconnectAttempts = 5;
         this.reconnectDelay = 1e3;
+        this.maxReconnectDelay = 3e4;
         this.messageHandlers = /* @__PURE__ */ new Map();
+        this.intentionalClose = false;
         this.url = url;
       }
       async connect() {
@@ -47,6 +48,7 @@ var init_websocket_client = __esm({
         });
       }
       disconnect() {
+        this.intentionalClose = true;
         if (this.ws) {
           this.ws.close();
           this.ws = null;
@@ -75,13 +77,13 @@ var init_websocket_client = __esm({
         }
       }
       async handleReconnect() {
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-          console.error("Max reconnect attempts reached");
-          return;
-        }
+        if (this.intentionalClose) return;
+        const delay = Math.min(
+          this.reconnectDelay * Math.pow(2, this.reconnectAttempts) + Math.random() * 1e3,
+          this.maxReconnectDelay
+        );
         this.reconnectAttempts++;
-        const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
-        console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+        console.log(`Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts})`);
         setTimeout(async () => {
           try {
             await this.connect();
@@ -653,9 +655,17 @@ var init_command_handler = __esm({
           case "close_tab":
             await this.tabManager.closeTab(params.tabId);
             return { status: "closed" };
-          case "list_tabs":
-            const tabs = this.tabManager.listTabs();
-            return { tabs };
+          case "list_tabs": {
+            const allTabs = await chrome.tabs.query({});
+            return {
+              tabs: allTabs.map((t) => ({
+                tabId: t.id,
+                url: t.url || "",
+                title: t.title || "",
+                active: t.active
+              }))
+            };
+          }
           // Recording
           case "start_recording":
             const recordingId = await this.recordingEngine.startRecording(params.tabId);
@@ -666,9 +676,9 @@ var init_command_handler = __esm({
           case "replay_recording":
             let replayTabId = params.tabId;
             if (replayTabId == null) {
-              const tabs2 = this.tabManager.listTabs();
-              if (tabs2.length > 0) {
-                replayTabId = tabs2[0].id;
+              const tabs = this.tabManager.listTabs();
+              if (tabs.length > 0) {
+                replayTabId = tabs[0].id;
               } else {
                 replayTabId = await this.tabManager.createTab();
               }
@@ -745,6 +755,10 @@ var require_service_worker = __commonJS({
           wsClient.sendEvent({ type: "event", event: "heartbeat", data: {}, timestamp: Date.now() });
         }
       }
+    });
+    chrome.runtime.onSuspend.addListener(() => {
+      console.log("Service worker suspending");
+      wsClient.disconnect();
     });
     initialize();
     console.log("Web Bridge service worker loaded");

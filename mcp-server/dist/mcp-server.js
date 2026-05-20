@@ -19420,6 +19420,27 @@ var WebBridgeMCPServer = class {
   }
   async startWebSocket() {
     await this.wsServer.start();
+    this.setupHandlers();
+  }
+  async startWebSocketWithRetry(maxRetries = 10) {
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        await this.wsServer.start();
+        console.log(`WebSocket server started on port ${this.port}`);
+        this.setupHandlers();
+        return;
+      } catch (error2) {
+        if (error2.code === "EADDRINUSE") {
+          console.error(`Port ${this.port} in use (attempt ${i + 1}/${maxRetries}), retrying in 3s...`);
+          await new Promise((resolve) => setTimeout(resolve, 3e3));
+        } else {
+          throw error2;
+        }
+      }
+    }
+    throw new Error(`Failed to start WebSocket server after ${maxRetries} attempts`);
+  }
+  setupHandlers() {
     this.wsServer.on("response", (message) => {
       if (message.success) {
         this.commandQueue.resolveCommand(message.id, message.result);
@@ -19507,14 +19528,10 @@ var WebBridgeMCPServer = class {
 async function main() {
   const port = parseInt(process.env.WS_PORT || "8765");
   const server = new WebBridgeMCPServer(port);
-  try {
-    await server.startWebSocket();
-    console.log(`WebSocket server started on port ${port}`);
-    await server.startMCP();
-  } catch (error2) {
-    console.error("Failed to start server:", error2);
-    process.exit(1);
-  }
+  await server.startMCP();
+  server.startWebSocketWithRetry().catch((error2) => {
+    console.error("WebSocket server failed to start:", error2);
+  });
   process.on("SIGINT", async () => {
     console.log("Shutting down...");
     await server.stop();

@@ -90,9 +90,18 @@ export class CommandHandler {
         await this.tabManager.closeTab(params.tabId);
         return { status: 'closed' };
 
-      case 'list_tabs':
-        const tabs = this.tabManager.listTabs();
-        return { tabs };
+      case 'list_tabs': {
+        // Query Chrome directly so we always see all open tabs
+        const allTabs = await chrome.tabs.query({});
+        return {
+          tabs: allTabs.map(t => ({
+            tabId: t.id,
+            url: t.url || '',
+            title: t.title || '',
+            active: t.active
+          }))
+        };
+      }
 
       // Recording
       case 'start_recording':

@@ -4,17 +4,13 @@ async function main() {
   const port = parseInt(process.env.WS_PORT || '8765');
   const server = new WebBridgeMCPServer(port);
 
-  try {
-    // Start WebSocket server
-    await server.startWebSocket();
-    console.log(`WebSocket server started on port ${port}`);
+  // Start MCP immediately — Claude Code needs this, shouldn't block on WebSocket
+  await server.startMCP();
 
-    // Start MCP server
-    await server.startMCP();
-  } catch (error) {
-    console.error('Failed to start server:', error);
-    process.exit(1);
-  }
+  // Start WebSocket with retry — port may be held by a stale process
+  server.startWebSocketWithRetry().catch((error) => {
+    console.error('WebSocket server failed to start:', error);
+  });
 
   // Handle shutdown
   process.on('SIGINT', async () => {

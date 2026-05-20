@@ -33,7 +33,29 @@ export class WebBridgeMCPServer {
 
   async startWebSocket(): Promise<void> {
     await this.wsServer.start();
+    this.setupHandlers();
+  }
 
+  async startWebSocketWithRetry(maxRetries: number = 10): Promise<void> {
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        await this.wsServer.start();
+        console.log(`WebSocket server started on port ${this.port}`);
+        this.setupHandlers();
+        return;
+      } catch (error: any) {
+        if (error.code === 'EADDRINUSE') {
+          console.error(`Port ${this.port} in use (attempt ${i + 1}/${maxRetries}), retrying in 3s...`);
+          await new Promise(resolve => setTimeout(resolve, 3000));
+        } else {
+          throw error;
+        }
+      }
+    }
+    throw new Error(`Failed to start WebSocket server after ${maxRetries} attempts`);
+  }
+
+  private setupHandlers(): void {
     // Handle responses from extension
     this.wsServer.on('response', (message: ResponseMessage) => {
       if (message.success) {
