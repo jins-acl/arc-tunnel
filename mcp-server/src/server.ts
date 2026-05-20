@@ -39,10 +39,11 @@ export class WebBridgeMCPServer {
       if (message.success) {
         this.commandQueue.resolveCommand(message.id, message.result);
       } else {
-        this.commandQueue.rejectCommand(
-          message.id,
-          new Error(message.error?.message || 'Unknown error')
-        );
+        const error = new Error(message.error?.message || 'Unknown error');
+        if (message.error?.code) {
+          (error as any).code = message.error.code;
+        }
+        this.commandQueue.rejectCommand(message.id, error);
       }
     });
 
@@ -106,12 +107,16 @@ export class WebBridgeMCPServer {
         }]
       };
     } catch (error: any) {
+      const errorResponse: { error: string; code?: string } = {
+        error: error.message
+      };
+      if (error.code) {
+        errorResponse.code = error.code;
+      }
       return {
         content: [{
           type: 'text',
-          text: JSON.stringify({
-            error: error.message
-          })
+          text: JSON.stringify(errorResponse)
         }],
         isError: true
       };
