@@ -30,8 +30,7 @@ async function initialize() {
     console.log('Web Bridge extension initialized');
   } catch (error) {
     console.error('Failed to connect to MCP server:', error);
-    // Retry after delay
-    setTimeout(initialize, 5000);
+    // Reconnection is handled by WebSocketClient exponential backoff
   }
 }
 
@@ -40,6 +39,14 @@ wsClient.onCommand(async (command: CommandMessage) => {
   console.log('Received command:', command.command);
   const response = await commandHandler.handleCommand(command);
   wsClient.sendResponse(response);
+});
+
+// Respond to popup status queries
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === 'get_status') {
+    sendResponse({ connected: wsClient.isConnected() });
+    return true; // Keep channel open for async response
+  }
 });
 
 // Keep service worker alive

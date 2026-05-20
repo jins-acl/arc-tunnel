@@ -104,8 +104,17 @@ export class CommandHandler {
         return { recording };
 
       case 'replay_recording':
-        await this.playbackEngine.replay(params.recordingId, params.tabId);
-        return { status: 'replayed' };
+        let replayTabId = params.tabId;
+        if (replayTabId == null) {
+          const tabs = this.tabManager.listTabs();
+          if (tabs.length > 0) {
+            replayTabId = tabs[0].id;
+          } else {
+            replayTabId = await this.tabManager.createTab();
+          }
+        }
+        await this.playbackEngine.replay(params.recordingId, replayTabId);
+        return { status: 'replayed', tabId: replayTabId };
 
       // Session
       case 'save_session':

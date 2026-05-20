@@ -18,10 +18,11 @@ export class DebuggerController {
   }
 
   async click(tabId: number, selector: string): Promise<void> {
+    const safeSelector = JSON.stringify(selector);
     const script = `
       (function() {
-        const element = document.querySelector('${selector.replace(/'/g, "\\'")}');
-        if (!element) throw new Error('Element not found: ${selector.replace(/'/g, "\\'")}');
+        const element = document.querySelector(${safeSelector});
+        if (!element) throw new Error('Element not found: ' + ${safeSelector});
         element.scrollIntoView({ behavior: 'instant', block: 'center' });
         element.click();
         return true;
@@ -31,14 +32,14 @@ export class DebuggerController {
   }
 
   async type(tabId: number, selector: string, text: string): Promise<void> {
-    const escapedSelector = selector.replace(/'/g, "\\'");
-    const escapedText = text.replace(/'/g, "\\'");
+    const safeSelector = JSON.stringify(selector);
+    const safeText = JSON.stringify(text);
     const script = `
       (function() {
-        const element = document.querySelector('${escapedSelector}');
-        if (!element) throw new Error('Element not found: ${escapedSelector}');
+        const element = document.querySelector(${safeSelector});
+        if (!element) throw new Error('Element not found: ' + ${safeSelector});
         element.focus();
-        element.value = '${escapedText}';
+        element.value = ${safeText};
         element.dispatchEvent(new Event('input', { bubbles: true }));
         element.dispatchEvent(new Event('change', { bubbles: true }));
         return true;
@@ -128,9 +129,10 @@ export class DebuggerController {
   }
 
   async waitForElement(tabId: number, selector: string, timeout: number = 10000): Promise<boolean> {
+    const safeSelector = JSON.stringify(selector);
     const script = `
       (function() {
-        var el = document.querySelector('${selector.replace(/'/g, "\\'")}');
+        var el = document.querySelector(${safeSelector});
         return el !== null;
       })()
     `;

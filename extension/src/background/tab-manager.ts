@@ -16,7 +16,25 @@ export class TabManager {
         debuggerAttached: true
       });
       console.log(`Debugger attached to tab ${tabId}`);
-    } catch (error) {
+    } catch (error: any) {
+      // If debugger is already attached (e.g. after service worker restart),
+      // update internal state map instead of erroring
+      if (error?.message?.includes('already attached')) {
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          this.tabs.set(tabId, {
+            id: tabId,
+            url: tab.url || '',
+            title: tab.title || '',
+            debuggerAttached: true
+          });
+          console.log(`Debugger already attached to tab ${tabId}, state restored`);
+          return;
+        } catch (tabError) {
+          console.error(`Failed to get tab info for tab ${tabId}:`, tabError);
+          throw tabError;
+        }
+      }
       console.error(`Failed to attach debugger to tab ${tabId}:`, error);
       throw error;
     }
