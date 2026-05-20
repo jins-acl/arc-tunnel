@@ -95,7 +95,7 @@ export class WebBridgeMCPServer {
   }
 
   private async handleToolCall(request: any): Promise<any> {
-    const { name, arguments: params } = request.params;
+    const { name, arguments: args } = request.params;
 
     if (!this.wsServer.isConnected()) {
       return {
@@ -114,7 +114,7 @@ export class WebBridgeMCPServer {
         id: commandId,
         type: 'command',
         command: name,
-        params,
+        params: args,
         timeout: 30000
       };
 

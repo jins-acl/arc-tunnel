@@ -1,5 +1,8 @@
 // Web Bridge Content Script
-// This script is injected into every page for enhanced DOM access.
-// Currently a placeholder for future smart element selection and DOM inspection features.
+// Placeholder for future smart element selection and DOM inspection features.
+// NOTE: Injected into every page (manifest.json matches <all_urls>).
+// While this adds negligible overhead, remove from manifest.json if not needed.
 
-console.log('Web Bridge content script loaded');
+(() => {
+  // Future: DOM inspection, smart selector generation, recording event capture
+})();

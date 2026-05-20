@@ -8,7 +8,6 @@
   // src/content/content-script.ts
   var require_content_script = __commonJS({
     "src/content/content-script.ts"() {
-      console.log("Web Bridge content script loaded");
     }
   });
   require_content_script();

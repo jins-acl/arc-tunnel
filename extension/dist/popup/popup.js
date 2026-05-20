@@ -8,30 +8,30 @@
   // src/popup/popup.ts
   var require_popup = __commonJS({
     "src/popup/popup.ts"() {
-      document.addEventListener("DOMContentLoaded", () => {
-        const statusEl = document.getElementById("status");
-        if (!statusEl) return;
-        statusEl.textContent = "Status: Checking...";
-        statusEl.className = "status disconnected";
+      function checkStatus(statusEl) {
         try {
           chrome.runtime.sendMessage({ type: "get_status" }, (response) => {
-            if (chrome.runtime.lastError) {
+            if (chrome.runtime.lastError || !response || !response.connected) {
               statusEl.textContent = "Status: Disconnected";
               statusEl.className = "status disconnected";
-              return;
-            }
-            if (response && response.connected) {
+            } else {
               statusEl.textContent = "Status: Connected";
               statusEl.className = "status connected";
-            } else {
-              statusEl.textContent = "Status: Disconnected";
-              statusEl.className = "status disconnected";
             }
           });
         } catch (e) {
           statusEl.textContent = "Status: Disconnected";
           statusEl.className = "status disconnected";
         }
+      }
+      document.addEventListener("DOMContentLoaded", () => {
+        const statusEl = document.getElementById("status");
+        if (!statusEl) return;
+        statusEl.textContent = "Status: Checking...";
+        statusEl.className = "status disconnected";
+        checkStatus(statusEl);
+        const interval = setInterval(() => checkStatus(statusEl), 3e3);
+        window.addEventListener("unload", () => clearInterval(interval));
       });
     }
   });

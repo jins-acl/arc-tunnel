@@ -3,7 +3,6 @@ import { TabInfo } from '../types';
 
 export class TabManager {
   private tabs: Map<number, TabInfo> = new Map();
-  private activeTabId: number | null = null;
   private listenersSetup = false;
 
   async syncExistingTabs(): Promise<void> {

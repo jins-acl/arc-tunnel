@@ -8,4 +8,4 @@ esbuild.build({
   outfile: 'dist/mcp-server.js',
   sourcemap: true
   // All deps bundled - no npm needed at runtime
-}).catch(() => process.exit(1));
+}).catch((err) => { console.error('Build failed:', err); process.exit(1); });

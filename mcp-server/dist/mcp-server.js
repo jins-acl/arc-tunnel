@@ -19369,7 +19369,8 @@ function getToolDefinitions() {
       inputSchema: {
         type: "object",
         properties: {
-          recordingId: { type: "string", description: "Recording ID" }
+          recordingId: { type: "string", description: "Recording ID" },
+          tabId: { type: "number", description: "Tab to replay in (auto-selects if omitted)" }
         },
         required: ["recordingId"]
       }
@@ -19471,7 +19472,7 @@ var WebBridgeMCPServer = class {
     console.log("MCP server started on stdio");
   }
   async handleToolCall(request) {
-    const { name, arguments: params } = request.params;
+    const { name, arguments: args } = request.params;
     if (!this.wsServer.isConnected()) {
       return {
         content: [{
@@ -19488,7 +19489,7 @@ var WebBridgeMCPServer = class {
         id: commandId,
         type: "command",
         command: name,
-        params,
+        params: args,
         timeout: 3e4
       };
       this.wsServer.sendCommand(command);
