@@ -176,4 +176,20 @@ export class DebuggerController {
     }
     return false;
   }
+
+  async addBinding(tabId: number, name: string): Promise<void> {
+    await this.sendCommand(tabId, 'Runtime.addBinding', { name });
+  }
+
+  async removeBinding(tabId: number, name: string): Promise<void> {
+    try {
+      await this.sendCommand(tabId, 'Runtime.removeBinding', { name });
+    } catch {
+      // Binding may already be removed — ignore
+    }
+  }
+
+  async addScriptOnNewDocument(tabId: number, script: string): Promise<void> {
+    await this.sendCommand(tabId, 'Page.addScriptToEvaluateOnNewDocument', { source: script });
+  }
 }

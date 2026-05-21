@@ -12,7 +12,7 @@ import { CommandMessage } from '../types';
 const wsClient = new WebSocketClient('ws://localhost:8765');
 const tabManager = new TabManager();
 const debuggerController = new DebuggerController();
-const recordingEngine = new RecordingEngine();
+const recordingEngine = new RecordingEngine(debuggerController);
 const playbackEngine = new PlaybackEngine(debuggerController);
 const sessionManager = new SessionManager();
 const commandHandler = new CommandHandler(

@@ -105,10 +105,13 @@ export class CommandHandler {
 
       // Recording
       case 'start_recording':
+        await this.ensureDebuggerAttached(params.tabId);
         const recordingId = await this.recordingEngine.startRecording(params.tabId);
+        await this.recordingEngine.injectListeners(params.tabId);
         return { recordingId };
 
       case 'stop_recording':
+        await this.recordingEngine.removeListeners();
         const recording = await this.recordingEngine.stopRecording();
         return { recording };
 
