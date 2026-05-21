@@ -490,6 +490,7 @@ var init_recording_engine = __esm({
         this.recordingTabId = tabId;
         await this.debuggerController.addBinding(tabId, "__web_bridge_record");
         await this.debuggerController.addScriptOnNewDocument(tabId, LISTENER_SCRIPT);
+        await this.debuggerController.executeScript(tabId, LISTENER_SCRIPT);
         await this.debuggerController.sendCommand(tabId, "Page.enable");
         this.cdpEventHandler = (source, method, params) => {
           if (method === "Runtime.bindingCalled" && params?.name === "__web_bridge_record") {

@@ -90,8 +90,12 @@ export class RecordingEngine {
     //         CDP emits Runtime.bindingCalled → chrome.debugger.onEvent
     await this.debuggerController.addBinding(tabId, '__web_bridge_record');
 
-    // Step 2: Inject listener script that persists across page loads
+    // Step 2: Inject listener script for future page loads
     await this.debuggerController.addScriptOnNewDocument(tabId, LISTENER_SCRIPT);
+
+    // Step 2b: Also run on the already-loaded page (addScriptOnNewDocument
+    // only affects subsequent loads, not the current document)
+    await this.debuggerController.executeScript(tabId, LISTENER_SCRIPT);
 
     // Step 3: Enable Page domain for frame navigated events
     await this.debuggerController.sendCommand(tabId, 'Page.enable');
