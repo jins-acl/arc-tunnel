@@ -23,7 +23,7 @@ const LISTENER_SCRIPT = `
   // Click capture
   document.addEventListener('click', function(e) {
     var el = e.target;
-    window.__web_bridge_record({
+    window.__web_bridge_record(JSON.stringify({
       type: 'click',
       timestamp: Date.now(),
       tabId: 0,
@@ -36,7 +36,7 @@ const LISTENER_SCRIPT = `
         x: e.clientX,
         y: e.clientY
       }
-    });
+    }));
   }, true);
 
   // Input debounced capture (trailing-edge, 500ms)
@@ -47,14 +47,14 @@ const LISTENER_SCRIPT = `
     if (inputTimers.has(el)) clearTimeout(inputTimers.get(el));
     inputTimers.set(el, setTimeout(function() {
       inputTimers.delete(el);
-      window.__web_bridge_record({
+      window.__web_bridge_record(JSON.stringify({
         type: 'type',
         timestamp: Date.now(),
         tabId: 0,
         pageUrl: location.href,
         target: { primary: buildSelector(el) },
         text: el.value || el.textContent || ''
-      });
+      }));
     }, 500));
   }, true);
 })();
