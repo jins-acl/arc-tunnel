@@ -124,8 +124,8 @@ export class ArcTunnelMCPServer {
       // Send command to extension
       this.wsServer.sendCommand(command);
 
-      // Wait for response
-      const result = await this.commandQueue.addCommand(commandId, 30000);
+      // Wait for response (respect per-message timeout if provided)
+      const result = await this.commandQueue.addCommand(commandId, command.timeout || 30000);
 
       return {
         content: [{

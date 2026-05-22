@@ -4,14 +4,16 @@ async function main() {
   const port = parseInt(process.env.WS_PORT || '8765');
   const server = new ArcTunnelMCPServer(port);
 
-  // Start MCP immediately — Claude Code needs this, shouldn't block on WebSocket
-  await server.startMCP();
-
-  // Start WebSocket with retry — port may be held by a stale process
-  server.startWebSocketWithRetry().catch((error) => {
+  // Start WebSocket first so it's ready before MCP receives tool calls
+  try {
+    await server.startWebSocketWithRetry();
+  } catch (error: any) {
     console.error('WebSocket server failed to start:', error.message);
-    // Keep process alive — MCP stdio is still functional
-  });
+    // Continue — MCP stdio can still report the connection error to the agent
+  }
+
+  // Start MCP after WebSocket is listening — Claude Code needs stdio initialize
+  await server.startMCP();
 
   // Handle graceful shutdown
   const shutdown = async (signal: string) => {

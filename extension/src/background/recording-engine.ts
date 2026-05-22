@@ -1,27 +1,15 @@
 // extension/src/background/recording-engine.ts
 import { Recording, Action } from '../types';
 import { DebuggerController } from './debugger-controller';
+import { BUILD_SELECTOR_SCRIPT } from '../shared/selector-builder';
 
-// Injected into every page load via Page.addScriptToEvaluateOnNewDocument
+// Injected into every page load via executeScript
 const LISTENER_SCRIPT = `
 (function() {
   if (window.__arc_tunnel_listeners_installed) return;
   window.__arc_tunnel_listeners_installed = true;
 
-  function buildSelector(el) {
-    if (el.id && !/^\\d/.test(el.id) && el.id.length < 36) return '#' + CSS.escape(el.id);
-    var path = [];
-    while (el && el.nodeType === 1 && path.length < 5) {
-      var tag = el.tagName.toLowerCase();
-      if (el.className && typeof el.className === 'string') {
-        var classes = el.className.trim().split(/\\s+/).slice(0, 3);
-        if (classes.length) tag += '.' + classes.map(function(c) { return CSS.escape(c); }).join('.');
-      }
-      path.unshift(tag);
-      el = el.parentElement;
-    }
-    return path.join(' > ');
-  }
+  ${BUILD_SELECTOR_SCRIPT}
 
   // Click capture
   document.addEventListener('click', function(e) {

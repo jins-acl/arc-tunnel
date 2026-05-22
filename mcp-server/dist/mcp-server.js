@@ -19115,7 +19115,25 @@ var WebSocketServer2 = class extends import_events.EventEmitter {
             console.error("Failed to parse message:", error2);
           }
         });
+        let pongTimeout = null;
+        const pingInterval = setInterval(() => {
+          if (ws.readyState === import_websocket.default.OPEN) {
+            ws.ping();
+            pongTimeout = setTimeout(() => {
+              console.log(`Extension heartbeat timeout (id=${id}), terminating`);
+              ws.terminate();
+            }, 1e4);
+          }
+        }, 3e4);
+        ws.on("pong", () => {
+          if (pongTimeout) {
+            clearTimeout(pongTimeout);
+            pongTimeout = null;
+          }
+        });
         ws.on("close", () => {
+          clearInterval(pingInterval);
+          if (pongTimeout) clearTimeout(pongTimeout);
           if (this.activeConnectionId === id) {
             console.log(`Extension disconnected (id=${id})`);
             this.extensionConnection = null;
@@ -19493,7 +19511,7 @@ var ArcTunnelMCPServer = class {
         timeout: 3e4
       };
       this.wsServer.sendCommand(command);
-      const result = await this.commandQueue.addCommand(commandId, 3e4);
+      const result = await this.commandQueue.addCommand(commandId, command.timeout || 3e4);
       return {
         content: [{
           type: "text",
@@ -19529,10 +19547,12 @@ var ArcTunnelMCPServer = class {
 async function main() {
   const port = parseInt(process.env.WS_PORT || "8765");
   const server = new ArcTunnelMCPServer(port);
-  await server.startMCP();
-  server.startWebSocketWithRetry().catch((error2) => {
+  try {
+    await server.startWebSocketWithRetry();
+  } catch (error2) {
     console.error("WebSocket server failed to start:", error2.message);
-  });
+  }
+  await server.startMCP();
   const shutdown = async (signal) => {
     console.log(`${signal} received, shutting down...`);
     await server.stop();

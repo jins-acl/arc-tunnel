@@ -251,6 +251,9 @@ var init_debugger_controller = __esm({
   "src/background/debugger-controller.ts"() {
     "use strict";
     DebuggerController = class {
+      constructor() {
+        this.pageEnabledTabs = /* @__PURE__ */ new Set();
+      }
       async sendCommand(tabId, method, params) {
         return new Promise((resolve, reject) => {
           chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
@@ -263,8 +266,11 @@ var init_debugger_controller = __esm({
         });
       }
       async navigate(tabId, url) {
+        if (!this.pageEnabledTabs.has(tabId)) {
+          await this.sendCommand(tabId, "Page.enable");
+          this.pageEnabledTabs.add(tabId);
+        }
         await this.sendCommand(tabId, "Page.navigate", { url });
-        await this.sendCommand(tabId, "Page.enable");
       }
       async click(tabId, selector) {
         const safeSelector = JSON.stringify(selector);
@@ -333,7 +339,7 @@ var init_debugger_controller = __esm({
           return {
             title: document.title,
             url: window.location.href,
-            text: document.body ? document.body.innerText.substring(0, 2000) : '',
+            text: document.body ? document.body.innerText.substring(0, 50000) : '',
             links: Array.from(document.querySelectorAll('a')).slice(0, 50).map(function(a) {
               return { text: (a.textContent || '').trim().substring(0, 100), href: a.href || '' };
             }),
@@ -412,30 +418,42 @@ var init_debugger_controller = __esm({
   }
 });
 
+// src/shared/selector-builder.ts
+var BUILD_SELECTOR_SCRIPT;
+var init_selector_builder = __esm({
+  "src/shared/selector-builder.ts"() {
+    "use strict";
+    BUILD_SELECTOR_SCRIPT = `
+function buildSelector(el) {
+  if (el.id && !/^\\d/.test(el.id) && el.id.length < 36) return '#' + CSS.escape(el.id);
+  var path = [];
+  while (el && el.nodeType === 1 && path.length < 5) {
+    var tag = el.tagName.toLowerCase();
+    if (el.className && typeof el.className === 'string') {
+      var classes = el.className.trim().split(/\\s+/).slice(0, 3);
+      if (classes.length) tag += '.' + classes.map(function(c) { return CSS.escape(c); }).join('.');
+    }
+    path.unshift(tag);
+    el = el.parentElement;
+  }
+  return path.join(' > ');
+}
+`;
+  }
+});
+
 // src/background/recording-engine.ts
 var LISTENER_SCRIPT, RecordingEngine;
 var init_recording_engine = __esm({
   "src/background/recording-engine.ts"() {
     "use strict";
+    init_selector_builder();
     LISTENER_SCRIPT = `
 (function() {
   if (window.__arc_tunnel_listeners_installed) return;
   window.__arc_tunnel_listeners_installed = true;
 
-  function buildSelector(el) {
-    if (el.id && !/^\\d/.test(el.id) && el.id.length < 36) return '#' + CSS.escape(el.id);
-    var path = [];
-    while (el && el.nodeType === 1 && path.length < 5) {
-      var tag = el.tagName.toLowerCase();
-      if (el.className && typeof el.className === 'string') {
-        var classes = el.className.trim().split(/\\s+/).slice(0, 3);
-        if (classes.length) tag += '.' + classes.map(function(c) { return CSS.escape(c); }).join('.');
-      }
-      path.unshift(tag);
-      el = el.parentElement;
-    }
-    return path.join(' > ');
-  }
+  ${BUILD_SELECTOR_SCRIPT}
 
   // Click capture
   document.addEventListener('click', function(e) {
@@ -830,11 +848,16 @@ var init_command_handler = __esm({
             };
           }
           // Recording
-          case "start_recording":
+          case "start_recording": {
+            const tabs = await chrome.tabs.query({});
+            if (!tabs.some((t) => t.id === params.tabId)) {
+              throw new Error(`Tab ${params.tabId} not found`);
+            }
             await this.ensureDebuggerAttached(params.tabId);
             const recordingId = await this.recordingEngine.startRecording(params.tabId);
             await this.recordingEngine.injectListeners(params.tabId);
             return { recordingId };
+          }
           case "stop_recording":
             await this.recordingEngine.removeListeners();
             const recording = await this.recordingEngine.stopRecording();

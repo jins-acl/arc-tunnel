@@ -44,7 +44,29 @@ export class WebSocketServer extends EventEmitter {
           }
         });
 
+          // Heartbeat: ping every 30s, terminate if no pong within 10s
+        let pongTimeout: NodeJS.Timeout | null = null;
+
+        const pingInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.ping();
+            pongTimeout = setTimeout(() => {
+              console.log(`Extension heartbeat timeout (id=${id}), terminating`);
+              ws.terminate();
+            }, 10000);
+          }
+        }, 30000);
+
+        ws.on('pong', () => {
+          if (pongTimeout) {
+            clearTimeout(pongTimeout);
+            pongTimeout = null;
+          }
+        });
+
         ws.on('close', () => {
+          clearInterval(pingInterval);
+          if (pongTimeout) clearTimeout(pongTimeout);
           // Only clear and emit disconnect if this is still the active connection
           if (this.activeConnectionId === id) {
             console.log(`Extension disconnected (id=${id})`);

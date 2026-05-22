@@ -1,7 +1,7 @@
-import { WebBridgeMCPServer } from '../src/server';
+import { ArcTunnelMCPServer } from '../src/server';
 
-describe('WebBridgeMCPServer', () => {
-  let server: WebBridgeMCPServer;
+describe('ArcTunnelMCPServer', () => {
+  let server: ArcTunnelMCPServer;
 
   afterEach(async () => {
     if (server) {
@@ -10,12 +10,12 @@ describe('WebBridgeMCPServer', () => {
   });
 
   it('should initialize server', () => {
-    server = new WebBridgeMCPServer(8767);
+    server = new ArcTunnelMCPServer(8767);
     expect(server).toBeDefined();
   });
 
   it('should start WebSocket server', async () => {
-    server = new WebBridgeMCPServer(8768);
+    server = new ArcTunnelMCPServer(8768);
     await server.startWebSocket();
     expect(server.isWebSocketRunning()).toBe(true);
   });

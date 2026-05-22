@@ -33,9 +33,14 @@ export class DebuggerController {
     });
   }
 
+  private pageEnabledTabs = new Set<number>();
+
   async navigate(tabId: number, url: string): Promise<void> {
+    if (!this.pageEnabledTabs.has(tabId)) {
+      await this.sendCommand(tabId, 'Page.enable');
+      this.pageEnabledTabs.add(tabId);
+    }
     await this.sendCommand(tabId, 'Page.navigate', { url });
-    await this.sendCommand(tabId, 'Page.enable');
   }
 
   async click(tabId: number, selector: string): Promise<void> {
@@ -111,7 +116,7 @@ export class DebuggerController {
           return {
             title: document.title,
             url: window.location.href,
-            text: document.body ? document.body.innerText.substring(0, 2000) : '',
+            text: document.body ? document.body.innerText.substring(0, 50000) : '',
             links: Array.from(document.querySelectorAll('a')).slice(0, 50).map(function(a) {
               return { text: (a.textContent || '').trim().substring(0, 100), href: a.href || '' };
             }),

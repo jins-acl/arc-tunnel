@@ -104,11 +104,16 @@ export class CommandHandler {
       }
 
       // Recording
-      case 'start_recording':
+      case 'start_recording': {
+        const tabs = await chrome.tabs.query({});
+        if (!tabs.some(t => t.id === params.tabId)) {
+          throw new Error(`Tab ${params.tabId} not found`);
+        }
         await this.ensureDebuggerAttached(params.tabId);
         const recordingId = await this.recordingEngine.startRecording(params.tabId);
         await this.recordingEngine.injectListeners(params.tabId);
         return { recordingId };
+      }
 
       case 'stop_recording':
         await this.recordingEngine.removeListeners();

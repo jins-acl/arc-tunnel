@@ -48,7 +48,7 @@ export interface Recording {
 }
 
 export interface Action {
-  type: 'navigate' | 'click' | 'type' | 'wait' | 'scroll' | 'keydown' | 'submit' | 'select' | 'drag';
+  type: 'navigate' | 'click' | 'type' | 'wait';
   timestamp: number;
   tabId?: number;
   pageUrl?: string;
@@ -67,12 +67,12 @@ export interface Action {
 
 export interface ElementTarget {
   primary: string;
-  fallbacks: string[];
+  fallbacks?: string[];
   visual?: {
     screenshot: string;
     boundingBox: BoundingBox;
   };
-  context: {
+  context?: {
     nearbyText: string;
     parentTag: string;
     role: string;
