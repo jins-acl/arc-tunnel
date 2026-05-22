@@ -10,22 +10,114 @@ export interface ToolDefinition {
 
 export function getToolDefinitions(): ToolDefinition[] {
   return [
-    // Navigation and interaction
+    // ─── New aggregated tools (Playwright-inspired) ───
+
     {
-      name: 'navigate',
-      description: 'Navigate to a URL in the specified tab',
+      name: 'snapshot',
+      description: 'Capture a lightweight accessibility snapshot of the page with ref-based element targeting. Returns a YAML tree of interactive elements (buttons, links, inputs) labeled with refs like e1, e2. Use these refs with the `interact` tool for precise, token-efficient element targeting.',
       inputSchema: {
         type: 'object',
         properties: {
           tabId: { type: 'number', description: 'Tab ID' },
-          url: { type: 'string', description: 'URL to navigate to' }
+          depth: { type: 'number', description: 'Max DOM traversal depth (default 10)' },
+          includeBoxes: { type: 'boolean', description: 'Include element bounding boxes in output' }
         },
-        required: ['tabId', 'url']
+        required: ['tabId']
       }
     },
     {
+      name: 'interact',
+      description: 'Perform mouse or keyboard interaction on a page element. Supports click, double_click, hover, type, press (keyboard key), check, uncheck. Target can be a CSS selector or a ref (e.g. "e15") from a snapshot.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          tabId: { type: 'number', description: 'Tab ID' },
+          action: {
+            type: 'string',
+            enum: ['click', 'double_click', 'hover', 'type', 'press', 'check', 'uncheck'],
+            description: 'Interaction type'
+          },
+          target: { type: 'string', description: 'CSS selector or ref (e.g. "e15") from snapshot' },
+          text: { type: 'string', description: 'Text to type (required when action=type)' },
+          key: { type: 'string', description: 'Key to press, e.g. "Enter", "Tab", "Escape" (required when action=press)' },
+          timeout: { type: 'number', description: 'Timeout in ms for waiting element to become actionable (default 5000)' }
+        },
+        required: ['tabId', 'action', 'target']
+      }
+    },
+    {
+      name: 'navigate',
+      description: 'Navigate the browser: goto a URL, go back, go forward, or reload the current page.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          tabId: { type: 'number', description: 'Tab ID' },
+          action: {
+            type: 'string',
+            enum: ['goto', 'go_back', 'go_forward', 'reload'],
+            description: 'Navigation action'
+          },
+          url: { type: 'string', description: 'URL to navigate to (required when action=goto)' }
+        },
+        required: ['tabId', 'action']
+      }
+    },
+    {
+      name: 'get_console_logs',
+      description: 'Retrieve captured browser console logs (info, warning, error) for the specified tab.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          tabId: { type: 'number', description: 'Tab ID' },
+          minLevel: {
+            type: 'string',
+            enum: ['info', 'warning', 'error'],
+            description: 'Minimum log level to include. Each level includes more severe levels. Defaults to all.'
+          }
+        },
+        required: ['tabId']
+      }
+    },
+    {
+      name: 'manage_storage',
+      description: 'Manage cookies, localStorage, or sessionStorage. Supports list, get, set, delete, clear actions.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          tabId: { type: 'number', description: 'Tab ID' },
+          type: {
+            type: 'string',
+            enum: ['cookie', 'local_storage', 'session_storage'],
+            description: 'Storage type'
+          },
+          action: {
+            type: 'string',
+            enum: ['list', 'get', 'set', 'delete', 'clear'],
+            description: 'Action to perform'
+          },
+          key: { type: 'string', description: 'Key name (for get/set/delete)' },
+          value: { type: 'string', description: 'Value to set (for set)' },
+          filterDomain: { type: 'string', description: 'Cookie domain filter (for cookie list)' },
+          options: {
+            type: 'object',
+            description: 'Cookie options: domain, path, secure, httpOnly',
+            properties: {
+              domain: { type: 'string' },
+              path: { type: 'string' },
+              secure: { type: 'boolean' },
+              httpOnly: { type: 'boolean' }
+            }
+          }
+        },
+        required: ['tabId', 'type', 'action']
+      }
+    },
+
+    // ─── Legacy tools (kept for backward compatibility) ───
+
+    {
       name: 'click',
-      description: 'Click an element in the specified tab',
+      description: '[Legacy] Click an element. Consider using `interact` with action="click" instead.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -37,7 +129,7 @@ export function getToolDefinitions(): ToolDefinition[] {
     },
     {
       name: 'type',
-      description: 'Type text into an element',
+      description: '[Legacy] Type text into an element. Consider using `interact` with action="type" instead.',
       inputSchema: {
         type: 'object',
         properties: {

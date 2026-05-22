@@ -5,15 +5,30 @@ import { DebuggerController } from './debugger-controller';
 import { RecordingEngine } from './recording-engine';
 import { PlaybackEngine } from './playback-engine';
 import { SessionManager } from './session-manager';
+import { SnapshotEngine } from './snapshot-engine';
+import { InputSimulator } from './input-simulator';
+import { ActionabilityChecker } from './actionability-checker';
+import { ConsoleCapture } from './console-capture';
+import { StorageManager } from './storage-manager';
 
 export class CommandHandler {
+  private snapshotEngine: SnapshotEngine;
+  private inputSimulator: InputSimulator;
+  private actionabilityChecker: ActionabilityChecker;
+
   constructor(
     private tabManager: TabManager,
     private debuggerController: DebuggerController,
     private recordingEngine: RecordingEngine,
     private playbackEngine: PlaybackEngine,
-    private sessionManager: SessionManager
-  ) {}
+    private sessionManager: SessionManager,
+    private consoleCapture: ConsoleCapture,
+    private storageManager: StorageManager
+  ) {
+    this.snapshotEngine = new SnapshotEngine(debuggerController);
+    this.inputSimulator = new InputSimulator(debuggerController);
+    this.actionabilityChecker = new ActionabilityChecker(debuggerController);
+  }
 
   async handleCommand(command: CommandMessage): Promise<ResponseMessage> {
     try {
@@ -41,38 +56,206 @@ export class CommandHandler {
     const { command: cmd, params } = command;
 
     switch (cmd) {
-      // Navigation and interaction
-      case 'navigate':
-        await this.ensureDebuggerAttached(params.tabId);
-        await this.debuggerController.navigate(params.tabId, params.url);
-        return { status: 'navigated', url: params.url };
+      // ─── New aggregated tools (Playwright-inspired) ───
 
-      case 'click':
+      case 'snapshot': {
         await this.ensureDebuggerAttached(params.tabId);
-        await this.debuggerController.click(params.tabId, params.selector);
+        const snapshot = await this.snapshotEngine.getSnapshot(
+          params.tabId,
+          params.depth,
+          params.includeBoxes
+        );
+        return { snapshot };
+      }
+
+      case 'interact': {
+        await this.ensureDebuggerAttached(params.tabId);
+        const target = params.target as string;
+        // Resolve ref if needed
+        const selector = target.startsWith('e') && /^e\d+$/.test(target)
+          ? (await this.resolveRef(params.tabId, target)) || target
+          : target;
+
+        await this.actionabilityChecker.waitForActionable(params.tabId, selector, params.timeout);
+
+        switch (params.action) {
+          case 'click':
+            await this.inputSimulator.dispatchClick(params.tabId, selector);
+            this.snapshotEngine.invalidateCache(params.tabId);
+            return { status: 'clicked', selector };
+          case 'double_click':
+            await this.inputSimulator.dispatchDoubleClick(params.tabId, selector);
+            this.snapshotEngine.invalidateCache(params.tabId);
+            return { status: 'double_clicked', selector };
+          case 'hover':
+            await this.inputSimulator.dispatchHover(params.tabId, selector);
+            return { status: 'hovered', selector };
+          case 'type':
+            if (!params.text) throw new Error('text is required for type action');
+            await this.inputSimulator.dispatchType(params.tabId, selector, params.text);
+            this.snapshotEngine.invalidateCache(params.tabId);
+            return { status: 'typed', selector, text: params.text };
+          case 'press':
+            if (!params.key) throw new Error('key is required for press action');
+            await this.inputSimulator.dispatchPress(params.tabId, params.key);
+            this.snapshotEngine.invalidateCache(params.tabId);
+            return { status: 'pressed', key: params.key };
+          case 'check':
+            await this.inputSimulator.dispatchCheck(params.tabId, selector, true);
+            this.snapshotEngine.invalidateCache(params.tabId);
+            return { status: 'checked', selector };
+          case 'uncheck':
+            await this.inputSimulator.dispatchCheck(params.tabId, selector, false);
+            this.snapshotEngine.invalidateCache(params.tabId);
+            return { status: 'unchecked', selector };
+          default:
+            throw new Error(`Unknown interact action: ${params.action}`);
+        }
+      }
+
+      case 'navigate': {
+        await this.ensureDebuggerAttached(params.tabId);
+        switch (params.action) {
+          case 'goto':
+            if (!params.url) throw new Error('url is required for goto action');
+            await this.debuggerController.navigate(params.tabId, params.url);
+            this.snapshotEngine.invalidateCache(params.tabId);
+            return { status: 'navigated', url: params.url };
+          case 'go_back': {
+            const history = await this.debuggerController.sendCommand(params.tabId, 'Page.getNavigationHistory');
+            if (history.currentIndex > 0) {
+              const entry = history.entries[history.currentIndex - 1];
+              await this.debuggerController.sendCommand(params.tabId, 'Page.navigateToHistoryEntry', { entryId: entry.id });
+              this.snapshotEngine.invalidateCache(params.tabId);
+              return { status: 'went_back', url: entry.url };
+            }
+            return { status: 'went_back', url: null };
+          }
+          case 'go_forward': {
+            const history = await this.debuggerController.sendCommand(params.tabId, 'Page.getNavigationHistory');
+            if (history.currentIndex < history.entries.length - 1) {
+              const entry = history.entries[history.currentIndex + 1];
+              await this.debuggerController.sendCommand(params.tabId, 'Page.navigateToHistoryEntry', { entryId: entry.id });
+              this.snapshotEngine.invalidateCache(params.tabId);
+              return { status: 'went_forward', url: entry.url };
+            }
+            return { status: 'went_forward', url: null };
+          }
+          case 'reload':
+            await this.debuggerController.sendCommand(params.tabId, 'Page.reload');
+            this.snapshotEngine.invalidateCache(params.tabId);
+            return { status: 'reloaded' };
+          default:
+            throw new Error(`Unknown navigate action: ${params.action}`);
+        }
+      }
+
+      case 'get_console_logs': {
+        await this.consoleCapture.enableForTab(params.tabId, this.debuggerController);
+        const logs = this.consoleCapture.getLogs(params.tabId, params.minLevel);
+        return { logs };
+      }
+
+      case 'manage_storage': {
+        const { type, action: storageAction } = params;
+        switch (type) {
+          case 'cookie': {
+            switch (storageAction) {
+              case 'list':
+                return { cookies: await this.storageManager.listCookies(params.tabId, params.filterDomain) };
+              case 'get':
+                return { cookie: await this.storageManager.getCookie(params.tabId, params.key) };
+              case 'set':
+                await this.storageManager.setCookie(params.tabId, params.key, params.value, params.options);
+                return { status: 'cookie_set' };
+              case 'delete':
+                await this.storageManager.deleteCookie(params.tabId, params.key);
+                return { status: 'cookie_deleted' };
+              case 'clear':
+                await this.storageManager.clearCookies(params.tabId);
+                return { status: 'cookies_cleared' };
+              default:
+                throw new Error(`Unknown cookie action: ${storageAction}`);
+            }
+          }
+          case 'local_storage': {
+            switch (storageAction) {
+              case 'list':
+                return { entries: await this.storageManager.listStorage(params.tabId, 'local') };
+              case 'get':
+                return { value: await this.storageManager.getStorageItem(params.tabId, 'local', params.key) };
+              case 'set':
+                await this.storageManager.setStorageItem(params.tabId, 'local', params.key, params.value);
+                return { status: 'local_storage_set' };
+              case 'delete':
+                await this.storageManager.deleteStorageItem(params.tabId, 'local', params.key);
+                return { status: 'local_storage_deleted' };
+              case 'clear':
+                await this.storageManager.clearStorage(params.tabId, 'local');
+                return { status: 'local_storage_cleared' };
+              default:
+                throw new Error(`Unknown local_storage action: ${storageAction}`);
+            }
+          }
+          case 'session_storage': {
+            switch (storageAction) {
+              case 'list':
+                return { entries: await this.storageManager.listStorage(params.tabId, 'session') };
+              case 'get':
+                return { value: await this.storageManager.getStorageItem(params.tabId, 'session', params.key) };
+              case 'set':
+                await this.storageManager.setStorageItem(params.tabId, 'session', params.key, params.value);
+                return { status: 'session_storage_set' };
+              case 'delete':
+                await this.storageManager.deleteStorageItem(params.tabId, 'session', params.key);
+                return { status: 'session_storage_deleted' };
+              case 'clear':
+                await this.storageManager.clearStorage(params.tabId, 'session');
+                return { status: 'session_storage_cleared' };
+              default:
+                throw new Error(`Unknown session_storage action: ${storageAction}`);
+            }
+          }
+          default:
+            throw new Error(`Unknown storage type: ${type}`);
+        }
+      }
+
+      // ─── Legacy tools (kept for backward compatibility) ───
+
+      case 'click': {
+        await this.ensureDebuggerAttached(params.tabId);
+        await this.actionabilityChecker.waitForActionable(params.tabId, params.selector);
+        await this.inputSimulator.dispatchClick(params.tabId, params.selector);
         return { status: 'clicked', selector: params.selector };
+      }
 
-      case 'type':
+      case 'type': {
         await this.ensureDebuggerAttached(params.tabId);
-        await this.debuggerController.type(params.tabId, params.selector, params.text);
+        await this.actionabilityChecker.waitForActionable(params.tabId, params.selector);
+        await this.inputSimulator.dispatchType(params.tabId, params.selector, params.text);
         return { status: 'typed', selector: params.selector };
+      }
 
-      case 'screenshot':
+      case 'screenshot': {
         await this.ensureDebuggerAttached(params.tabId);
         const screenshot = await this.debuggerController.screenshot(params.tabId, params.fullPage);
         return { screenshot };
+      }
 
-      case 'get_content':
+      case 'get_content': {
         await this.ensureDebuggerAttached(params.tabId);
         const content = await this.debuggerController.getContent(params.tabId, params.mode);
         return { content };
+      }
 
-      case 'execute_script':
+      case 'execute_script': {
         await this.ensureDebuggerAttached(params.tabId);
         const scriptResult = await this.debuggerController.executeScript(params.tabId, params.script);
         return { result: scriptResult };
+      }
 
-      case 'wait_for_element':
+      case 'wait_for_element': {
         await this.ensureDebuggerAttached(params.tabId);
         const found = await this.debuggerController.waitForElement(
           params.tabId,
@@ -80,18 +263,20 @@ export class CommandHandler {
           params.timeout || 10000
         );
         return { found, selector: params.selector };
+      }
 
       // Tab management
-      case 'create_tab':
+      case 'create_tab': {
         const tabId = await this.tabManager.createTab(params.url);
         return { tabId };
+      }
 
-      case 'close_tab':
+      case 'close_tab': {
         await this.tabManager.closeTab(params.tabId);
         return { status: 'closed' };
+      }
 
       case 'list_tabs': {
-        // Query Chrome directly so we always see all open tabs
         const allTabs = await chrome.tabs.query({});
         return {
           tabs: allTabs.map(t => ({
@@ -115,15 +300,15 @@ export class CommandHandler {
         return { recordingId };
       }
 
-      case 'stop_recording':
+      case 'stop_recording': {
         await this.recordingEngine.removeListeners();
         const recording = await this.recordingEngine.stopRecording();
         return { recording };
+      }
 
-      case 'replay_recording':
+      case 'replay_recording': {
         let replayTabId = params.tabId;
         if (replayTabId == null) {
-          // Query Chrome directly so we see all open tabs
           const allTabs = await chrome.tabs.query({});
           if (allTabs.length > 0) {
             replayTabId = allTabs[0].id;
@@ -133,15 +318,18 @@ export class CommandHandler {
         }
         await this.playbackEngine.replay(params.recordingId, replayTabId);
         return { status: 'replayed', tabId: replayTabId };
+      }
 
       // Session
-      case 'save_session':
+      case 'save_session': {
         const sessionId = await this.sessionManager.saveSession(params.name);
         return { sessionId };
+      }
 
-      case 'restore_session':
+      case 'restore_session': {
         await this.sessionManager.restoreSession(params.sessionId);
         return { status: 'restored' };
+      }
 
       default:
         throw new Error(`Unknown command: ${cmd}`);
@@ -151,6 +339,16 @@ export class CommandHandler {
   private async ensureDebuggerAttached(tabId: number): Promise<void> {
     if (!this.tabManager.isDebuggerAttached(tabId)) {
       await this.tabManager.attachDebugger(tabId);
+    }
+  }
+
+  private async resolveRef(tabId: number, ref: string): Promise<string | null> {
+    try {
+      // Use cached snapshot if available (getSnapshot with useCache=true)
+      const snapshot = await this.snapshotEngine.getSnapshot(tabId, 10, false, true);
+      return snapshot.refs[ref]?.selector || null;
+    } catch {
+      return null;
     }
   }
 }

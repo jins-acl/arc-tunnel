@@ -5,6 +5,8 @@ import { DebuggerController } from './debugger-controller';
 import { RecordingEngine } from './recording-engine';
 import { PlaybackEngine } from './playback-engine';
 import { SessionManager } from './session-manager';
+import { ConsoleCapture } from './console-capture';
+import { StorageManager } from './storage-manager';
 import { CommandHandler } from './command-handler';
 import { CommandMessage } from '../types';
 
@@ -18,12 +20,16 @@ const debuggerController = new DebuggerController();
 const recordingEngine = new RecordingEngine(debuggerController);
 const playbackEngine = new PlaybackEngine(debuggerController);
 const sessionManager = new SessionManager();
+const consoleCapture = new ConsoleCapture();
+const storageManager = new StorageManager();
 const commandHandler = new CommandHandler(
   tabManager,
   debuggerController,
   recordingEngine,
   playbackEngine,
-  sessionManager
+  sessionManager,
+  consoleCapture,
+  storageManager
 );
 
 // Load configuration from storage

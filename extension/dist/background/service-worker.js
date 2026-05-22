@@ -759,18 +759,512 @@ var init_session_manager = __esm({
   }
 });
 
+// src/background/console-capture.ts
+var ConsoleCapture;
+var init_console_capture = __esm({
+  "src/background/console-capture.ts"() {
+    "use strict";
+    ConsoleCapture = class {
+      constructor() {
+        this.logs = /* @__PURE__ */ new Map();
+        this.listeners = /* @__PURE__ */ new Map();
+      }
+      async enableForTab(tabId, debuggerController) {
+        if (this.listeners.has(tabId)) return;
+        if (debuggerController) {
+          try {
+            await debuggerController.sendCommand(tabId, "Runtime.enable");
+          } catch {
+          }
+        }
+        const handler = (source, method, params) => {
+          if (method === "Runtime.consoleAPICalled") {
+            const entry = {
+              level: params.type || "log",
+              text: params.args?.map((a) => a.value || a.description || "").join(" ") || "",
+              source: params.stackTrace?.callFrames?.[0]?.url || "",
+              line: params.stackTrace?.callFrames?.[0]?.lineNumber,
+              column: params.stackTrace?.callFrames?.[0]?.columnNumber,
+              timestamp: Date.now()
+            };
+            if (!this.logs.has(tabId)) {
+              this.logs.set(tabId, []);
+            }
+            this.logs.get(tabId).push(entry);
+            const tabLogs = this.logs.get(tabId);
+            if (tabLogs.length > 500) {
+              tabLogs.splice(0, tabLogs.length - 500);
+            }
+          }
+        };
+        chrome.debugger.onEvent.addListener(handler);
+        this.listeners.set(tabId, handler);
+      }
+      disableForTab(tabId) {
+        const handler = this.listeners.get(tabId);
+        if (handler) {
+          chrome.debugger.onEvent.removeListener(handler);
+          this.listeners.delete(tabId);
+        }
+        this.logs.delete(tabId);
+      }
+      getLogs(tabId, minLevel) {
+        const tabLogs = this.logs.get(tabId) || [];
+        if (!minLevel) return [...tabLogs];
+        const levels = ["debug", "info", "warning", "error"];
+        const minIdx = levels.indexOf(minLevel);
+        if (minIdx === -1) return [...tabLogs];
+        return tabLogs.filter((log) => levels.indexOf(log.level) >= minIdx);
+      }
+      clearLogs(tabId) {
+        this.logs.set(tabId, []);
+      }
+    };
+  }
+});
+
+// src/background/storage-manager.ts
+var StorageManager;
+var init_storage_manager = __esm({
+  "src/background/storage-manager.ts"() {
+    "use strict";
+    StorageManager = class {
+      // ─── Cookies ───
+      async listCookies(tabId, domain) {
+        const url = await this.getTabUrl(tabId);
+        const cookies = await chrome.cookies.getAll({ url, domain });
+        return cookies.map((c) => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path,
+          secure: c.secure,
+          httpOnly: c.httpOnly,
+          sameSite: c.sameSite
+        }));
+      }
+      async getCookie(tabId, name) {
+        const url = await this.getTabUrl(tabId);
+        const cookies = await chrome.cookies.getAll({ url, name });
+        if (cookies.length === 0) return null;
+        const c = cookies[0];
+        return {
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path,
+          secure: c.secure,
+          httpOnly: c.httpOnly,
+          sameSite: c.sameSite
+        };
+      }
+      async setCookie(tabId, name, value, options) {
+        const url = await this.getTabUrl(tabId);
+        const urlObj = new URL(url);
+        await chrome.cookies.set({
+          url,
+          name,
+          value,
+          domain: options?.domain || urlObj.hostname,
+          path: options?.path || "/",
+          secure: options?.secure ?? false,
+          httpOnly: options?.httpOnly ?? false
+        });
+      }
+      async deleteCookie(tabId, name) {
+        const url = await this.getTabUrl(tabId);
+        await chrome.cookies.remove({ url, name });
+      }
+      async clearCookies(tabId) {
+        const url = await this.getTabUrl(tabId);
+        const cookies = await chrome.cookies.getAll({ url });
+        for (const c of cookies) {
+          await chrome.cookies.remove({ url, name: c.name });
+        }
+      }
+      // ─── localStorage / sessionStorage ───
+      async listStorage(tabId, type) {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (storeType) => {
+            const store = storeType === "localStorage" ? localStorage : sessionStorage;
+            const result = {};
+            for (let i = 0; i < store.length; i++) {
+              const key = store.key(i);
+              if (key) result[key] = store.getItem(key) || "";
+            }
+            return result;
+          },
+          args: [type === "local" ? "localStorage" : "sessionStorage"]
+        });
+        return results[0]?.result || {};
+      }
+      async getStorageItem(tabId, type, key) {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (storeType, key2) => {
+            const store = storeType === "localStorage" ? localStorage : sessionStorage;
+            return store.getItem(key2);
+          },
+          args: [type === "local" ? "localStorage" : "sessionStorage", key]
+        });
+        return results[0]?.result ?? null;
+      }
+      async setStorageItem(tabId, type, key, value) {
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (storeType, key2, value2) => {
+            const store = storeType === "localStorage" ? localStorage : sessionStorage;
+            store.setItem(key2, value2);
+          },
+          args: [type === "local" ? "localStorage" : "sessionStorage", key, value]
+        });
+      }
+      async deleteStorageItem(tabId, type, key) {
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (storeType, key2) => {
+            const store = storeType === "localStorage" ? localStorage : sessionStorage;
+            store.removeItem(key2);
+          },
+          args: [type === "local" ? "localStorage" : "sessionStorage", key]
+        });
+      }
+      async clearStorage(tabId, type) {
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (storeType) => {
+            const store = storeType === "localStorage" ? localStorage : sessionStorage;
+            store.clear();
+          },
+          args: [type === "local" ? "localStorage" : "sessionStorage"]
+        });
+      }
+      async getTabUrl(tabId) {
+        const tab = await chrome.tabs.get(tabId);
+        return tab.url || "";
+      }
+    };
+  }
+});
+
+// src/background/snapshot-engine.ts
+var SnapshotEngine;
+var init_snapshot_engine = __esm({
+  "src/background/snapshot-engine.ts"() {
+    "use strict";
+    SnapshotEngine = class {
+      constructor(debuggerController) {
+        this.cache = /* @__PURE__ */ new Map();
+        this.CACHE_TTL_MS = 5e3;
+        this.debuggerController = debuggerController;
+      }
+      async getSnapshot(tabId, depth = 10, includeBoxes = false, useCache = true) {
+        if (useCache) {
+          const cached = this.cache.get(tabId);
+          if (cached && Date.now() - cached.timestamp < this.CACHE_TTL_MS) {
+            return cached.snapshot;
+          }
+        }
+        const snapshot = await this._generateSnapshot(tabId, depth, includeBoxes);
+        this.cache.set(tabId, { snapshot, timestamp: Date.now() });
+        return snapshot;
+      }
+      invalidateCache(tabId) {
+        if (tabId !== void 0) {
+          this.cache.delete(tabId);
+        } else {
+          this.cache.clear();
+        }
+      }
+      async _generateSnapshot(tabId, depth = 10, includeBoxes = false) {
+        const script = `
+      (function() {
+        const MAX_DEPTH = ${depth};
+        const MAX_ELEMENTS = 100;
+        const refs = {};
+        let counter = 0;
+
+        function isInteractive(el) {
+          const tag = el.tagName.toLowerCase();
+          const role = el.getAttribute('role');
+          if (tag === 'button' || tag === 'a' || tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+          if (role === 'button' || role === 'link' || role === 'checkbox' || role === 'radio' || role === 'textbox' || role === 'combobox') return true;
+          if (el.onclick || el.getAttribute('onclick')) return true;
+          return false;
+        }
+
+        function getName(el) {
+          return (el.getAttribute('aria-label') ||
+                  el.getAttribute('title') ||
+                  el.getAttribute('placeholder') ||
+                  (el.textContent || '').trim()).substring(0, 100);
+        }
+
+        function getRole(el) {
+          return el.getAttribute('role') || el.tagName.toLowerCase();
+        }
+
+        function buildSelector(el) {
+          if (el.id && !/^\\d/.test(el.id) && el.id.length < 36) return '#' + CSS.escape(el.id);
+          const testId = el.getAttribute('data-testid');
+          if (testId) return '[data-testid="' + CSS.escape(testId) + '"]';
+          const path = [];
+          let curr = el;
+          while (curr && curr.nodeType === 1 && path.length < 5) {
+            let tag = curr.tagName.toLowerCase();
+            if (curr.className && typeof curr.className === 'string') {
+              const classes = curr.className.trim().split(/\\s+/).slice(0, 3);
+              if (classes.length) tag += '.' + classes.map(c => CSS.escape(c)).join('.');
+            }
+            path.unshift(tag);
+            curr = curr.parentElement;
+          }
+          return path.join(' > ');
+        }
+
+        function walk(el, depth) {
+          if (depth > MAX_DEPTH || counter >= MAX_ELEMENTS) return '';
+          const interactive = isInteractive(el);
+          let result = '';
+
+          if (interactive) {
+            counter++;
+            const ref = 'e' + counter;
+            const role = getRole(el);
+            const name = getName(el);
+            const selector = buildSelector(el);
+            const box = el.getBoundingClientRect();
+            refs[ref] = {
+              ref, role, name, selector,
+              box: { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), height: Math.round(box.height) }
+            };
+            result += '- [' + ref + '] ' + role + ': "' + name + '"\\n';
+          }
+
+          for (let child of el.children) {
+            const childResult = walk(child, depth + 1);
+            if (childResult) {
+              result += childResult;
+            }
+          }
+          return result;
+        }
+
+        const tree = walk(document.body, 0);
+        return {
+          url: window.location.href,
+          title: document.title,
+          tree,
+          refs
+        };
+      })()
+    `;
+        const result = await this.debuggerController.executeScript(tabId, script);
+        if (!result || typeof result !== "object") {
+          throw new Error("Failed to generate snapshot");
+        }
+        const snapshot = {
+          url: result.url || "",
+          title: result.title || "",
+          tree: result.tree || "",
+          refs: result.refs || {}
+        };
+        if (!includeBoxes) {
+          for (const key of Object.keys(snapshot.refs)) {
+            delete snapshot.refs[key].box;
+          }
+        }
+        return snapshot;
+      }
+      resolveRef(snapshot, ref) {
+        return snapshot.refs[ref]?.selector || null;
+      }
+    };
+  }
+});
+
+// src/background/input-simulator.ts
+var InputSimulator;
+var init_input_simulator = __esm({
+  "src/background/input-simulator.ts"() {
+    "use strict";
+    InputSimulator = class {
+      constructor(debuggerController) {
+        this.debuggerController = debuggerController;
+      }
+      async getElementCenter(tabId, selector) {
+        const safeSelector = JSON.stringify(selector);
+        const script = `
+      (function() {
+        const el = document.querySelector(${safeSelector});
+        if (!el) throw new Error('Element not found: ' + ${safeSelector});
+        const rect = el.getBoundingClientRect();
+        return {
+          x: rect.left + rect.width / 2 + window.scrollX,
+          y: rect.top + rect.height / 2 + window.scrollY
+        };
+      })()
+    `;
+        const result = await this.debuggerController.executeScript(tabId, script);
+        return { x: Math.round(result.x), y: Math.round(result.y) };
+      }
+      async dispatchClick(tabId, selector, doubleClick = false) {
+        const { x, y } = await this.getElementCenter(tabId, selector);
+        const clickCount = doubleClick ? 2 : 1;
+        await this.debuggerController.sendCommand(tabId, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x,
+          y
+        });
+        await this.debuggerController.sendCommand(tabId, "Input.dispatchMouseEvent", {
+          type: "mousePressed",
+          x,
+          y,
+          button: "left",
+          clickCount
+        });
+        await this.debuggerController.sendCommand(tabId, "Input.dispatchMouseEvent", {
+          type: "mouseReleased",
+          x,
+          y,
+          button: "left",
+          clickCount
+        });
+      }
+      async dispatchDoubleClick(tabId, selector) {
+        await this.dispatchClick(tabId, selector, true);
+      }
+      async dispatchHover(tabId, selector) {
+        const { x, y } = await this.getElementCenter(tabId, selector);
+        await this.debuggerController.sendCommand(tabId, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x,
+          y
+        });
+      }
+      async dispatchType(tabId, selector, text) {
+        const safeSelector = JSON.stringify(selector);
+        const focusScript = `
+      (function() {
+        const el = document.querySelector(${safeSelector});
+        if (!el) throw new Error('Element not found: ' + ${safeSelector});
+        el.focus();
+        return true;
+      })()
+    `;
+        await this.debuggerController.executeScript(tabId, focusScript);
+        for (const char of text) {
+          await this.debuggerController.sendCommand(tabId, "Input.dispatchKeyEvent", {
+            type: "keyDown",
+            text: char
+          });
+          await this.debuggerController.sendCommand(tabId, "Input.dispatchKeyEvent", {
+            type: "keyUp",
+            text: char
+          });
+        }
+      }
+      async dispatchPress(tabId, key) {
+        await this.debuggerController.sendCommand(tabId, "Input.dispatchKeyEvent", {
+          type: "keyDown",
+          key
+        });
+        await this.debuggerController.sendCommand(tabId, "Input.dispatchKeyEvent", {
+          type: "keyUp",
+          key
+        });
+      }
+      async dispatchCheck(tabId, selector, checked) {
+        const safeSelector = JSON.stringify(selector);
+        const script = `
+      (function() {
+        const el = document.querySelector(${safeSelector});
+        if (!el) throw new Error('Element not found: ' + ${safeSelector});
+        if (el.type !== 'checkbox' && el.type !== 'radio') {
+          throw new Error('Element is not a checkbox or radio: ' + ${safeSelector});
+        }
+        if (el.checked !== ${checked}) {
+          el.click();
+        }
+        return { checked: el.checked };
+      })()
+    `;
+        await this.debuggerController.executeScript(tabId, script);
+      }
+    };
+  }
+});
+
+// src/background/actionability-checker.ts
+var ActionabilityChecker;
+var init_actionability_checker = __esm({
+  "src/background/actionability-checker.ts"() {
+    "use strict";
+    ActionabilityChecker = class {
+      constructor(debuggerController) {
+        this.debuggerController = debuggerController;
+      }
+      async waitForActionable(tabId, selector, timeout = 5e3) {
+        const safeSelector = JSON.stringify(selector);
+        const script = `
+      (function() {
+        const el = document.querySelector(${safeSelector});
+        if (!el) return { state: 'not_found' };
+
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+
+        // Check visibility
+        if (style.display === 'none') return { state: 'hidden', reason: 'display:none' };
+        if (style.visibility === 'hidden') return { state: 'hidden', reason: 'visibility:hidden' };
+        if (rect.width === 0 || rect.height === 0) return { state: 'hidden', reason: 'zero size' };
+
+        // Check enabled
+        if ('disabled' in el && (el as HTMLInputElement).disabled) {
+          return { state: 'disabled' };
+        }
+
+        return { state: 'ready' };
+      })()
+    `;
+        const startTime = Date.now();
+        while (Date.now() - startTime < timeout) {
+          const result = await this.debuggerController.executeScript(tabId, script);
+          if (result && result.state === "ready") {
+            return;
+          }
+          if (result && result.state === "disabled") {
+            throw new Error(`Element ${selector} is disabled`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        throw new Error(`Element ${selector} did not become actionable within ${timeout}ms`);
+      }
+    };
+  }
+});
+
 // src/background/command-handler.ts
 var CommandHandler;
 var init_command_handler = __esm({
   "src/background/command-handler.ts"() {
     "use strict";
+    init_snapshot_engine();
+    init_input_simulator();
+    init_actionability_checker();
     CommandHandler = class {
-      constructor(tabManager, debuggerController, recordingEngine, playbackEngine, sessionManager) {
+      constructor(tabManager, debuggerController, recordingEngine, playbackEngine, sessionManager, consoleCapture, storageManager) {
         this.tabManager = tabManager;
         this.debuggerController = debuggerController;
         this.recordingEngine = recordingEngine;
         this.playbackEngine = playbackEngine;
         this.sessionManager = sessionManager;
+        this.consoleCapture = consoleCapture;
+        this.storageManager = storageManager;
+        this.snapshotEngine = new SnapshotEngine(debuggerController);
+        this.inputSimulator = new InputSimulator(debuggerController);
+        this.actionabilityChecker = new ActionabilityChecker(debuggerController);
       }
       async handleCommand(command) {
         try {
@@ -796,32 +1290,189 @@ var init_command_handler = __esm({
       async executeCommand(command) {
         const { command: cmd, params } = command;
         switch (cmd) {
-          // Navigation and interaction
-          case "navigate":
+          // ─── New aggregated tools (Playwright-inspired) ───
+          case "snapshot": {
             await this.ensureDebuggerAttached(params.tabId);
-            await this.debuggerController.navigate(params.tabId, params.url);
-            return { status: "navigated", url: params.url };
-          case "click":
+            const snapshot = await this.snapshotEngine.getSnapshot(
+              params.tabId,
+              params.depth,
+              params.includeBoxes
+            );
+            return { snapshot };
+          }
+          case "interact": {
             await this.ensureDebuggerAttached(params.tabId);
-            await this.debuggerController.click(params.tabId, params.selector);
+            const target = params.target;
+            const selector = target.startsWith("e") && /^e\d+$/.test(target) ? await this.resolveRef(params.tabId, target) || target : target;
+            await this.actionabilityChecker.waitForActionable(params.tabId, selector, params.timeout);
+            switch (params.action) {
+              case "click":
+                await this.inputSimulator.dispatchClick(params.tabId, selector);
+                this.snapshotEngine.invalidateCache(params.tabId);
+                return { status: "clicked", selector };
+              case "double_click":
+                await this.inputSimulator.dispatchDoubleClick(params.tabId, selector);
+                this.snapshotEngine.invalidateCache(params.tabId);
+                return { status: "double_clicked", selector };
+              case "hover":
+                await this.inputSimulator.dispatchHover(params.tabId, selector);
+                return { status: "hovered", selector };
+              case "type":
+                if (!params.text) throw new Error("text is required for type action");
+                await this.inputSimulator.dispatchType(params.tabId, selector, params.text);
+                this.snapshotEngine.invalidateCache(params.tabId);
+                return { status: "typed", selector, text: params.text };
+              case "press":
+                if (!params.key) throw new Error("key is required for press action");
+                await this.inputSimulator.dispatchPress(params.tabId, params.key);
+                this.snapshotEngine.invalidateCache(params.tabId);
+                return { status: "pressed", key: params.key };
+              case "check":
+                await this.inputSimulator.dispatchCheck(params.tabId, selector, true);
+                this.snapshotEngine.invalidateCache(params.tabId);
+                return { status: "checked", selector };
+              case "uncheck":
+                await this.inputSimulator.dispatchCheck(params.tabId, selector, false);
+                this.snapshotEngine.invalidateCache(params.tabId);
+                return { status: "unchecked", selector };
+              default:
+                throw new Error(`Unknown interact action: ${params.action}`);
+            }
+          }
+          case "navigate": {
+            await this.ensureDebuggerAttached(params.tabId);
+            switch (params.action) {
+              case "goto":
+                if (!params.url) throw new Error("url is required for goto action");
+                await this.debuggerController.navigate(params.tabId, params.url);
+                this.snapshotEngine.invalidateCache(params.tabId);
+                return { status: "navigated", url: params.url };
+              case "go_back": {
+                const history = await this.debuggerController.sendCommand(params.tabId, "Page.getNavigationHistory");
+                if (history.currentIndex > 0) {
+                  const entry = history.entries[history.currentIndex - 1];
+                  await this.debuggerController.sendCommand(params.tabId, "Page.navigateToHistoryEntry", { entryId: entry.id });
+                  this.snapshotEngine.invalidateCache(params.tabId);
+                  return { status: "went_back", url: entry.url };
+                }
+                return { status: "went_back", url: null };
+              }
+              case "go_forward": {
+                const history = await this.debuggerController.sendCommand(params.tabId, "Page.getNavigationHistory");
+                if (history.currentIndex < history.entries.length - 1) {
+                  const entry = history.entries[history.currentIndex + 1];
+                  await this.debuggerController.sendCommand(params.tabId, "Page.navigateToHistoryEntry", { entryId: entry.id });
+                  this.snapshotEngine.invalidateCache(params.tabId);
+                  return { status: "went_forward", url: entry.url };
+                }
+                return { status: "went_forward", url: null };
+              }
+              case "reload":
+                await this.debuggerController.sendCommand(params.tabId, "Page.reload");
+                this.snapshotEngine.invalidateCache(params.tabId);
+                return { status: "reloaded" };
+              default:
+                throw new Error(`Unknown navigate action: ${params.action}`);
+            }
+          }
+          case "get_console_logs": {
+            await this.consoleCapture.enableForTab(params.tabId, this.debuggerController);
+            const logs = this.consoleCapture.getLogs(params.tabId, params.minLevel);
+            return { logs };
+          }
+          case "manage_storage": {
+            const { type, action: storageAction } = params;
+            switch (type) {
+              case "cookie": {
+                switch (storageAction) {
+                  case "list":
+                    return { cookies: await this.storageManager.listCookies(params.tabId, params.filterDomain) };
+                  case "get":
+                    return { cookie: await this.storageManager.getCookie(params.tabId, params.key) };
+                  case "set":
+                    await this.storageManager.setCookie(params.tabId, params.key, params.value, params.options);
+                    return { status: "cookie_set" };
+                  case "delete":
+                    await this.storageManager.deleteCookie(params.tabId, params.key);
+                    return { status: "cookie_deleted" };
+                  case "clear":
+                    await this.storageManager.clearCookies(params.tabId);
+                    return { status: "cookies_cleared" };
+                  default:
+                    throw new Error(`Unknown cookie action: ${storageAction}`);
+                }
+              }
+              case "local_storage": {
+                switch (storageAction) {
+                  case "list":
+                    return { entries: await this.storageManager.listStorage(params.tabId, "local") };
+                  case "get":
+                    return { value: await this.storageManager.getStorageItem(params.tabId, "local", params.key) };
+                  case "set":
+                    await this.storageManager.setStorageItem(params.tabId, "local", params.key, params.value);
+                    return { status: "local_storage_set" };
+                  case "delete":
+                    await this.storageManager.deleteStorageItem(params.tabId, "local", params.key);
+                    return { status: "local_storage_deleted" };
+                  case "clear":
+                    await this.storageManager.clearStorage(params.tabId, "local");
+                    return { status: "local_storage_cleared" };
+                  default:
+                    throw new Error(`Unknown local_storage action: ${storageAction}`);
+                }
+              }
+              case "session_storage": {
+                switch (storageAction) {
+                  case "list":
+                    return { entries: await this.storageManager.listStorage(params.tabId, "session") };
+                  case "get":
+                    return { value: await this.storageManager.getStorageItem(params.tabId, "session", params.key) };
+                  case "set":
+                    await this.storageManager.setStorageItem(params.tabId, "session", params.key, params.value);
+                    return { status: "session_storage_set" };
+                  case "delete":
+                    await this.storageManager.deleteStorageItem(params.tabId, "session", params.key);
+                    return { status: "session_storage_deleted" };
+                  case "clear":
+                    await this.storageManager.clearStorage(params.tabId, "session");
+                    return { status: "session_storage_cleared" };
+                  default:
+                    throw new Error(`Unknown session_storage action: ${storageAction}`);
+                }
+              }
+              default:
+                throw new Error(`Unknown storage type: ${type}`);
+            }
+          }
+          // ─── Legacy tools (kept for backward compatibility) ───
+          case "click": {
+            await this.ensureDebuggerAttached(params.tabId);
+            await this.actionabilityChecker.waitForActionable(params.tabId, params.selector);
+            await this.inputSimulator.dispatchClick(params.tabId, params.selector);
             return { status: "clicked", selector: params.selector };
-          case "type":
+          }
+          case "type": {
             await this.ensureDebuggerAttached(params.tabId);
-            await this.debuggerController.type(params.tabId, params.selector, params.text);
+            await this.actionabilityChecker.waitForActionable(params.tabId, params.selector);
+            await this.inputSimulator.dispatchType(params.tabId, params.selector, params.text);
             return { status: "typed", selector: params.selector };
-          case "screenshot":
+          }
+          case "screenshot": {
             await this.ensureDebuggerAttached(params.tabId);
             const screenshot = await this.debuggerController.screenshot(params.tabId, params.fullPage);
             return { screenshot };
-          case "get_content":
+          }
+          case "get_content": {
             await this.ensureDebuggerAttached(params.tabId);
             const content = await this.debuggerController.getContent(params.tabId, params.mode);
             return { content };
-          case "execute_script":
+          }
+          case "execute_script": {
             await this.ensureDebuggerAttached(params.tabId);
             const scriptResult = await this.debuggerController.executeScript(params.tabId, params.script);
             return { result: scriptResult };
-          case "wait_for_element":
+          }
+          case "wait_for_element": {
             await this.ensureDebuggerAttached(params.tabId);
             const found = await this.debuggerController.waitForElement(
               params.tabId,
@@ -829,13 +1480,16 @@ var init_command_handler = __esm({
               params.timeout || 1e4
             );
             return { found, selector: params.selector };
+          }
           // Tab management
-          case "create_tab":
+          case "create_tab": {
             const tabId = await this.tabManager.createTab(params.url);
             return { tabId };
-          case "close_tab":
+          }
+          case "close_tab": {
             await this.tabManager.closeTab(params.tabId);
             return { status: "closed" };
+          }
           case "list_tabs": {
             const allTabs = await chrome.tabs.query({});
             return {
@@ -858,11 +1512,12 @@ var init_command_handler = __esm({
             await this.recordingEngine.injectListeners(params.tabId);
             return { recordingId };
           }
-          case "stop_recording":
+          case "stop_recording": {
             await this.recordingEngine.removeListeners();
             const recording = await this.recordingEngine.stopRecording();
             return { recording };
-          case "replay_recording":
+          }
+          case "replay_recording": {
             let replayTabId = params.tabId;
             if (replayTabId == null) {
               const allTabs = await chrome.tabs.query({});
@@ -874,13 +1529,16 @@ var init_command_handler = __esm({
             }
             await this.playbackEngine.replay(params.recordingId, replayTabId);
             return { status: "replayed", tabId: replayTabId };
+          }
           // Session
-          case "save_session":
+          case "save_session": {
             const sessionId = await this.sessionManager.saveSession(params.name);
             return { sessionId };
-          case "restore_session":
+          }
+          case "restore_session": {
             await this.sessionManager.restoreSession(params.sessionId);
             return { status: "restored" };
+          }
           default:
             throw new Error(`Unknown command: ${cmd}`);
         }
@@ -888,6 +1546,14 @@ var init_command_handler = __esm({
       async ensureDebuggerAttached(tabId) {
         if (!this.tabManager.isDebuggerAttached(tabId)) {
           await this.tabManager.attachDebugger(tabId);
+        }
+      }
+      async resolveRef(tabId, ref) {
+        try {
+          const snapshot = await this.snapshotEngine.getSnapshot(tabId, 10, false, true);
+          return snapshot.refs[ref]?.selector || null;
+        } catch {
+          return null;
         }
       }
     };
@@ -903,6 +1569,8 @@ var require_service_worker = __commonJS({
     init_recording_engine();
     init_playback_engine();
     init_session_manager();
+    init_console_capture();
+    init_storage_manager();
     init_command_handler();
     var DEFAULT_WS_URL = "ws://localhost:8765";
     var wsClient = new WebSocketClient();
@@ -911,12 +1579,16 @@ var require_service_worker = __commonJS({
     var recordingEngine = new RecordingEngine(debuggerController);
     var playbackEngine = new PlaybackEngine(debuggerController);
     var sessionManager = new SessionManager();
+    var consoleCapture = new ConsoleCapture();
+    var storageManager = new StorageManager();
     var commandHandler = new CommandHandler(
       tabManager,
       debuggerController,
       recordingEngine,
       playbackEngine,
-      sessionManager
+      sessionManager,
+      consoleCapture,
+      storageManager
     );
     async function loadConfig() {
       try {
