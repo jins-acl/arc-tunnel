@@ -1180,44 +1180,12 @@ var init_actionability_checker = __esm({
             const c = model.content;
             const width = Math.abs(c[2] - c[0]);
             const height = Math.abs(c[5] - c[1]);
-            if (width === 0 || height === 0) {
-              await new Promise((r) => setTimeout(r, 100));
-              continue;
-            }
-            const { nodeId } = await this.debuggerController.sendCommand(
-              tabId,
-              "DOM.requestNode",
-              { backendNodeId }
-            );
-            const { object } = await this.debuggerController.sendCommand(
-              tabId,
-              "DOM.resolveNode",
-              { nodeId }
-            );
-            const result = await this.debuggerController.sendCommand(tabId, "Runtime.callFunctionOn", {
-              objectId: object.objectId,
-              functionDeclaration: `function() {
-            const el = this;
-            if (el.disabled) return { state: 'disabled' };
-            const style = window.getComputedStyle(el);
-            if (style.display === 'none') return { state: 'hidden', reason: 'display:none' };
-            if (style.visibility === 'hidden') return { state: 'hidden', reason: 'visibility:hidden' };
-            const rect = el.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) return { state: 'hidden', reason: 'zero size' };
-            return { state: 'ready' };
-          }`,
-              returnByValue: true
-            });
-            const state = result.result?.value?.state;
-            if (state === "ready") {
+            if (width > 0 && height > 0) {
               return;
-            }
-            if (state === "disabled") {
-              throw new Error(`Element is disabled`);
             }
           } catch (err) {
             if (err.message?.includes("Could not find node")) {
-            } else if (err.message?.includes("disabled")) {
+            } else {
               throw err;
             }
           }
