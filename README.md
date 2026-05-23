@@ -142,9 +142,12 @@ cd extension && npm install && npm run build && cd ..
 
 | 类别 | 工具 |
 |------|------|
-| 导航操作 | `navigate`, `create_tab`, `close_tab`, `list_tabs` |
-| 交互操作 | `click`, `type`, `wait_for_element` |
-| 内容提取 | `get_content` (html/text/structured/markdown), `screenshot` |
+| 页面快照 | `snapshot` — 返回可交互元素 ref 列表（click/type/press 等） |
+| 交互操作 | `interact` — click, double_click, hover, type, press, check, uncheck |
+| 导航操作 | `navigate` — goto, go_back, go_forward, reload |
+| 浏览器控制 | `create_tab`, `close_tab`, `list_tabs` |
+| 内容提取 | `screenshot`, `get_console_logs` |
+| 存储管理 | `manage_storage` — cookies, localStorage, sessionStorage |
 | 脚本执行 | `execute_script` |
 | 录制回放 | `start_recording`, `stop_recording`, `replay_recording` |
 | 会话管理 | `save_session`, `restore_session` |
@@ -155,16 +158,16 @@ cd extension && npm install && npm run build && cd ..
 
 ```
 "帮我打开 GitHub 首页"
-→ AI 调用 navigate 工具
+→ AI 调用 snapshot → 看到页面元素 → interact click
 
 "搜索 react 项目"
-→ AI 调用 type + click
+→ AI 调用 snapshot → 看到搜索框 → interact type
 
 "截图"
 → AI 调用 screenshot 返回截图
 
-"获取页面的结构化内容"
-→ AI 调用 get_content(mode='structured')
+"获取页面可交互元素"
+→ AI 调用 snapshot 返回 ref 列表
 ```
 
 ### 录制回放
@@ -186,14 +189,26 @@ cd extension && npm install && npm run build && cd ..
 ### 工具速查
 
 ```typescript
-// 基础操作
-navigate({ tabId, url })
-click({ tabId, selector })
-type({ tabId, selector, text })
+// 页面快照 + 交互（Playwright-inspired 工作流）
+snapshot({ tabId })                  // 返回可交互元素 ref 列表
+interact({ tabId, action, target, text?, key? })
+  // action: 'click' | 'double_click' | 'hover' | 'type' | 'press' | 'check' | 'uncheck'
+  // target: ref from snapshot, e.g. "e15"
+
+// 导航
+navigate({ tabId, action, url? })    // action: 'goto' | 'go_back' | 'go_forward' | 'reload'
+
+// 内容提取
 screenshot({ tabId, fullPage? })
-get_content({ tabId, mode })         // html | text | structured | markdown
+get_console_logs({ tabId, minLevel? })  // minLevel: 'info' | 'warning' | 'error'
+
+// 存储管理
+manage_storage({ tabId, type, action, key?, value? })
+  // type: 'cookie' | 'local_storage' | 'session_storage'
+  // action: 'list' | 'get' | 'set' | 'delete' | 'clear'
+
+// 脚本执行
 execute_script({ tabId, script })
-wait_for_element({ tabId, selector, timeout? })
 
 // 标签页
 create_tab({ url? })
@@ -202,7 +217,7 @@ list_tabs()
 
 // 录制回放
 start_recording({ tabId })
-stop_recording({ tabId })
+stop_recording()
 replay_recording({ recordingId, tabId? })
 
 // 会话
@@ -273,14 +288,14 @@ git add mcp-server/dist/ extension/dist/
 ## 安全
 
 - WebSocket 仅监听 localhost，不暴露到网络
-- `JSON.stringify()` 防注入，所有用户输入安全编码
-- 扩展权限最小化（debugger, tabs, storage, cookies）
-- `get_content(html)` 返回原始 HTML（包含可见字段值及已填充的密码），调用者自行过滤敏感信息
+- 扩展权限最小化（debugger, tabs, storage, cookies, scripting）
 - `execute_script` 具有完整页面访问权限，仅在可信 AI 助手中使用
+- `snapshot` 仅返回可交互元素的 accessibility 信息（role/name/states），不暴露页面完整 DOM
 
 ## 版本
 
 - **v1.0** — 初始版本: 15 个 MCP 工具, CDP 控制, 录制回放, 会话管理
+- **v1.1** — 重构为 CDP Accessibility Tree + `backendNodeId` 定位, 新增 `snapshot` + `interact` 聚合工具, 移除 CSS selector 依赖
 
 ## License
 
