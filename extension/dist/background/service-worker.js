@@ -949,7 +949,7 @@ var init_storage_manager = __esm({
 });
 
 // src/background/snapshot-engine.ts
-var INTERACTIVE_ROLES, SnapshotEngine;
+var INTERACTIVE_ROLES, MAX_REFS, SnapshotEngine;
 var init_snapshot_engine = __esm({
   "src/background/snapshot-engine.ts"() {
     "use strict";
@@ -969,6 +969,7 @@ var init_snapshot_engine = __esm({
       "option",
       "menuitemcheckbox"
     ]);
+    MAX_REFS = 200;
     SnapshotEngine = class {
       constructor(debuggerController) {
         this.cache = /* @__PURE__ */ new Map();
@@ -1014,6 +1015,7 @@ var init_snapshot_engine = __esm({
           const backendNodeId = node.backendDOMNodeId;
           if (!backendNodeId) continue;
           counter++;
+          if (counter > MAX_REFS) break;
           const ref = `e${counter}`;
           const name = node.name?.value || "";
           const states = this._extractStates(node);
@@ -1325,8 +1327,10 @@ var init_command_handler = __esm({
               default:
                 throw new Error(`Unknown interact action: ${params.action}`);
             }
-            this.snapshotEngine.invalidateCache(params.tabId);
-            const pageSnapshot = await this.snapshotEngine.getSnapshot(params.tabId, false);
+            if (params.action !== "hover") {
+              this.snapshotEngine.invalidateCache(params.tabId);
+            }
+            const pageSnapshot = await this.snapshotEngine.getSnapshot(params.tabId, params.action === "hover");
             return { status: params.action, target, pageSnapshot };
           }
           case "navigate": {

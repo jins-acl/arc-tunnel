@@ -114,8 +114,11 @@ export class CommandHandler {
             throw new Error(`Unknown interact action: ${params.action}`);
         }
 
-        this.snapshotEngine.invalidateCache(params.tabId);
-        const pageSnapshot = await this.snapshotEngine.getSnapshot(params.tabId, false);
+        // Hover does not mutate the DOM — skip cache invalidation for efficiency
+        if (params.action !== 'hover') {
+          this.snapshotEngine.invalidateCache(params.tabId);
+        }
+        const pageSnapshot = await this.snapshotEngine.getSnapshot(params.tabId, params.action === 'hover');
         return { status: params.action, target, pageSnapshot };
       }
 

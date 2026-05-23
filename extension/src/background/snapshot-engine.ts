@@ -24,6 +24,8 @@ const INTERACTIVE_ROLES = new Set([
   'searchbox', 'spinbutton', 'option', 'menuitemcheckbox'
 ]);
 
+const MAX_REFS = 200; // Cap to prevent token explosion on complex SPAs
+
 export class SnapshotEngine {
   private debuggerController: DebuggerController;
   private cache: Map<number, { snapshot: PageSnapshot; timestamp: number }> = new Map();
@@ -84,6 +86,8 @@ export class SnapshotEngine {
       if (!backendNodeId) continue; // Skip nodes without a DOM backing
 
       counter++;
+      if (counter > MAX_REFS) break;
+
       const ref = `e${counter}`;
       const name = node.name?.value || '';
       const states = this._extractStates(node);
