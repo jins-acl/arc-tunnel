@@ -17,9 +17,11 @@ describe('MCP Tools', () => {
     expect(navigateTool?.inputSchema.properties).toHaveProperty('url');
   });
 
-  it('should include click tool', () => {
+  it('should include interact tool with click action', () => {
     const tools = getToolDefinitions();
-    const clickTool = tools.find(t => t.name === 'click');
-    expect(clickTool).toBeDefined();
+    const interactTool = tools.find(t => t.name === 'interact');
+    expect(interactTool).toBeDefined();
+    expect(interactTool?.inputSchema.properties).toHaveProperty('action');
+    expect(interactTool?.inputSchema.properties.action.enum).toContain('click');
   });
 });

@@ -1,5 +1,5 @@
 // extension/src/background/actionability-checker.ts
-// Wait for element to be actionable (attached, visible, stable, enabled)
+// Wait for element to be actionable using backendNodeId + CDP
 
 import { DebuggerController } from './debugger-controller';
 
@@ -10,42 +10,67 @@ export class ActionabilityChecker {
     this.debuggerController = debuggerController;
   }
 
-  async waitForActionable(tabId: number, selector: string, timeout = 5000): Promise<void> {
-    const safeSelector = JSON.stringify(selector);
-    const script = `
-      (function() {
-        const el = document.querySelector(${safeSelector});
-        if (!el) return { state: 'not_found' };
+  async waitForActionable(tabId: number, backendNodeId: number, timeout = 5000): Promise<void> {
+    const startTime = Date.now();
 
-        const style = window.getComputedStyle(el);
-        const rect = el.getBoundingClientRect();
+    while (Date.now() - startTime < timeout) {
+      try {
+        // 1. Check existence and size via DOM.getBoxModel
+        const { model } = await this.debuggerController.sendCommand(
+          tabId, 'DOM.getBoxModel', { backendNodeId }
+        ) as { model: { content: number[] } };
 
-        // Check visibility
-        if (style.display === 'none') return { state: 'hidden', reason: 'display:none' };
-        if (style.visibility === 'hidden') return { state: 'hidden', reason: 'visibility:hidden' };
-        if (rect.width === 0 || rect.height === 0) return { state: 'hidden', reason: 'zero size' };
-
-        // Check enabled
-        if ('disabled' in el && (el as HTMLInputElement).disabled) {
-          return { state: 'disabled' };
+        const c = model.content;
+        const width = Math.abs(c[2] - c[0]);
+        const height = Math.abs(c[5] - c[1]);
+        if (width === 0 || height === 0) {
+          await new Promise(r => setTimeout(r, 100));
+          continue;
         }
 
-        return { state: 'ready' };
-      })()
-    `;
+        // 2. Check enabled/visibility state via Runtime.callFunctionOn
+        const { nodeId } = await this.debuggerController.sendCommand(
+          tabId, 'DOM.requestNode', { backendNodeId }
+        ) as { nodeId: number };
 
-    const startTime = Date.now();
-    while (Date.now() - startTime < timeout) {
-      const result = await this.debuggerController.executeScript(tabId, script);
-      if (result && result.state === 'ready') {
-        return;
+        const { object } = await this.debuggerController.sendCommand(
+          tabId, 'DOM.resolveNode', { nodeId }
+        ) as { object: { objectId: string } };
+
+        const result = await this.debuggerController.sendCommand(tabId, 'Runtime.callFunctionOn', {
+          objectId: object.objectId,
+          functionDeclaration: `function() {
+            const el = this;
+            if (el.disabled) return { state: 'disabled' };
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none') return { state: 'hidden', reason: 'display:none' };
+            if (style.visibility === 'hidden') return { state: 'hidden', reason: 'visibility:hidden' };
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return { state: 'hidden', reason: 'zero size' };
+            return { state: 'ready' };
+          }`,
+          returnByValue: true
+        }) as any;
+
+        const state = result.result?.value?.state;
+        if (state === 'ready') {
+          return;
+        }
+        if (state === 'disabled') {
+          throw new Error(`Element is disabled`);
+        }
+      } catch (err: any) {
+        // If DOM.getBoxModel fails, element doesn't exist yet — keep waiting
+        if (err.message?.includes('Could not find node')) {
+          // Continue waiting
+        } else if (err.message?.includes('disabled')) {
+          throw err;
+        }
       }
-      if (result && result.state === 'disabled') {
-        throw new Error(`Element ${selector} is disabled`);
-      }
-      await new Promise(resolve => setTimeout(resolve, 100));
+
+      await new Promise(r => setTimeout(r, 100));
     }
 
-    throw new Error(`Element ${selector} did not become actionable within ${timeout}ms`);
+    throw new Error(`Element did not become actionable within ${timeout}ms`);
   }
 }

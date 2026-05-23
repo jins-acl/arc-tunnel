@@ -949,24 +949,40 @@ var init_storage_manager = __esm({
 });
 
 // src/background/snapshot-engine.ts
-var SnapshotEngine;
+var INTERACTIVE_ROLES, SnapshotEngine;
 var init_snapshot_engine = __esm({
   "src/background/snapshot-engine.ts"() {
     "use strict";
+    INTERACTIVE_ROLES = /* @__PURE__ */ new Set([
+      "button",
+      "link",
+      "textbox",
+      "checkbox",
+      "radio",
+      "combobox",
+      "menuitem",
+      "tab",
+      "switch",
+      "slider",
+      "searchbox",
+      "spinbutton",
+      "option",
+      "menuitemcheckbox"
+    ]);
     SnapshotEngine = class {
       constructor(debuggerController) {
         this.cache = /* @__PURE__ */ new Map();
         this.CACHE_TTL_MS = 5e3;
         this.debuggerController = debuggerController;
       }
-      async getSnapshot(tabId, depth = 10, includeBoxes = false, useCache = true) {
+      async getSnapshot(tabId, useCache = true) {
         if (useCache) {
           const cached = this.cache.get(tabId);
           if (cached && Date.now() - cached.timestamp < this.CACHE_TTL_MS) {
             return cached.snapshot;
           }
         }
-        const snapshot = await this._generateSnapshot(tabId, depth, includeBoxes);
+        const snapshot = await this._generateSnapshot(tabId);
         this.cache.set(tabId, { snapshot, timestamp: Date.now() });
         return snapshot;
       }
@@ -977,108 +993,58 @@ var init_snapshot_engine = __esm({
           this.cache.clear();
         }
       }
-      async _generateSnapshot(tabId, depth = 10, includeBoxes = false) {
-        const script = `
-      (function() {
-        const MAX_DEPTH = ${depth};
-        const MAX_ELEMENTS = 100;
-        const refs = {};
+      resolveRef(snapshot, ref) {
+        return snapshot.refs[ref] || null;
+      }
+      async _generateSnapshot(tabId) {
+        await this.debuggerController.sendCommand(tabId, "Accessibility.enable");
+        await this.debuggerController.sendCommand(tabId, "DOM.enable");
+        const { nodes } = await this.debuggerController.sendCommand(
+          tabId,
+          "Accessibility.getFullAXTree"
+        );
+        const tab = await chrome.tabs.get(tabId);
         let counter = 0;
-
-        function isInteractive(el) {
-          const tag = el.tagName.toLowerCase();
-          const role = el.getAttribute('role');
-          if (tag === 'button' || tag === 'a' || tag === 'input' || tag === 'textarea' || tag === 'select') return true;
-          if (role === 'button' || role === 'link' || role === 'checkbox' || role === 'radio' || role === 'textbox' || role === 'combobox') return true;
-          if (el.onclick || el.getAttribute('onclick')) return true;
-          return false;
+        const refs = {};
+        const lines = [];
+        for (const node of nodes) {
+          if (node.ignored) continue;
+          const role = node.role?.value;
+          if (!role || !INTERACTIVE_ROLES.has(role)) continue;
+          const backendNodeId = node.backendDOMNodeId;
+          if (!backendNodeId) continue;
+          counter++;
+          const ref = `e${counter}`;
+          const name = node.name?.value || "";
+          const states = this._extractStates(node);
+          refs[ref] = { ref, role, name, backendNodeId, states };
+          const stateStr = states.length ? ` [${states.join(",")}]` : "";
+          lines.push(`- [${ref}] ${role}: "${name}"${stateStr}`);
         }
-
-        function getName(el) {
-          return (el.getAttribute('aria-label') ||
-                  el.getAttribute('title') ||
-                  el.getAttribute('placeholder') ||
-                  (el.textContent || '').trim()).substring(0, 100);
-        }
-
-        function getRole(el) {
-          return el.getAttribute('role') || el.tagName.toLowerCase();
-        }
-
-        function buildSelector(el) {
-          if (el.id && !/^\\d/.test(el.id) && el.id.length < 36) return '#' + CSS.escape(el.id);
-          const testId = el.getAttribute('data-testid');
-          if (testId) return '[data-testid="' + CSS.escape(testId) + '"]';
-          const path = [];
-          let curr = el;
-          while (curr && curr.nodeType === 1 && path.length < 5) {
-            let tag = curr.tagName.toLowerCase();
-            if (curr.className && typeof curr.className === 'string') {
-              const classes = curr.className.trim().split(/\\s+/).slice(0, 3);
-              if (classes.length) tag += '.' + classes.map(c => CSS.escape(c)).join('.');
-            }
-            path.unshift(tag);
-            curr = curr.parentElement;
-          }
-          return path.join(' > ');
-        }
-
-        function walk(el, depth) {
-          if (depth > MAX_DEPTH || counter >= MAX_ELEMENTS) return '';
-          const interactive = isInteractive(el);
-          let result = '';
-
-          if (interactive) {
-            counter++;
-            const ref = 'e' + counter;
-            const role = getRole(el);
-            const name = getName(el);
-            const selector = buildSelector(el);
-            const box = el.getBoundingClientRect();
-            refs[ref] = {
-              ref, role, name, selector,
-              box: { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), height: Math.round(box.height) }
-            };
-            result += '- [' + ref + '] ' + role + ': "' + name + '"\\n';
-          }
-
-          for (let child of el.children) {
-            const childResult = walk(child, depth + 1);
-            if (childResult) {
-              result += childResult;
-            }
-          }
-          return result;
-        }
-
-        const tree = walk(document.body, 0);
         return {
-          url: window.location.href,
-          title: document.title,
-          tree,
+          url: tab.url || "",
+          title: tab.title || "",
+          tree: lines.join("\n"),
           refs
         };
-      })()
-    `;
-        const result = await this.debuggerController.executeScript(tabId, script);
-        if (!result || typeof result !== "object") {
-          throw new Error("Failed to generate snapshot");
-        }
-        const snapshot = {
-          url: result.url || "",
-          title: result.title || "",
-          tree: result.tree || "",
-          refs: result.refs || {}
-        };
-        if (!includeBoxes) {
-          for (const key of Object.keys(snapshot.refs)) {
-            delete snapshot.refs[key].box;
+      }
+      _extractStates(node) {
+        const states = [];
+        for (const prop of node.properties || []) {
+          if (prop.name === "checked" && prop.value?.value) {
+            states.push("checked");
+          }
+          if (prop.name === "disabled" && prop.value?.value) {
+            states.push("disabled");
+          }
+          if (prop.name === "expanded" && prop.value?.value !== void 0) {
+            states.push(prop.value.value ? "expanded" : "collapsed");
+          }
+          if (prop.name === "selected" && prop.value?.value) {
+            states.push("selected");
           }
         }
-        return snapshot;
-      }
-      resolveRef(snapshot, ref) {
-        return snapshot.refs[ref]?.selector || null;
+        return states;
       }
     };
   }
@@ -1093,24 +1059,23 @@ var init_input_simulator = __esm({
       constructor(debuggerController) {
         this.debuggerController = debuggerController;
       }
-      async getElementCenter(tabId, selector) {
-        const safeSelector = JSON.stringify(selector);
-        const script = `
-      (function() {
-        const el = document.querySelector(${safeSelector});
-        if (!el) throw new Error('Element not found: ' + ${safeSelector});
-        const rect = el.getBoundingClientRect();
+      // Get element center via DOM.getBoxModel + backendNodeId
+      // Automatically穿透 iframe / Shadow DOM
+      async getElementCenter(tabId, backendNodeId) {
+        const { model } = await this.debuggerController.sendCommand(
+          tabId,
+          "DOM.getBoxModel",
+          { backendNodeId }
+        );
+        const c = model.content;
         return {
-          x: rect.left + rect.width / 2 + window.scrollX,
-          y: rect.top + rect.height / 2 + window.scrollY
+          x: Math.round((c[0] + c[2] + c[4] + c[6]) / 4),
+          y: Math.round((c[1] + c[3] + c[5] + c[7]) / 4)
         };
-      })()
-    `;
-        const result = await this.debuggerController.executeScript(tabId, script);
-        return { x: Math.round(result.x), y: Math.round(result.y) };
       }
-      async dispatchClick(tabId, selector, doubleClick = false) {
-        const { x, y } = await this.getElementCenter(tabId, selector);
+      async dispatchClick(tabId, backendNodeId, doubleClick = false) {
+        await this.debuggerController.sendCommand(tabId, "DOM.scrollIntoViewIfNeeded", { backendNodeId });
+        const { x, y } = await this.getElementCenter(tabId, backendNodeId);
         const clickCount = doubleClick ? 2 : 1;
         await this.debuggerController.sendCommand(tabId, "Input.dispatchMouseEvent", {
           type: "mouseMoved",
@@ -1132,38 +1097,21 @@ var init_input_simulator = __esm({
           clickCount
         });
       }
-      async dispatchDoubleClick(tabId, selector) {
-        await this.dispatchClick(tabId, selector, true);
+      async dispatchDoubleClick(tabId, backendNodeId) {
+        await this.dispatchClick(tabId, backendNodeId, true);
       }
-      async dispatchHover(tabId, selector) {
-        const { x, y } = await this.getElementCenter(tabId, selector);
+      async dispatchHover(tabId, backendNodeId) {
+        await this.debuggerController.sendCommand(tabId, "DOM.scrollIntoViewIfNeeded", { backendNodeId });
+        const { x, y } = await this.getElementCenter(tabId, backendNodeId);
         await this.debuggerController.sendCommand(tabId, "Input.dispatchMouseEvent", {
           type: "mouseMoved",
           x,
           y
         });
       }
-      async dispatchType(tabId, selector, text) {
-        const safeSelector = JSON.stringify(selector);
-        const focusScript = `
-      (function() {
-        const el = document.querySelector(${safeSelector});
-        if (!el) throw new Error('Element not found: ' + ${safeSelector});
-        el.focus();
-        return true;
-      })()
-    `;
-        await this.debuggerController.executeScript(tabId, focusScript);
-        for (const char of text) {
-          await this.debuggerController.sendCommand(tabId, "Input.dispatchKeyEvent", {
-            type: "keyDown",
-            text: char
-          });
-          await this.debuggerController.sendCommand(tabId, "Input.dispatchKeyEvent", {
-            type: "keyUp",
-            text: char
-          });
-        }
+      async dispatchType(tabId, backendNodeId, text) {
+        await this.debuggerController.sendCommand(tabId, "DOM.focus", { backendNodeId });
+        await this.debuggerController.sendCommand(tabId, "Input.insertText", { text });
       }
       async dispatchPress(tabId, key) {
         await this.debuggerController.sendCommand(tabId, "Input.dispatchKeyEvent", {
@@ -1175,22 +1123,35 @@ var init_input_simulator = __esm({
           key
         });
       }
-      async dispatchCheck(tabId, selector, checked) {
-        const safeSelector = JSON.stringify(selector);
-        const script = `
-      (function() {
-        const el = document.querySelector(${safeSelector});
-        if (!el) throw new Error('Element not found: ' + ${safeSelector});
+      async dispatchCheck(tabId, backendNodeId, checked) {
+        const { nodeId } = await this.debuggerController.sendCommand(
+          tabId,
+          "DOM.requestNode",
+          { backendNodeId }
+        );
+        const { object } = await this.debuggerController.sendCommand(
+          tabId,
+          "DOM.resolveNode",
+          { nodeId }
+        );
+        const result = await this.debuggerController.sendCommand(tabId, "Runtime.callFunctionOn", {
+          objectId: object.objectId,
+          functionDeclaration: `function(checked) {
+        const el = this;
         if (el.type !== 'checkbox' && el.type !== 'radio') {
-          throw new Error('Element is not a checkbox or radio: ' + ${safeSelector});
+          throw new Error('Element is not a checkbox or radio');
         }
-        if (el.checked !== ${checked}) {
+        if (el.checked !== checked) {
           el.click();
         }
         return { checked: el.checked };
-      })()
-    `;
-        await this.debuggerController.executeScript(tabId, script);
+      }`,
+          arguments: [{ value: checked }],
+          returnByValue: true
+        });
+        if (result.exceptionDetails) {
+          throw new Error(result.exceptionDetails.text || "Check operation failed");
+        }
       }
     };
   }
@@ -1205,41 +1166,62 @@ var init_actionability_checker = __esm({
       constructor(debuggerController) {
         this.debuggerController = debuggerController;
       }
-      async waitForActionable(tabId, selector, timeout = 5e3) {
-        const safeSelector = JSON.stringify(selector);
-        const script = `
-      (function() {
-        const el = document.querySelector(${safeSelector});
-        if (!el) return { state: 'not_found' };
-
-        const style = window.getComputedStyle(el);
-        const rect = el.getBoundingClientRect();
-
-        // Check visibility
-        if (style.display === 'none') return { state: 'hidden', reason: 'display:none' };
-        if (style.visibility === 'hidden') return { state: 'hidden', reason: 'visibility:hidden' };
-        if (rect.width === 0 || rect.height === 0) return { state: 'hidden', reason: 'zero size' };
-
-        // Check enabled
-        if ('disabled' in el && (el as HTMLInputElement).disabled) {
-          return { state: 'disabled' };
-        }
-
-        return { state: 'ready' };
-      })()
-    `;
+      async waitForActionable(tabId, backendNodeId, timeout = 5e3) {
         const startTime = Date.now();
         while (Date.now() - startTime < timeout) {
-          const result = await this.debuggerController.executeScript(tabId, script);
-          if (result && result.state === "ready") {
-            return;
+          try {
+            const { model } = await this.debuggerController.sendCommand(
+              tabId,
+              "DOM.getBoxModel",
+              { backendNodeId }
+            );
+            const c = model.content;
+            const width = Math.abs(c[2] - c[0]);
+            const height = Math.abs(c[5] - c[1]);
+            if (width === 0 || height === 0) {
+              await new Promise((r) => setTimeout(r, 100));
+              continue;
+            }
+            const { nodeId } = await this.debuggerController.sendCommand(
+              tabId,
+              "DOM.requestNode",
+              { backendNodeId }
+            );
+            const { object } = await this.debuggerController.sendCommand(
+              tabId,
+              "DOM.resolveNode",
+              { nodeId }
+            );
+            const result = await this.debuggerController.sendCommand(tabId, "Runtime.callFunctionOn", {
+              objectId: object.objectId,
+              functionDeclaration: `function() {
+            const el = this;
+            if (el.disabled) return { state: 'disabled' };
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none') return { state: 'hidden', reason: 'display:none' };
+            if (style.visibility === 'hidden') return { state: 'hidden', reason: 'visibility:hidden' };
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return { state: 'hidden', reason: 'zero size' };
+            return { state: 'ready' };
+          }`,
+              returnByValue: true
+            });
+            const state = result.result?.value?.state;
+            if (state === "ready") {
+              return;
+            }
+            if (state === "disabled") {
+              throw new Error(`Element is disabled`);
+            }
+          } catch (err) {
+            if (err.message?.includes("Could not find node")) {
+            } else if (err.message?.includes("disabled")) {
+              throw err;
+            }
           }
-          if (result && result.state === "disabled") {
-            throw new Error(`Element ${selector} is disabled`);
-          }
-          await new Promise((resolve) => setTimeout(resolve, 100));
+          await new Promise((r) => setTimeout(r, 100));
         }
-        throw new Error(`Element ${selector} did not become actionable within ${timeout}ms`);
+        throw new Error(`Element did not become actionable within ${timeout}ms`);
       }
     };
   }
@@ -1290,54 +1272,62 @@ var init_command_handler = __esm({
       async executeCommand(command) {
         const { command: cmd, params } = command;
         switch (cmd) {
-          // ─── New aggregated tools (Playwright-inspired) ───
+          // ─── Core tools (Playwright-inspired) ───
           case "snapshot": {
             await this.ensureDebuggerAttached(params.tabId);
-            const snapshot = await this.snapshotEngine.getSnapshot(
-              params.tabId,
-              params.depth,
-              params.includeBoxes
-            );
+            const snapshot = await this.snapshotEngine.getSnapshot(params.tabId, true);
             return { snapshot };
           }
           case "interact": {
             await this.ensureDebuggerAttached(params.tabId);
+            let backendNodeId = null;
             const target = params.target;
-            const selector = target.startsWith("e") && /^e\d+$/.test(target) ? await this.resolveRef(params.tabId, target) || target : target;
-            await this.actionabilityChecker.waitForActionable(params.tabId, selector, params.timeout);
+            if (params.action !== "press") {
+              if (!target || !(target.startsWith("e") && /^e\d+$/.test(target))) {
+                throw new Error(
+                  `Target must be a ref (e.g. "e15") from a snapshot. CSS selectors are no longer supported.`
+                );
+              }
+              backendNodeId = await this.resolveRef(params.tabId, target);
+              if (!backendNodeId) {
+                throw new Error(`Ref ${target} not found in snapshot. Run snapshot first.`);
+              }
+              await this.actionabilityChecker.waitForActionable(
+                params.tabId,
+                backendNodeId,
+                params.timeout
+              );
+            }
             switch (params.action) {
               case "click":
-                await this.inputSimulator.dispatchClick(params.tabId, selector);
-                this.snapshotEngine.invalidateCache(params.tabId);
-                return { status: "clicked", selector };
+                await this.inputSimulator.dispatchClick(params.tabId, backendNodeId);
+                break;
               case "double_click":
-                await this.inputSimulator.dispatchDoubleClick(params.tabId, selector);
-                this.snapshotEngine.invalidateCache(params.tabId);
-                return { status: "double_clicked", selector };
+                await this.inputSimulator.dispatchDoubleClick(params.tabId, backendNodeId);
+                break;
               case "hover":
-                await this.inputSimulator.dispatchHover(params.tabId, selector);
-                return { status: "hovered", selector };
+                await this.inputSimulator.dispatchHover(params.tabId, backendNodeId);
+                break;
               case "type":
                 if (!params.text) throw new Error("text is required for type action");
-                await this.inputSimulator.dispatchType(params.tabId, selector, params.text);
-                this.snapshotEngine.invalidateCache(params.tabId);
-                return { status: "typed", selector, text: params.text };
+                await this.inputSimulator.dispatchType(params.tabId, backendNodeId, params.text);
+                break;
               case "press":
                 if (!params.key) throw new Error("key is required for press action");
                 await this.inputSimulator.dispatchPress(params.tabId, params.key);
-                this.snapshotEngine.invalidateCache(params.tabId);
-                return { status: "pressed", key: params.key };
+                break;
               case "check":
-                await this.inputSimulator.dispatchCheck(params.tabId, selector, true);
-                this.snapshotEngine.invalidateCache(params.tabId);
-                return { status: "checked", selector };
+                await this.inputSimulator.dispatchCheck(params.tabId, backendNodeId, true);
+                break;
               case "uncheck":
-                await this.inputSimulator.dispatchCheck(params.tabId, selector, false);
-                this.snapshotEngine.invalidateCache(params.tabId);
-                return { status: "unchecked", selector };
+                await this.inputSimulator.dispatchCheck(params.tabId, backendNodeId, false);
+                break;
               default:
                 throw new Error(`Unknown interact action: ${params.action}`);
             }
+            this.snapshotEngine.invalidateCache(params.tabId);
+            const pageSnapshot = await this.snapshotEngine.getSnapshot(params.tabId, false);
+            return { status: params.action, target, pageSnapshot };
           }
           case "navigate": {
             await this.ensureDebuggerAttached(params.tabId);
@@ -1348,20 +1338,34 @@ var init_command_handler = __esm({
                 this.snapshotEngine.invalidateCache(params.tabId);
                 return { status: "navigated", url: params.url };
               case "go_back": {
-                const history = await this.debuggerController.sendCommand(params.tabId, "Page.getNavigationHistory");
+                const history = await this.debuggerController.sendCommand(
+                  params.tabId,
+                  "Page.getNavigationHistory"
+                );
                 if (history.currentIndex > 0) {
                   const entry = history.entries[history.currentIndex - 1];
-                  await this.debuggerController.sendCommand(params.tabId, "Page.navigateToHistoryEntry", { entryId: entry.id });
+                  await this.debuggerController.sendCommand(
+                    params.tabId,
+                    "Page.navigateToHistoryEntry",
+                    { entryId: entry.id }
+                  );
                   this.snapshotEngine.invalidateCache(params.tabId);
                   return { status: "went_back", url: entry.url };
                 }
                 return { status: "went_back", url: null };
               }
               case "go_forward": {
-                const history = await this.debuggerController.sendCommand(params.tabId, "Page.getNavigationHistory");
+                const history = await this.debuggerController.sendCommand(
+                  params.tabId,
+                  "Page.getNavigationHistory"
+                );
                 if (history.currentIndex < history.entries.length - 1) {
                   const entry = history.entries[history.currentIndex + 1];
-                  await this.debuggerController.sendCommand(params.tabId, "Page.navigateToHistoryEntry", { entryId: entry.id });
+                  await this.debuggerController.sendCommand(
+                    params.tabId,
+                    "Page.navigateToHistoryEntry",
+                    { entryId: entry.id }
+                  );
                   this.snapshotEngine.invalidateCache(params.tabId);
                   return { status: "went_forward", url: entry.url };
                 }
@@ -1444,42 +1448,16 @@ var init_command_handler = __esm({
                 throw new Error(`Unknown storage type: ${type}`);
             }
           }
-          // ─── Legacy tools (kept for backward compatibility) ───
-          case "click": {
-            await this.ensureDebuggerAttached(params.tabId);
-            await this.actionabilityChecker.waitForActionable(params.tabId, params.selector);
-            await this.inputSimulator.dispatchClick(params.tabId, params.selector);
-            return { status: "clicked", selector: params.selector };
-          }
-          case "type": {
-            await this.ensureDebuggerAttached(params.tabId);
-            await this.actionabilityChecker.waitForActionable(params.tabId, params.selector);
-            await this.inputSimulator.dispatchType(params.tabId, params.selector, params.text);
-            return { status: "typed", selector: params.selector };
-          }
+          // ─── Utility & legacy tools ───
           case "screenshot": {
             await this.ensureDebuggerAttached(params.tabId);
             const screenshot = await this.debuggerController.screenshot(params.tabId, params.fullPage);
             return { screenshot };
           }
-          case "get_content": {
-            await this.ensureDebuggerAttached(params.tabId);
-            const content = await this.debuggerController.getContent(params.tabId, params.mode);
-            return { content };
-          }
           case "execute_script": {
             await this.ensureDebuggerAttached(params.tabId);
             const scriptResult = await this.debuggerController.executeScript(params.tabId, params.script);
             return { result: scriptResult };
-          }
-          case "wait_for_element": {
-            await this.ensureDebuggerAttached(params.tabId);
-            const found = await this.debuggerController.waitForElement(
-              params.tabId,
-              params.selector,
-              params.timeout || 1e4
-            );
-            return { found, selector: params.selector };
           }
           // Tab management
           case "create_tab": {
@@ -1550,8 +1528,8 @@ var init_command_handler = __esm({
       }
       async resolveRef(tabId, ref) {
         try {
-          const snapshot = await this.snapshotEngine.getSnapshot(tabId, 10, false, true);
-          return snapshot.refs[ref]?.selector || null;
+          const snapshot = await this.snapshotEngine.getSnapshot(tabId, true);
+          return snapshot.refs[ref]?.backendNodeId || null;
         } catch {
           return null;
         }
