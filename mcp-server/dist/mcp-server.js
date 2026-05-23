@@ -19235,23 +19235,21 @@ var CommandQueue = class {
 // src/tools/index.ts
 function getToolDefinitions() {
   return [
-    // ─── New aggregated tools (Playwright-inspired) ───
+    // ─── Core tools (Playwright-inspired) ───
     {
       name: "snapshot",
       description: "Capture a lightweight accessibility snapshot of the page with ref-based element targeting. Returns a YAML tree of interactive elements (buttons, links, inputs) labeled with refs like e1, e2. Use these refs with the `interact` tool for precise, token-efficient element targeting.",
       inputSchema: {
         type: "object",
         properties: {
-          tabId: { type: "number", description: "Tab ID" },
-          depth: { type: "number", description: "Max DOM traversal depth (default 10)" },
-          includeBoxes: { type: "boolean", description: "Include element bounding boxes in output" }
+          tabId: { type: "number", description: "Tab ID" }
         },
         required: ["tabId"]
       }
     },
     {
       name: "interact",
-      description: 'Perform mouse or keyboard interaction on a page element. Supports click, double_click, hover, type, press (keyboard key), check, uncheck. Target can be a CSS selector or a ref (e.g. "e15") from a snapshot.',
+      description: 'Perform mouse or keyboard interaction on a page element identified by a snapshot ref (e.g. "e15"). Supports click, double_click, hover, type, press (keyboard key), check, uncheck. Run `snapshot` first to get refs.',
       inputSchema: {
         type: "object",
         properties: {
@@ -19261,7 +19259,7 @@ function getToolDefinitions() {
             enum: ["click", "double_click", "hover", "type", "press", "check", "uncheck"],
             description: "Interaction type"
           },
-          target: { type: "string", description: 'CSS selector or ref (e.g. "e15") from snapshot' },
+          target: { type: "string", description: 'Ref from snapshot (e.g. "e15"). Required except for action=press.' },
           text: { type: "string", description: "Text to type (required when action=type)" },
           key: { type: "string", description: 'Key to press, e.g. "Enter", "Tab", "Escape" (required when action=press)' },
           timeout: { type: "number", description: "Timeout in ms for waiting element to become actionable (default 5000)" }
@@ -19336,32 +19334,7 @@ function getToolDefinitions() {
         required: ["tabId", "type", "action"]
       }
     },
-    // ─── Legacy tools (kept for backward compatibility) ───
-    {
-      name: "click",
-      description: '[Legacy] Click an element. Consider using `interact` with action="click" instead.',
-      inputSchema: {
-        type: "object",
-        properties: {
-          tabId: { type: "number", description: "Tab ID" },
-          selector: { type: "string", description: "CSS selector" }
-        },
-        required: ["tabId", "selector"]
-      }
-    },
-    {
-      name: "type",
-      description: '[Legacy] Type text into an element. Consider using `interact` with action="type" instead.',
-      inputSchema: {
-        type: "object",
-        properties: {
-          tabId: { type: "number", description: "Tab ID" },
-          selector: { type: "string", description: "CSS selector" },
-          text: { type: "string", description: "Text to type" }
-        },
-        required: ["tabId", "selector", "text"]
-      }
-    },
+    // ─── Utility tools ───
     {
       name: "screenshot",
       description: "Take a screenshot of the tab",
@@ -19375,22 +19348,6 @@ function getToolDefinitions() {
       }
     },
     {
-      name: "get_content",
-      description: "Get page content in various formats",
-      inputSchema: {
-        type: "object",
-        properties: {
-          tabId: { type: "number", description: "Tab ID" },
-          mode: {
-            type: "string",
-            enum: ["html", "text", "structured", "markdown"],
-            description: "Content extraction mode"
-          }
-        },
-        required: ["tabId", "mode"]
-      }
-    },
-    {
       name: "execute_script",
       description: "Execute JavaScript in the tab. WARNING: scripts have full page access (DOM, cookies, storage, network). Use with caution.",
       inputSchema: {
@@ -19400,19 +19357,6 @@ function getToolDefinitions() {
           script: { type: "string", description: "JavaScript code" }
         },
         required: ["tabId", "script"]
-      }
-    },
-    {
-      name: "wait_for_element",
-      description: "Wait for an element to appear",
-      inputSchema: {
-        type: "object",
-        properties: {
-          tabId: { type: "number", description: "Tab ID" },
-          selector: { type: "string", description: "CSS selector" },
-          timeout: { type: "number", description: "Timeout in ms" }
-        },
-        required: ["tabId", "selector"]
       }
     },
     // Tab management

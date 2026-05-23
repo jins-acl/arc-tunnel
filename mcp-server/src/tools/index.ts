@@ -10,7 +10,7 @@ export interface ToolDefinition {
 
 export function getToolDefinitions(): ToolDefinition[] {
   return [
-    // ─── New aggregated tools (Playwright-inspired) ───
+    // ─── Core tools (Playwright-inspired) ───
 
     {
       name: 'snapshot',
@@ -18,16 +18,14 @@ export function getToolDefinitions(): ToolDefinition[] {
       inputSchema: {
         type: 'object',
         properties: {
-          tabId: { type: 'number', description: 'Tab ID' },
-          depth: { type: 'number', description: 'Max DOM traversal depth (default 10)' },
-          includeBoxes: { type: 'boolean', description: 'Include element bounding boxes in output' }
+          tabId: { type: 'number', description: 'Tab ID' }
         },
         required: ['tabId']
       }
     },
     {
       name: 'interact',
-      description: 'Perform mouse or keyboard interaction on a page element. Supports click, double_click, hover, type, press (keyboard key), check, uncheck. Target can be a CSS selector or a ref (e.g. "e15") from a snapshot.',
+      description: 'Perform mouse or keyboard interaction on a page element identified by a snapshot ref (e.g. "e15"). Supports click, double_click, hover, type, press (keyboard key), check, uncheck. Run `snapshot` first to get refs.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -37,7 +35,7 @@ export function getToolDefinitions(): ToolDefinition[] {
             enum: ['click', 'double_click', 'hover', 'type', 'press', 'check', 'uncheck'],
             description: 'Interaction type'
           },
-          target: { type: 'string', description: 'CSS selector or ref (e.g. "e15") from snapshot' },
+          target: { type: 'string', description: 'Ref from snapshot (e.g. "e15"). Required except for action=press.' },
           text: { type: 'string', description: 'Text to type (required when action=type)' },
           key: { type: 'string', description: 'Key to press, e.g. "Enter", "Tab", "Escape" (required when action=press)' },
           timeout: { type: 'number', description: 'Timeout in ms for waiting element to become actionable (default 5000)' }
@@ -113,33 +111,8 @@ export function getToolDefinitions(): ToolDefinition[] {
       }
     },
 
-    // ─── Legacy tools (kept for backward compatibility) ───
+    // ─── Utility tools ───
 
-    {
-      name: 'click',
-      description: '[Legacy] Click an element. Consider using `interact` with action="click" instead.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          tabId: { type: 'number', description: 'Tab ID' },
-          selector: { type: 'string', description: 'CSS selector' }
-        },
-        required: ['tabId', 'selector']
-      }
-    },
-    {
-      name: 'type',
-      description: '[Legacy] Type text into an element. Consider using `interact` with action="type" instead.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          tabId: { type: 'number', description: 'Tab ID' },
-          selector: { type: 'string', description: 'CSS selector' },
-          text: { type: 'string', description: 'Text to type' }
-        },
-        required: ['tabId', 'selector', 'text']
-      }
-    },
     {
       name: 'screenshot',
       description: 'Take a screenshot of the tab',
@@ -150,22 +123,6 @@ export function getToolDefinitions(): ToolDefinition[] {
           fullPage: { type: 'boolean', description: 'Capture full page' }
         },
         required: ['tabId']
-      }
-    },
-    {
-      name: 'get_content',
-      description: 'Get page content in various formats',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          tabId: { type: 'number', description: 'Tab ID' },
-          mode: {
-            type: 'string',
-            enum: ['html', 'text', 'structured', 'markdown'],
-            description: 'Content extraction mode'
-          }
-        },
-        required: ['tabId', 'mode']
       }
     },
     {
@@ -180,19 +137,7 @@ export function getToolDefinitions(): ToolDefinition[] {
         required: ['tabId', 'script']
       }
     },
-    {
-      name: 'wait_for_element',
-      description: 'Wait for an element to appear',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          tabId: { type: 'number', description: 'Tab ID' },
-          selector: { type: 'string', description: 'CSS selector' },
-          timeout: { type: 'number', description: 'Timeout in ms' }
-        },
-        required: ['tabId', 'selector']
-      }
-    },
+
     // Tab management
     {
       name: 'create_tab',
@@ -225,6 +170,7 @@ export function getToolDefinitions(): ToolDefinition[] {
         required: []
       }
     },
+
     // Recording and playback
     {
       name: 'start_recording',
@@ -258,6 +204,7 @@ export function getToolDefinitions(): ToolDefinition[] {
         required: ['recordingId']
       }
     },
+
     // Session management
     {
       name: 'save_session',

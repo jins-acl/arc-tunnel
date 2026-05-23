@@ -56,61 +56,70 @@ export class CommandHandler {
     const { command: cmd, params } = command;
 
     switch (cmd) {
-      // ─── New aggregated tools (Playwright-inspired) ───
+      // ─── Core tools (Playwright-inspired) ───
 
       case 'snapshot': {
         await this.ensureDebuggerAttached(params.tabId);
-        const snapshot = await this.snapshotEngine.getSnapshot(
-          params.tabId,
-          params.depth,
-          params.includeBoxes
-        );
+        const snapshot = await this.snapshotEngine.getSnapshot(params.tabId, true);
         return { snapshot };
       }
 
       case 'interact': {
         await this.ensureDebuggerAttached(params.tabId);
-        const target = params.target as string;
-        // Resolve ref if needed
-        const selector = target.startsWith('e') && /^e\d+$/.test(target)
-          ? (await this.resolveRef(params.tabId, target)) || target
-          : target;
 
-        await this.actionabilityChecker.waitForActionable(params.tabId, selector, params.timeout);
+        let backendNodeId: number | null = null;
+        const target = params.target as string;
+
+        // press action does not need a target element
+        if (params.action !== 'press') {
+          if (!target || !(target.startsWith('e') && /^e\d+$/.test(target))) {
+            throw new Error(
+              `Target must be a ref (e.g. "e15") from a snapshot. CSS selectors are no longer supported.`
+            );
+          }
+          backendNodeId = await this.resolveRef(params.tabId, target);
+          if (!backendNodeId) {
+            throw new Error(`Ref ${target} not found in snapshot. Run snapshot first.`);
+          }
+          await this.actionabilityChecker.waitForActionable(
+            params.tabId, backendNodeId, params.timeout
+          );
+        }
 
         switch (params.action) {
           case 'click':
-            await this.inputSimulator.dispatchClick(params.tabId, selector);
-            this.snapshotEngine.invalidateCache(params.tabId);
-            return { status: 'clicked', selector };
+            await this.inputSimulator.dispatchClick(params.tabId, backendNodeId!);
+            break;
           case 'double_click':
-            await this.inputSimulator.dispatchDoubleClick(params.tabId, selector);
-            this.snapshotEngine.invalidateCache(params.tabId);
-            return { status: 'double_clicked', selector };
+            await this.inputSimulator.dispatchDoubleClick(params.tabId, backendNodeId!);
+            break;
           case 'hover':
-            await this.inputSimulator.dispatchHover(params.tabId, selector);
-            return { status: 'hovered', selector };
+            await this.inputSimulator.dispatchHover(params.tabId, backendNodeId!);
+            break;
           case 'type':
             if (!params.text) throw new Error('text is required for type action');
-            await this.inputSimulator.dispatchType(params.tabId, selector, params.text);
-            this.snapshotEngine.invalidateCache(params.tabId);
-            return { status: 'typed', selector, text: params.text };
+            await this.inputSimulator.dispatchType(params.tabId, backendNodeId!, params.text);
+            break;
           case 'press':
             if (!params.key) throw new Error('key is required for press action');
             await this.inputSimulator.dispatchPress(params.tabId, params.key);
-            this.snapshotEngine.invalidateCache(params.tabId);
-            return { status: 'pressed', key: params.key };
+            break;
           case 'check':
-            await this.inputSimulator.dispatchCheck(params.tabId, selector, true);
-            this.snapshotEngine.invalidateCache(params.tabId);
-            return { status: 'checked', selector };
+            await this.inputSimulator.dispatchCheck(params.tabId, backendNodeId!, true);
+            break;
           case 'uncheck':
-            await this.inputSimulator.dispatchCheck(params.tabId, selector, false);
-            this.snapshotEngine.invalidateCache(params.tabId);
-            return { status: 'unchecked', selector };
+            await this.inputSimulator.dispatchCheck(params.tabId, backendNodeId!, false);
+            break;
           default:
             throw new Error(`Unknown interact action: ${params.action}`);
         }
+
+        // Hover does not mutate the DOM — skip cache invalidation for efficiency
+        if (params.action !== 'hover') {
+          this.snapshotEngine.invalidateCache(params.tabId);
+        }
+        const pageSnapshot = await this.snapshotEngine.getSnapshot(params.tabId, params.action === 'hover');
+        return { status: params.action, target, pageSnapshot };
       }
 
       case 'navigate': {
@@ -122,20 +131,28 @@ export class CommandHandler {
             this.snapshotEngine.invalidateCache(params.tabId);
             return { status: 'navigated', url: params.url };
           case 'go_back': {
-            const history = await this.debuggerController.sendCommand(params.tabId, 'Page.getNavigationHistory');
+            const history = await this.debuggerController.sendCommand(
+              params.tabId, 'Page.getNavigationHistory'
+            );
             if (history.currentIndex > 0) {
               const entry = history.entries[history.currentIndex - 1];
-              await this.debuggerController.sendCommand(params.tabId, 'Page.navigateToHistoryEntry', { entryId: entry.id });
+              await this.debuggerController.sendCommand(
+                params.tabId, 'Page.navigateToHistoryEntry', { entryId: entry.id }
+              );
               this.snapshotEngine.invalidateCache(params.tabId);
               return { status: 'went_back', url: entry.url };
             }
             return { status: 'went_back', url: null };
           }
           case 'go_forward': {
-            const history = await this.debuggerController.sendCommand(params.tabId, 'Page.getNavigationHistory');
+            const history = await this.debuggerController.sendCommand(
+              params.tabId, 'Page.getNavigationHistory'
+            );
             if (history.currentIndex < history.entries.length - 1) {
               const entry = history.entries[history.currentIndex + 1];
-              await this.debuggerController.sendCommand(params.tabId, 'Page.navigateToHistoryEntry', { entryId: entry.id });
+              await this.debuggerController.sendCommand(
+                params.tabId, 'Page.navigateToHistoryEntry', { entryId: entry.id }
+              );
               this.snapshotEngine.invalidateCache(params.tabId);
               return { status: 'went_forward', url: entry.url };
             }
@@ -221,21 +238,7 @@ export class CommandHandler {
         }
       }
 
-      // ─── Legacy tools (kept for backward compatibility) ───
-
-      case 'click': {
-        await this.ensureDebuggerAttached(params.tabId);
-        await this.actionabilityChecker.waitForActionable(params.tabId, params.selector);
-        await this.inputSimulator.dispatchClick(params.tabId, params.selector);
-        return { status: 'clicked', selector: params.selector };
-      }
-
-      case 'type': {
-        await this.ensureDebuggerAttached(params.tabId);
-        await this.actionabilityChecker.waitForActionable(params.tabId, params.selector);
-        await this.inputSimulator.dispatchType(params.tabId, params.selector, params.text);
-        return { status: 'typed', selector: params.selector };
-      }
+      // ─── Utility & legacy tools ───
 
       case 'screenshot': {
         await this.ensureDebuggerAttached(params.tabId);
@@ -243,26 +246,10 @@ export class CommandHandler {
         return { screenshot };
       }
 
-      case 'get_content': {
-        await this.ensureDebuggerAttached(params.tabId);
-        const content = await this.debuggerController.getContent(params.tabId, params.mode);
-        return { content };
-      }
-
       case 'execute_script': {
         await this.ensureDebuggerAttached(params.tabId);
         const scriptResult = await this.debuggerController.executeScript(params.tabId, params.script);
         return { result: scriptResult };
-      }
-
-      case 'wait_for_element': {
-        await this.ensureDebuggerAttached(params.tabId);
-        const found = await this.debuggerController.waitForElement(
-          params.tabId,
-          params.selector,
-          params.timeout || 10000
-        );
-        return { found, selector: params.selector };
       }
 
       // Tab management
@@ -342,11 +329,10 @@ export class CommandHandler {
     }
   }
 
-  private async resolveRef(tabId: number, ref: string): Promise<string | null> {
+  private async resolveRef(tabId: number, ref: string): Promise<number | null> {
     try {
-      // Use cached snapshot if available (getSnapshot with useCache=true)
-      const snapshot = await this.snapshotEngine.getSnapshot(tabId, 10, false, true);
-      return snapshot.refs[ref]?.selector || null;
+      const snapshot = await this.snapshotEngine.getSnapshot(tabId, true);
+      return snapshot.refs[ref]?.backendNodeId || null;
     } catch {
       return null;
     }
