@@ -50,6 +50,7 @@ var init_websocket_client = __esm({
           this.ws.onclose = () => {
             this.connecting = false;
             console.log("Disconnected from MCP server");
+            this.notifyDisconnect();
             this.handleReconnect();
           };
           this.ws.onmessage = (event) => {
@@ -91,10 +92,19 @@ var init_websocket_client = __esm({
       onCommand(handler) {
         this.messageHandlers.set("command", handler);
       }
+      onDisconnect(handler) {
+        this.messageHandlers.set("disconnect", handler);
+      }
       handleMessage(message) {
         const handler = this.messageHandlers.get("command");
         if (handler) {
           handler(message);
+        }
+      }
+      notifyDisconnect() {
+        const handler = this.messageHandlers.get("disconnect");
+        if (handler) {
+          handler();
         }
       }
       async handleReconnect() {
@@ -124,28 +134,65 @@ var init_websocket_client = __esm({
 });
 
 // src/background/tab-manager.ts
-var TabManager;
+var SESSION_KEY, TabManager;
 var init_tab_manager = __esm({
   "src/background/tab-manager.ts"() {
     "use strict";
+    SESSION_KEY = "arc_tunnel_debugger_tabs";
     TabManager = class {
       constructor() {
         this.tabs = /* @__PURE__ */ new Map();
         this.listenersSetup = false;
         this.attachLocks = /* @__PURE__ */ new Map();
       }
+      /** Load persisted debugger-attach state from chrome.storage.session.
+       *  MV3 service workers lose in-memory Maps on suspension;
+       *  session storage survives SW restarts but is cleared when the browser closes. */
+      async _loadSessionState() {
+        try {
+          const result = await chrome.storage.session.get(SESSION_KEY);
+          const stored = result[SESSION_KEY];
+          if (Array.isArray(stored)) {
+            return new Set(stored);
+          }
+        } catch {
+        }
+        return /* @__PURE__ */ new Set();
+      }
+      async _saveSessionState(tabId, attached) {
+        try {
+          const result = await chrome.storage.session.get(SESSION_KEY);
+          const stored = new Set(Array.isArray(result[SESSION_KEY]) ? result[SESSION_KEY] : []);
+          if (attached) {
+            stored.add(tabId);
+          } else {
+            stored.delete(tabId);
+          }
+          await chrome.storage.session.set({ [SESSION_KEY]: Array.from(stored) });
+        } catch {
+        }
+      }
       async syncExistingTabs() {
         const existingTabs = await chrome.tabs.query({});
+        const sessionAttached = await this._loadSessionState();
         let attachedTabIds = /* @__PURE__ */ new Set();
         try {
           const targets = await chrome.debugger.getTargets();
-          attachedTabIds = new Set(targets.filter((t) => t.attached).map((t) => t.tabId));
+          attachedTabIds = new Set(targets.filter((t) => t.attached).map((t) => t.tabId).filter((id) => id !== void 0));
         } catch (e) {
           console.warn("Failed to get debugger targets:", e);
         }
+        const reconciled = new Set(attachedTabIds);
+        if (attachedTabIds.size === 0 && sessionAttached.size > 0) {
+          for (const tabId of sessionAttached) {
+            if (await this._pingDebugger(tabId)) {
+              reconciled.add(tabId);
+            }
+          }
+        }
         for (const tab of existingTabs) {
           if (tab.id && !this.tabs.has(tab.id)) {
-            const hasDebugger = attachedTabIds.has(tab.id);
+            const hasDebugger = reconciled.has(tab.id);
             this.tabs.set(tab.id, {
               id: tab.id,
               url: tab.url || "",
@@ -154,7 +201,7 @@ var init_tab_manager = __esm({
             });
           }
         }
-        console.log(`Synced ${existingTabs.length} existing tabs, ${attachedTabIds.size} with debugger attached`);
+        console.log(`Synced ${existingTabs.length} existing tabs, ${reconciled.size} with debugger attached`);
         if (!this.listenersSetup) {
           chrome.tabs.onCreated.addListener((tab) => {
             if (tab.id) {
@@ -169,6 +216,7 @@ var init_tab_manager = __esm({
           chrome.tabs.onRemoved.addListener((tabId) => {
             this.tabs.delete(tabId);
             this.attachLocks.delete(tabId);
+            this._saveSessionState(tabId, false);
           });
           chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
             const existing = this.tabs.get(tabId);
@@ -183,22 +231,40 @@ var init_tab_manager = __esm({
               tabInfo.debuggerAttached = false;
             }
             this.attachLocks.delete(source.tabId);
+            this._saveSessionState(source.tabId, false);
             console.log(`%c[ARC-TUNNEL-DIAG] \u274C Debugger DETACHED from tab ${source.tabId}, reason=${reason}`, "color:#e67e22;font-size:14px;font-weight:bold;");
           });
           this.listenersSetup = true;
         }
       }
       /**
+       * Functional ping: send a harmless CDP command to verify the debugger
+       * connection is alive. This is more robust than getTargets() after a SW restart.
+       */
+      async _pingDebugger(tabId) {
+        return new Promise((resolve) => {
+          chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", { expression: "1" }, (result) => {
+            if (chrome.runtime.lastError) {
+              resolve(false);
+            } else {
+              resolve(true);
+            }
+          });
+        });
+      }
+      /**
        * Check whether debugger is actually attached to the tab by asking Chrome directly.
-       * This is more reliable than our internal Map after a service worker restart.
+       * Uses both getTargets() and a functional ping for maximum reliability.
        */
       async _isDebuggerActuallyAttached(tabId) {
         try {
           const targets = await chrome.debugger.getTargets();
-          return targets.some((t) => t.tabId === tabId && t.attached);
+          if (targets.some((t) => t.tabId === tabId && t.attached)) {
+            return true;
+          }
         } catch (e) {
-          return false;
         }
+        return this._pingDebugger(tabId);
       }
       /**
        * Ensure debugger is attached to the tab.
@@ -208,7 +274,26 @@ var init_tab_manager = __esm({
         if (this.tabs.get(tabId)?.debuggerAttached) {
           return;
         }
-        const existingLock = this.attachLocks.get(tabId);
+        let existingLock = this.attachLocks.get(tabId);
+        if (existingLock) {
+          return existingLock;
+        }
+        const sessionAttached = await this._loadSessionState();
+        if (sessionAttached.has(tabId)) {
+          if (await this._pingDebugger(tabId)) {
+            const tab = await chrome.tabs.get(tabId);
+            this.tabs.set(tabId, {
+              id: tabId,
+              url: tab.url || "",
+              title: tab.title || "",
+              debuggerAttached: true
+            });
+            console.log(`[ARC-TUNNEL-DIAG] Debugger already attached to tab ${tabId} (session state + ping), skipping attach`);
+            return;
+          }
+          await this._saveSessionState(tabId, false);
+        }
+        existingLock = this.attachLocks.get(tabId);
         if (existingLock) {
           return existingLock;
         }
@@ -222,8 +307,7 @@ var init_tab_manager = __esm({
         }
       }
       async _doAttachDebugger(tabId) {
-        const alreadyAttached = await this._isDebuggerActuallyAttached(tabId);
-        if (alreadyAttached) {
+        if (await this._pingDebugger(tabId)) {
           const tab = await chrome.tabs.get(tabId);
           this.tabs.set(tabId, {
             id: tabId,
@@ -231,7 +315,8 @@ var init_tab_manager = __esm({
             title: tab.title || "",
             debuggerAttached: true
           });
-          console.log(`[ARC-TUNNEL-DIAG] Debugger already attached to tab ${tabId}, skipping attach`);
+          await this._saveSessionState(tabId, true);
+          console.log(`[ARC-TUNNEL-DIAG] Debugger already attached to tab ${tabId} (ping), skipping attach`);
           return;
         }
         try {
@@ -244,6 +329,7 @@ var init_tab_manager = __esm({
             title: tab.title || "",
             debuggerAttached: true
           });
+          await this._saveSessionState(tabId, true);
           console.log(`%c[ARC-TUNNEL-DIAG] \u26D3\uFE0F Debugger ATTACHED to tab ${tabId} \u2014 infobar should appear now`, "color:#e74c3c;font-size:14px;font-weight:bold;");
         } catch (error) {
           if (error?.message?.includes("already attached")) {
@@ -255,6 +341,7 @@ var init_tab_manager = __esm({
                 title: tab.title || "",
                 debuggerAttached: true
               });
+              await this._saveSessionState(tabId, true);
               console.log(`[ARC-TUNNEL-DIAG] Debugger already attached to tab ${tabId}, state restored`);
               return;
             } catch (tabError) {
@@ -277,6 +364,7 @@ var init_tab_manager = __esm({
           if (tabInfo) {
             tabInfo.debuggerAttached = false;
           }
+          await this._saveSessionState(tabId, false);
           console.log(`Debugger detached from tab ${tabId}`);
         } catch (error) {
           console.error(`Failed to detach debugger from tab ${tabId}:`, error);
@@ -298,6 +386,7 @@ var init_tab_manager = __esm({
       async closeTab(tabId) {
         await chrome.tabs.remove(tabId);
         this.tabs.delete(tabId);
+        await this._saveSessionState(tabId, false);
       }
       listTabs() {
         return Array.from(this.tabs.values());
@@ -307,6 +396,28 @@ var init_tab_manager = __esm({
       }
       isDebuggerAttached(tabId) {
         return this.tabs.get(tabId)?.debuggerAttached || false;
+      }
+      /** Detach debugger from all tabs that we think are attached.
+       *  Called when the WebSocket disconnects so the user doesn't see
+       *  stale "being debugged" banners after the MCP server goes away. */
+      async detachAllDebuggers() {
+        const attachedTabs = Array.from(this.tabs.entries()).filter(([, info]) => info.debuggerAttached).map(([id]) => id);
+        if (attachedTabs.length === 0) {
+          const sessionAttached = await this._loadSessionState();
+          attachedTabs.push(...Array.from(sessionAttached));
+        }
+        for (const tabId of attachedTabs) {
+          try {
+            await chrome.debugger.detach({ tabId });
+            const tabInfo = this.tabs.get(tabId);
+            if (tabInfo) {
+              tabInfo.debuggerAttached = false;
+            }
+            await this._saveSessionState(tabId, false);
+            console.log(`[ARC-TUNNEL-DIAG] Auto-detached debugger from tab ${tabId} on disconnect`);
+          } catch (error) {
+          }
+        }
       }
     };
   }
@@ -384,9 +495,13 @@ var init_debugger_controller = __esm({
         await this.executeScript(tabId, script);
       }
       async screenshot(tabId, fullPage = false) {
+        if (!fullPage) {
+          const dataUrl = await chrome.tabs.captureVisibleTab({ format: "png" });
+          return dataUrl.replace(/^data:image\/png;base64,/, "");
+        }
         const result = await this.sendCommand(tabId, "Page.captureScreenshot", {
           format: "png",
-          captureBeyondViewport: fullPage
+          captureBeyondViewport: true
         });
         return result.data;
       }
@@ -1657,6 +1772,10 @@ var require_service_worker = __commonJS({
       console.log("Received command:", command.command);
       const response = await commandHandler.handleCommand(command);
       wsClient.sendResponse(response);
+    });
+    wsClient.onDisconnect(async () => {
+      console.log("[ARC-TUNNEL-DIAG] MCP server disconnected \u2014 detaching all debuggers");
+      await tabManager.detachAllDebuggers();
     });
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message.type === "get_status") {

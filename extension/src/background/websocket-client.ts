@@ -51,6 +51,7 @@ export class WebSocketClient {
       this.ws.onclose = () => {
         this.connecting = false;
         console.log('Disconnected from MCP server');
+        this.notifyDisconnect();
         this.handleReconnect();
       };
 
@@ -101,10 +102,21 @@ export class WebSocketClient {
     this.messageHandlers.set('command', handler);
   }
 
+  onDisconnect(handler: () => void): void {
+    this.messageHandlers.set('disconnect', handler);
+  }
+
   private handleMessage(message: CommandMessage): void {
     const handler = this.messageHandlers.get('command');
     if (handler) {
       handler(message);
+    }
+  }
+
+  private notifyDisconnect(): void {
+    const handler = this.messageHandlers.get('disconnect');
+    if (handler) {
+      handler();
     }
   }
 

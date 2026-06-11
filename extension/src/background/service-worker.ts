@@ -82,6 +82,12 @@ wsClient.onCommand(async (command: CommandMessage) => {
   wsClient.sendResponse(response);
 });
 
+// Auto-detach debugger when MCP server disconnects so banners don't linger
+wsClient.onDisconnect(async () => {
+  console.log('[ARC-TUNNEL-DIAG] MCP server disconnected — detaching all debuggers');
+  await tabManager.detachAllDebuggers();
+});
+
 // Respond to popup status queries
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'get_status') {

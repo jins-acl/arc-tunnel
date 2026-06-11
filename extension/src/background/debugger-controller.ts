@@ -75,9 +75,18 @@ export class DebuggerController {
   }
 
   async screenshot(tabId: number, fullPage: boolean = false): Promise<string> {
+    if (!fullPage) {
+      // Use chrome.tabs.captureVisibleTab for viewport screenshots to avoid
+      // Edge debugger infobar redraw issues triggered by Page.captureScreenshot.
+      // captureVisibleTab only works on the active tab in the current window.
+      const dataUrl = await chrome.tabs.captureVisibleTab({ format: 'png' });
+      // Strip the data:image/png;base64, prefix
+      return dataUrl.replace(/^data:image\/png;base64,/, '');
+    }
+
     const result = await this.sendCommand(tabId, 'Page.captureScreenshot', {
       format: 'png',
-      captureBeyondViewport: fullPage
+      captureBeyondViewport: true
     });
     return result.data;
   }
