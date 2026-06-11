@@ -126,6 +126,11 @@ export class TabManager {
 
     try {
       await chrome.debugger.attach({ tabId }, '1.3');
+      
+      // Wait a short beat for Chrome/Edge to finish painting the debugger infobar
+      // before subsequent CDP commands trigger compositor re-rasterization.
+      await new Promise(r => setTimeout(r, 300));
+      
       const tab = await chrome.tabs.get(tabId);
       this.tabs.set(tabId, {
         id: tabId,

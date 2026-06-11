@@ -236,6 +236,7 @@ var init_tab_manager = __esm({
         }
         try {
           await chrome.debugger.attach({ tabId }, "1.3");
+          await new Promise((r) => setTimeout(r, 300));
           const tab = await chrome.tabs.get(tabId);
           this.tabs.set(tabId, {
             id: tabId,
