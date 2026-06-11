@@ -28,7 +28,7 @@ export class TabManager {
         });
       }
     }
-    console.log(`Synced ${existingTabs.length} existing tabs`);
+    console.log(`Synced ${existingTabs.length} existing tabs, ${attachedTabIds.size} with debugger attached`);
 
     // Setup lifecycle listeners once
     if (!this.listenersSetup) {
@@ -55,13 +55,14 @@ export class TabManager {
       });
       // Keep state in sync when debugger is detached externally
       // (e.g. user clicks "Cancel" on the debugging banner)
-      chrome.debugger.onDetach.addListener((source) => {
+      chrome.debugger.onDetach.addListener((source, reason) => {
         const tabInfo = this.tabs.get(source.tabId);
         if (tabInfo) {
           tabInfo.debuggerAttached = false;
         }
         this.attachLocks.delete(source.tabId);
-        console.log(`Debugger detached externally from tab ${source.tabId}`);
+        // eslint-disable-next-line no-console
+        console.log(`%c[ARC-TUNNEL-DIAG] ❌ Debugger DETACHED from tab ${source.tabId}, reason=${reason}`, 'color:#e67e22;font-size:14px;font-weight:bold;');
       });
       this.listenersSetup = true;
     }
@@ -95,6 +96,7 @@ export class TabManager {
       return existingLock;
     }
 
+    console.log(`[ARC-TUNNEL-DIAG] ensureDebuggerAttached called for tab ${tabId}`);
     const lock = this._doAttachDebugger(tabId);
     this.attachLocks.set(tabId, lock);
 
@@ -118,7 +120,7 @@ export class TabManager {
         title: tab.title || '',
         debuggerAttached: true
       });
-      console.log(`Debugger already attached to tab ${tabId}, skipping attach`);
+      console.log(`[ARC-TUNNEL-DIAG] Debugger already attached to tab ${tabId}, skipping attach`);
       return;
     }
 
@@ -131,7 +133,8 @@ export class TabManager {
         title: tab.title || '',
         debuggerAttached: true
       });
-      console.log(`Debugger attached to tab ${tabId}`);
+      // eslint-disable-next-line no-console
+      console.log(`%c[ARC-TUNNEL-DIAG] ⛓️ Debugger ATTACHED to tab ${tabId} — infobar should appear now`, 'color:#e74c3c;font-size:14px;font-weight:bold;');
     } catch (error: any) {
       // Defensive fallback: if attach fails with "already attached",
       // sync state and return without throwing.
@@ -144,7 +147,7 @@ export class TabManager {
             title: tab.title || '',
             debuggerAttached: true
           });
-          console.log(`Debugger already attached to tab ${tabId}, state restored`);
+          console.log(`[ARC-TUNNEL-DIAG] Debugger already attached to tab ${tabId}, state restored`);
           return;
         } catch (tabError) {
           console.error(`Failed to get tab info for tab ${tabId}:`, tabError);

@@ -154,7 +154,7 @@ var init_tab_manager = __esm({
             });
           }
         }
-        console.log(`Synced ${existingTabs.length} existing tabs`);
+        console.log(`Synced ${existingTabs.length} existing tabs, ${attachedTabIds.size} with debugger attached`);
         if (!this.listenersSetup) {
           chrome.tabs.onCreated.addListener((tab) => {
             if (tab.id) {
@@ -177,13 +177,13 @@ var init_tab_manager = __esm({
               if (changeInfo.title) existing.title = changeInfo.title;
             }
           });
-          chrome.debugger.onDetach.addListener((source) => {
+          chrome.debugger.onDetach.addListener((source, reason) => {
             const tabInfo = this.tabs.get(source.tabId);
             if (tabInfo) {
               tabInfo.debuggerAttached = false;
             }
             this.attachLocks.delete(source.tabId);
-            console.log(`Debugger detached externally from tab ${source.tabId}`);
+            console.log(`%c[ARC-TUNNEL-DIAG] \u274C Debugger DETACHED from tab ${source.tabId}, reason=${reason}`, "color:#e67e22;font-size:14px;font-weight:bold;");
           });
           this.listenersSetup = true;
         }
@@ -212,6 +212,7 @@ var init_tab_manager = __esm({
         if (existingLock) {
           return existingLock;
         }
+        console.log(`[ARC-TUNNEL-DIAG] ensureDebuggerAttached called for tab ${tabId}`);
         const lock = this._doAttachDebugger(tabId);
         this.attachLocks.set(tabId, lock);
         try {
@@ -230,7 +231,7 @@ var init_tab_manager = __esm({
             title: tab.title || "",
             debuggerAttached: true
           });
-          console.log(`Debugger already attached to tab ${tabId}, skipping attach`);
+          console.log(`[ARC-TUNNEL-DIAG] Debugger already attached to tab ${tabId}, skipping attach`);
           return;
         }
         try {
@@ -242,7 +243,7 @@ var init_tab_manager = __esm({
             title: tab.title || "",
             debuggerAttached: true
           });
-          console.log(`Debugger attached to tab ${tabId}`);
+          console.log(`%c[ARC-TUNNEL-DIAG] \u26D3\uFE0F Debugger ATTACHED to tab ${tabId} \u2014 infobar should appear now`, "color:#e74c3c;font-size:14px;font-weight:bold;");
         } catch (error) {
           if (error?.message?.includes("already attached")) {
             try {
@@ -253,7 +254,7 @@ var init_tab_manager = __esm({
                 title: tab.title || "",
                 debuggerAttached: true
               });
-              console.log(`Debugger already attached to tab ${tabId}, state restored`);
+              console.log(`[ARC-TUNNEL-DIAG] Debugger already attached to tab ${tabId}, state restored`);
               return;
             } catch (tabError) {
               console.error(`Failed to get tab info for tab ${tabId}:`, tabError);
