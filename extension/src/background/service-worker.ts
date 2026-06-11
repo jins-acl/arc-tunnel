@@ -44,6 +44,10 @@ async function loadConfig(): Promise<string> {
 
 // Connect to MCP server
 async function initialize() {
+  if (wsClient.isConnected()) {
+    return;
+  }
+
   const wsUrl = await loadConfig();
   wsClient.setUrl(wsUrl);
 
@@ -76,6 +80,12 @@ wsClient.onCommand(async (command: CommandMessage) => {
   console.log('Received command:', command.command);
   const response = await commandHandler.handleCommand(command);
   wsClient.sendResponse(response);
+});
+
+// Auto-detach debugger when MCP server disconnects so banners don't linger
+wsClient.onDisconnect(async () => {
+  console.log('[ARC-TUNNEL-DIAG] MCP server disconnected — detaching all debuggers');
+  await tabManager.detachAllDebuggers();
 });
 
 // Respond to popup status queries
