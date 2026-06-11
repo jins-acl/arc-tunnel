@@ -8,13 +8,23 @@ export class TabManager {
 
   async syncExistingTabs(): Promise<void> {
     const existingTabs = await chrome.tabs.query({});
+    // Query real debugger state from the browser instead of assuming false
+    let attachedTabIds: Set<number> = new Set();
+    try {
+      const targets = await chrome.debugger.getTargets();
+      attachedTabIds = new Set(targets.filter(t => t.attached).map(t => t.tabId));
+    } catch (e) {
+      console.warn('Failed to get debugger targets:', e);
+    }
+
     for (const tab of existingTabs) {
       if (tab.id && !this.tabs.has(tab.id)) {
+        const hasDebugger = attachedTabIds.has(tab.id);
         this.tabs.set(tab.id, {
           id: tab.id,
           url: tab.url || '',
           title: tab.title || '',
-          debuggerAttached: false
+          debuggerAttached: hasDebugger
         });
       }
     }
@@ -58,10 +68,24 @@ export class TabManager {
   }
 
   /**
+   * Check whether debugger is actually attached to the tab by asking Chrome directly.
+   * This is more reliable than our internal Map after a service worker restart.
+   */
+  private async _isDebuggerActuallyAttached(tabId: number): Promise<boolean> {
+    try {
+      const targets = await chrome.debugger.getTargets();
+      return targets.some(t => t.tabId === tabId && t.attached);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
    * Ensure debugger is attached to the tab.
    * Uses a per-tab lock to prevent concurrent attach attempts.
    */
   async ensureDebuggerAttached(tabId: number): Promise<void> {
+    // Fast path: check internal state first
     if (this.tabs.get(tabId)?.debuggerAttached) {
       return;
     }
@@ -82,6 +106,22 @@ export class TabManager {
   }
 
   private async _doAttachDebugger(tabId: number): Promise<void> {
+    // Before trying to attach, ask Chrome directly if debugger is already there.
+    // This avoids the "already attached" error path entirely, which may trigger
+    // Chrome/Edge to redraw the infobar and cause ghosting.
+    const alreadyAttached = await this._isDebuggerActuallyAttached(tabId);
+    if (alreadyAttached) {
+      const tab = await chrome.tabs.get(tabId);
+      this.tabs.set(tabId, {
+        id: tabId,
+        url: tab.url || '',
+        title: tab.title || '',
+        debuggerAttached: true
+      });
+      console.log(`Debugger already attached to tab ${tabId}, skipping attach`);
+      return;
+    }
+
     try {
       await chrome.debugger.attach({ tabId }, '1.3');
       const tab = await chrome.tabs.get(tabId);
@@ -93,8 +133,8 @@ export class TabManager {
       });
       console.log(`Debugger attached to tab ${tabId}`);
     } catch (error: any) {
-      // If debugger is already attached (e.g. after service worker restart),
-      // update internal state map instead of erroring
+      // Defensive fallback: if attach fails with "already attached",
+      // sync state and return without throwing.
       if (error?.message?.includes('already attached')) {
         try {
           const tab = await chrome.tabs.get(tabId);

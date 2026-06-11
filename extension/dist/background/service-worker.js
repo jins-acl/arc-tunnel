@@ -136,13 +136,21 @@ var init_tab_manager = __esm({
       }
       async syncExistingTabs() {
         const existingTabs = await chrome.tabs.query({});
+        let attachedTabIds = /* @__PURE__ */ new Set();
+        try {
+          const targets = await chrome.debugger.getTargets();
+          attachedTabIds = new Set(targets.filter((t) => t.attached).map((t) => t.tabId));
+        } catch (e) {
+          console.warn("Failed to get debugger targets:", e);
+        }
         for (const tab of existingTabs) {
           if (tab.id && !this.tabs.has(tab.id)) {
+            const hasDebugger = attachedTabIds.has(tab.id);
             this.tabs.set(tab.id, {
               id: tab.id,
               url: tab.url || "",
               title: tab.title || "",
-              debuggerAttached: false
+              debuggerAttached: hasDebugger
             });
           }
         }
@@ -181,6 +189,18 @@ var init_tab_manager = __esm({
         }
       }
       /**
+       * Check whether debugger is actually attached to the tab by asking Chrome directly.
+       * This is more reliable than our internal Map after a service worker restart.
+       */
+      async _isDebuggerActuallyAttached(tabId) {
+        try {
+          const targets = await chrome.debugger.getTargets();
+          return targets.some((t) => t.tabId === tabId && t.attached);
+        } catch (e) {
+          return false;
+        }
+      }
+      /**
        * Ensure debugger is attached to the tab.
        * Uses a per-tab lock to prevent concurrent attach attempts.
        */
@@ -201,6 +221,18 @@ var init_tab_manager = __esm({
         }
       }
       async _doAttachDebugger(tabId) {
+        const alreadyAttached = await this._isDebuggerActuallyAttached(tabId);
+        if (alreadyAttached) {
+          const tab = await chrome.tabs.get(tabId);
+          this.tabs.set(tabId, {
+            id: tabId,
+            url: tab.url || "",
+            title: tab.title || "",
+            debuggerAttached: true
+          });
+          console.log(`Debugger already attached to tab ${tabId}, skipping attach`);
+          return;
+        }
         try {
           await chrome.debugger.attach({ tabId }, "1.3");
           const tab = await chrome.tabs.get(tabId);
