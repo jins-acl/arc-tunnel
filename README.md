@@ -116,6 +116,12 @@ node scripts/start.js        # 默认端口 8765
 node scripts/start.js --port 9876  # 自定义端口
 ```
 
+> **⚠️ 重要：MCP Server 应保持常驻运行**
+>
+> Arc Tunnel 的浏览器扩展通过 WebSocket 与 MCP Server 保持长连接。如果 Server 频繁重启，扩展会进入断开 → 重连的循环。在此过程中，Chrome/Edge 的 debugger 横幅（"已开始调试此浏览器"）可能被重复绘制，导致视觉上出现**重影/叠影**。
+>
+> **推荐做法**：启动后让 Server 一直在后台运行，不要频繁手动停止再启动。如需重启 Server，建议先禁用浏览器扩展，待 Server 稳定后再重新加载扩展。
+
 ### 5. 验证连接
 
 1. 重启你的 AI Agent 工具

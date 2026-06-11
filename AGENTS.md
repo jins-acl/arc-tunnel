@@ -16,6 +16,12 @@ node scripts/install.js
 node scripts/start.js
 ```
 
+> **⚠️ MCP Server 必须常驻运行**
+>
+> 浏览器扩展通过 WebSocket 与 MCP Server 保持长连接。**频繁重启 Server 会导致扩展进入 disconnect → reconnect 循环**，在此过程中 Chrome/Edge 的 debugger 横幅可能被重复绘制，出现视觉上的重影/叠影。
+>
+> **正确做法**：启动后保持 Server 运行；如需重启，先禁用扩展，待 Server 稳定后再重新加载。
+
 ## Project Structure
 
 | Component | Path | Build Command |
