@@ -20,6 +20,7 @@ var init_websocket_client = __esm({
         this.maxReconnectDelay = 3e4;
         this.messageHandlers = /* @__PURE__ */ new Map();
         this.intentionalClose = false;
+        this.connecting = false;
         this.url = url || "ws://localhost:8765";
       }
       setUrl(url) {
@@ -29,18 +30,25 @@ var init_websocket_client = __esm({
         this.url = url;
       }
       async connect() {
+        if (this.isConnected() || this.connecting) {
+          return;
+        }
+        this.connecting = true;
+        this.intentionalClose = false;
         return new Promise((resolve, reject) => {
           this.ws = new WebSocket(this.url);
           this.ws.onopen = () => {
             console.log("Connected to MCP server");
             this.reconnectAttempts = 0;
+            this.connecting = false;
+            chrome.alarms.clear("ws-reconnect");
             resolve();
           };
           this.ws.onerror = (error) => {
             console.error("WebSocket error:", error);
-            reject(error);
           };
           this.ws.onclose = () => {
+            this.connecting = false;
             console.log("Disconnected from MCP server");
             this.handleReconnect();
           };
@@ -52,6 +60,12 @@ var init_websocket_client = __esm({
               console.error("Failed to parse message:", error);
             }
           };
+          setTimeout(() => {
+            if (this.connecting) {
+              this.connecting = false;
+              reject(new Error("WebSocket connection timeout"));
+            }
+          }, 1e4);
         });
       }
       disconnect() {
@@ -118,6 +132,7 @@ var init_tab_manager = __esm({
       constructor() {
         this.tabs = /* @__PURE__ */ new Map();
         this.listenersSetup = false;
+        this.attachLocks = /* @__PURE__ */ new Map();
       }
       async syncExistingTabs() {
         const existingTabs = await chrome.tabs.query({});
@@ -145,6 +160,7 @@ var init_tab_manager = __esm({
           });
           chrome.tabs.onRemoved.addListener((tabId) => {
             this.tabs.delete(tabId);
+            this.attachLocks.delete(tabId);
           });
           chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
             const existing = this.tabs.get(tabId);
@@ -153,10 +169,38 @@ var init_tab_manager = __esm({
               if (changeInfo.title) existing.title = changeInfo.title;
             }
           });
+          chrome.debugger.onDetach.addListener((source) => {
+            const tabInfo = this.tabs.get(source.tabId);
+            if (tabInfo) {
+              tabInfo.debuggerAttached = false;
+            }
+            this.attachLocks.delete(source.tabId);
+            console.log(`Debugger detached externally from tab ${source.tabId}`);
+          });
           this.listenersSetup = true;
         }
       }
-      async attachDebugger(tabId) {
+      /**
+       * Ensure debugger is attached to the tab.
+       * Uses a per-tab lock to prevent concurrent attach attempts.
+       */
+      async ensureDebuggerAttached(tabId) {
+        if (this.tabs.get(tabId)?.debuggerAttached) {
+          return;
+        }
+        const existingLock = this.attachLocks.get(tabId);
+        if (existingLock) {
+          return existingLock;
+        }
+        const lock = this._doAttachDebugger(tabId);
+        this.attachLocks.set(tabId, lock);
+        try {
+          await lock;
+        } finally {
+          this.attachLocks.delete(tabId);
+        }
+      }
+      async _doAttachDebugger(tabId) {
         try {
           await chrome.debugger.attach({ tabId }, "1.3");
           const tab = await chrome.tabs.get(tabId);
@@ -187,6 +231,10 @@ var init_tab_manager = __esm({
           console.error(`Failed to attach debugger to tab ${tabId}:`, error);
           throw error;
         }
+      }
+      /** @deprecated Use ensureDebuggerAttached instead */
+      async attachDebugger(tabId) {
+        return this.ensureDebuggerAttached(tabId);
       }
       async detachDebugger(tabId) {
         try {
@@ -1495,9 +1543,7 @@ var init_command_handler = __esm({
         }
       }
       async ensureDebuggerAttached(tabId) {
-        if (!this.tabManager.isDebuggerAttached(tabId)) {
-          await this.tabManager.attachDebugger(tabId);
-        }
+        await this.tabManager.ensureDebuggerAttached(tabId);
       }
       async resolveRef(tabId, ref) {
         try {
@@ -1550,6 +1596,9 @@ var require_service_worker = __commonJS({
       }
     }
     async function initialize() {
+      if (wsClient.isConnected()) {
+        return;
+      }
       const wsUrl = await loadConfig();
       wsClient.setUrl(wsUrl);
       try {

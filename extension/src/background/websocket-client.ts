@@ -10,6 +10,7 @@ export class WebSocketClient {
   private maxReconnectDelay = 30000;
   private messageHandlers: Map<string, (message: any) => void> = new Map();
   private intentionalClose = false;
+  private connecting = false;
 
   constructor(url?: string) {
     this.url = url || 'ws://localhost:8765';
@@ -23,21 +24,32 @@ export class WebSocketClient {
   }
 
   async connect(): Promise<void> {
+    if (this.isConnected() || this.connecting) {
+      return;
+    }
+
+    this.connecting = true;
+    this.intentionalClose = false;
+
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(this.url);
 
       this.ws.onopen = () => {
         console.log('Connected to MCP server');
         this.reconnectAttempts = 0;
+        this.connecting = false;
+        // Clear any stale reconnect alarm now that we're connected
+        chrome.alarms.clear('ws-reconnect');
         resolve();
       };
 
       this.ws.onerror = (error) => {
         console.error('WebSocket error:', error);
-        reject(error);
+        // Error alone does not mean the connection failed; onclose will follow
       };
 
       this.ws.onclose = () => {
+        this.connecting = false;
         console.log('Disconnected from MCP server');
         this.handleReconnect();
       };
@@ -50,6 +62,14 @@ export class WebSocketClient {
           console.error('Failed to parse message:', error);
         }
       };
+
+      // Safety timeout in case neither onopen nor onclose fires
+      setTimeout(() => {
+        if (this.connecting) {
+          this.connecting = false;
+          reject(new Error('WebSocket connection timeout'));
+        }
+      }, 10000);
     });
   }
 

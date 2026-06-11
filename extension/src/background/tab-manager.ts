@@ -4,6 +4,7 @@ import { TabInfo } from '../types';
 export class TabManager {
   private tabs: Map<number, TabInfo> = new Map();
   private listenersSetup = false;
+  private attachLocks: Map<number, Promise<void>> = new Map();
 
   async syncExistingTabs(): Promise<void> {
     const existingTabs = await chrome.tabs.query({});
@@ -33,6 +34,7 @@ export class TabManager {
       });
       chrome.tabs.onRemoved.addListener((tabId) => {
         this.tabs.delete(tabId);
+        this.attachLocks.delete(tabId);
       });
       chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
         const existing = this.tabs.get(tabId);
@@ -41,11 +43,45 @@ export class TabManager {
           if (changeInfo.title) existing.title = changeInfo.title;
         }
       });
+      // Keep state in sync when debugger is detached externally
+      // (e.g. user clicks "Cancel" on the debugging banner)
+      chrome.debugger.onDetach.addListener((source) => {
+        const tabInfo = this.tabs.get(source.tabId);
+        if (tabInfo) {
+          tabInfo.debuggerAttached = false;
+        }
+        this.attachLocks.delete(source.tabId);
+        console.log(`Debugger detached externally from tab ${source.tabId}`);
+      });
       this.listenersSetup = true;
     }
   }
 
-  async attachDebugger(tabId: number): Promise<void> {
+  /**
+   * Ensure debugger is attached to the tab.
+   * Uses a per-tab lock to prevent concurrent attach attempts.
+   */
+  async ensureDebuggerAttached(tabId: number): Promise<void> {
+    if (this.tabs.get(tabId)?.debuggerAttached) {
+      return;
+    }
+
+    const existingLock = this.attachLocks.get(tabId);
+    if (existingLock) {
+      return existingLock;
+    }
+
+    const lock = this._doAttachDebugger(tabId);
+    this.attachLocks.set(tabId, lock);
+
+    try {
+      await lock;
+    } finally {
+      this.attachLocks.delete(tabId);
+    }
+  }
+
+  private async _doAttachDebugger(tabId: number): Promise<void> {
     try {
       await chrome.debugger.attach({ tabId }, '1.3');
       const tab = await chrome.tabs.get(tabId);
@@ -78,6 +114,11 @@ export class TabManager {
       console.error(`Failed to attach debugger to tab ${tabId}:`, error);
       throw error;
     }
+  }
+
+  /** @deprecated Use ensureDebuggerAttached instead */
+  async attachDebugger(tabId: number): Promise<void> {
+    return this.ensureDebuggerAttached(tabId);
   }
 
   async detachDebugger(tabId: number): Promise<void> {

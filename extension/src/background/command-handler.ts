@@ -325,9 +325,7 @@ export class CommandHandler {
   }
 
   private async ensureDebuggerAttached(tabId: number): Promise<void> {
-    if (!this.tabManager.isDebuggerAttached(tabId)) {
-      await this.tabManager.attachDebugger(tabId);
-    }
+    await this.tabManager.ensureDebuggerAttached(tabId);
   }
 
   private async resolveRef(tabId: number, ref: string): Promise<number | null> {

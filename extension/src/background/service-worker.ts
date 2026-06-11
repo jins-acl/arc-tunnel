@@ -44,6 +44,10 @@ async function loadConfig(): Promise<string> {
 
 // Connect to MCP server
 async function initialize() {
+  if (wsClient.isConnected()) {
+    return;
+  }
+
   const wsUrl = await loadConfig();
   wsClient.setUrl(wsUrl);
 
