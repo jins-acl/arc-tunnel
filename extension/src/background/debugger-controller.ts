@@ -75,6 +75,24 @@ export class DebuggerController {
   }
 
   async screenshot(tabId: number, fullPage: boolean = false): Promise<string> {
+    if (!fullPage) {
+      // Prefer chrome.tabs.captureVisibleTab to avoid Edge debugger infobar
+      // redraw issues triggered by Page.captureScreenshot. Wrap in a timeout
+      // so slow/stuck captures fall back to CDP instead of hanging forever.
+      try {
+        await chrome.tabs.update(tabId, { active: true });
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('captureVisibleTab timeout')), 5000);
+          chrome.tabs.captureVisibleTab({ format: 'png' })
+            .then((url) => { clearTimeout(timer); resolve(url); })
+            .catch((err) => { clearTimeout(timer); reject(err); });
+        });
+        return dataUrl.replace(/^data:image\/png;base64,/, '');
+      } catch (e: any) {
+        console.warn('[ARC-TUNNEL-DIAG] captureVisibleTab failed/timed out, falling back to CDP:', e.message);
+      }
+    }
+
     const result = await this.sendCommand(tabId, 'Page.captureScreenshot', {
       format: 'png',
       captureBeyondViewport: fullPage

@@ -118,6 +118,7 @@ var init_tab_manager = __esm({
       constructor() {
         this.tabs = /* @__PURE__ */ new Map();
         this.listenersSetup = false;
+        this.attachLocks = /* @__PURE__ */ new Map();
       }
       async syncExistingTabs() {
         const existingTabs = await chrome.tabs.query({});
@@ -129,6 +130,10 @@ var init_tab_manager = __esm({
               title: tab.title || "",
               debuggerAttached: false
             });
+          } else if (tab.id && this.tabs.has(tab.id)) {
+            const existing = this.tabs.get(tab.id);
+            existing.url = tab.url || "";
+            existing.title = tab.title || "";
           }
         }
         console.log(`Synced ${existingTabs.length} existing tabs`);
@@ -145,6 +150,15 @@ var init_tab_manager = __esm({
           });
           chrome.tabs.onRemoved.addListener((tabId) => {
             this.tabs.delete(tabId);
+            this.attachLocks.delete(tabId);
+          });
+          chrome.debugger.onDetach.addListener((source) => {
+            const tabInfo = this.tabs.get(source.tabId);
+            if (tabInfo) {
+              tabInfo.debuggerAttached = false;
+            }
+            this.attachLocks.delete(source.tabId);
+            console.log(`[ARC-TUNNEL-DIAG] \u274C Debugger DETACHED from tab ${source.tabId}, reason=${source.reason}`);
           });
           chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
             const existing = this.tabs.get(tabId);
@@ -156,7 +170,53 @@ var init_tab_manager = __esm({
           this.listenersSetup = true;
         }
       }
-      async attachDebugger(tabId) {
+      /**
+       * Ensure debugger is attached to the tab.
+       * Uses a per-tab lock to prevent concurrent attach attempts.
+       * Lock is checked BEFORE any async operation to eliminate the race window.
+       */
+      async ensureDebuggerAttached(tabId) {
+        if (this.tabs.get(tabId)?.debuggerAttached) {
+          return;
+        }
+        const existingLock = this.attachLocks.get(tabId);
+        if (existingLock) {
+          return existingLock;
+        }
+        let resolveLock;
+        const lockPromise = new Promise((resolve) => {
+          resolveLock = resolve;
+        });
+        this.attachLocks.set(tabId, lockPromise);
+        try {
+          const alreadyAttached = await this._isDebuggerActuallyAttached(tabId);
+          if (alreadyAttached) {
+            const tab = await chrome.tabs.get(tabId);
+            this.tabs.set(tabId, {
+              id: tabId,
+              url: tab.url || "",
+              title: tab.title || "",
+              debuggerAttached: true
+            });
+            console.log(`[ARC-TUNNEL-DIAG] Debugger already attached to tab ${tabId}, skipping attach`);
+            return;
+          }
+          console.log(`[ARC-TUNNEL-DIAG] ensureDebuggerAttached called for tab ${tabId}`);
+          await this._doAttachDebugger(tabId);
+        } finally {
+          this.attachLocks.delete(tabId);
+          resolveLock();
+        }
+      }
+      async _isDebuggerActuallyAttached(tabId) {
+        try {
+          const targets = await chrome.debugger.getTargets();
+          return targets.some((t) => t.tabId === tabId && t.attached);
+        } catch (e) {
+          return false;
+        }
+      }
+      async _doAttachDebugger(tabId) {
         try {
           await chrome.debugger.attach({ tabId }, "1.3");
           const tab = await chrome.tabs.get(tabId);
@@ -166,7 +226,7 @@ var init_tab_manager = __esm({
             title: tab.title || "",
             debuggerAttached: true
           });
-          console.log(`Debugger attached to tab ${tabId}`);
+          console.log(`[ARC-TUNNEL-DIAG] \u26D3\uFE0F Debugger ATTACHED to tab ${tabId} \u2014 infobar should appear now`);
         } catch (error) {
           if (error?.message?.includes("already attached")) {
             try {
@@ -177,7 +237,7 @@ var init_tab_manager = __esm({
                 title: tab.title || "",
                 debuggerAttached: true
               });
-              console.log(`Debugger already attached to tab ${tabId}, state restored`);
+              console.log(`[ARC-TUNNEL-DIAG] Debugger already attached to tab ${tabId}, state restored`);
               return;
             } catch (tabError) {
               console.error(`Failed to get tab info for tab ${tabId}:`, tabError);
@@ -195,6 +255,7 @@ var init_tab_manager = __esm({
           if (tabInfo) {
             tabInfo.debuggerAttached = false;
           }
+          this.attachLocks.delete(tabId);
           console.log(`Debugger detached from tab ${tabId}`);
         } catch (error) {
           console.error(`Failed to detach debugger from tab ${tabId}:`, error);
@@ -302,6 +363,24 @@ var init_debugger_controller = __esm({
         await this.executeScript(tabId, script);
       }
       async screenshot(tabId, fullPage = false) {
+        if (!fullPage) {
+          try {
+            await chrome.tabs.update(tabId, { active: true });
+            const dataUrl = await new Promise((resolve, reject) => {
+              const timer = setTimeout(() => reject(new Error("captureVisibleTab timeout")), 5e3);
+              chrome.tabs.captureVisibleTab({ format: "png" }).then((url) => {
+                clearTimeout(timer);
+                resolve(url);
+              }).catch((err) => {
+                clearTimeout(timer);
+                reject(err);
+              });
+            });
+            return dataUrl.replace(/^data:image\/png;base64,/, "");
+          } catch (e) {
+            console.warn("[ARC-TUNNEL-DIAG] captureVisibleTab failed/timed out, falling back to CDP:", e.message);
+          }
+        }
         const result = await this.sendCommand(tabId, "Page.captureScreenshot", {
           format: "png",
           captureBeyondViewport: fullPage
@@ -1422,8 +1501,19 @@ var init_command_handler = __esm({
           }
           // ─── Utility & legacy tools ───
           case "screenshot": {
-            await this.ensureDebuggerAttached(params.tabId);
-            const screenshot = await this.debuggerController.screenshot(params.tabId, params.fullPage);
+            if (params.fullPage) {
+              await this.ensureDebuggerAttached(params.tabId);
+            }
+            let screenshot;
+            try {
+              screenshot = await this.debuggerController.screenshot(params.tabId, params.fullPage);
+            } catch (error) {
+              if (params.fullPage) {
+                throw error;
+              }
+              await this.ensureDebuggerAttached(params.tabId);
+              screenshot = await this.debuggerController.screenshot(params.tabId, params.fullPage);
+            }
             return { screenshot };
           }
           case "execute_script": {
@@ -1495,9 +1585,7 @@ var init_command_handler = __esm({
         }
       }
       async ensureDebuggerAttached(tabId) {
-        if (!this.tabManager.isDebuggerAttached(tabId)) {
-          await this.tabManager.attachDebugger(tabId);
-        }
+        await this.tabManager.ensureDebuggerAttached(tabId);
       }
       async resolveRef(tabId, ref) {
         try {

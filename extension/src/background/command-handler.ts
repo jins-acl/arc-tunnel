@@ -241,8 +241,20 @@ export class CommandHandler {
       // ─── Utility & legacy tools ───
 
       case 'screenshot': {
-        await this.ensureDebuggerAttached(params.tabId);
-        const screenshot = await this.debuggerController.screenshot(params.tabId, params.fullPage);
+        if (params.fullPage) {
+          await this.ensureDebuggerAttached(params.tabId);
+        }
+
+        let screenshot: string;
+        try {
+          screenshot = await this.debuggerController.screenshot(params.tabId, params.fullPage);
+        } catch (error) {
+          if (params.fullPage) {
+            throw error;
+          }
+          await this.ensureDebuggerAttached(params.tabId);
+          screenshot = await this.debuggerController.screenshot(params.tabId, params.fullPage);
+        }
         return { screenshot };
       }
 
@@ -325,9 +337,7 @@ export class CommandHandler {
   }
 
   private async ensureDebuggerAttached(tabId: number): Promise<void> {
-    if (!this.tabManager.isDebuggerAttached(tabId)) {
-      await this.tabManager.attachDebugger(tabId);
-    }
+    await this.tabManager.ensureDebuggerAttached(tabId);
   }
 
   private async resolveRef(tabId: number, ref: string): Promise<number | null> {
