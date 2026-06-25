@@ -48,6 +48,9 @@ export class TabManager {
         this.debuggerHolds.delete(tabId);
       });
       chrome.debugger.onDetach.addListener((source) => {
+        if (source.tabId == null) {
+          return;
+        }
         const tabInfo = this.tabs.get(source.tabId);
         if (tabInfo) {
           tabInfo.debuggerAttached = false;
@@ -55,7 +58,7 @@ export class TabManager {
         this.attachLocks.delete(source.tabId);
         this.clearDetachTimer(source.tabId);
         this.debuggerHolds.delete(source.tabId);
-        console.log(`[ARC-TUNNEL-DIAG] ❌ Debugger DETACHED from tab ${source.tabId}, reason=${source.reason}`);
+        console.log(`[ARC-TUNNEL-DIAG] ❌ Debugger DETACHED from tab ${source.tabId}, reason=${(source as any).reason || 'unknown'}`);
       });
       chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
         const existing = this.tabs.get(tabId);

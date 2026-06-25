@@ -8,7 +8,7 @@ export class PlaybackEngine {
   async replay(recordingId: string, tabId: number): Promise<void> {
     // Load recording from storage
     const result = await chrome.storage.local.get(`recording_${recordingId}`);
-    const recording: Recording = result[`recording_${recordingId}`];
+    const recording = result[`recording_${recordingId}`] as Recording | undefined;
 
     if (!recording) {
       throw new Error('Recording not found');

@@ -44,7 +44,7 @@ export class SessionManager {
 
   async restoreSession(sessionId: string): Promise<void> {
     const result = await chrome.storage.local.get(`session_${sessionId}`);
-    const session: SessionData = result[`session_${sessionId}`];
+    const session = result[`session_${sessionId}`] as SessionData | undefined;
 
     if (!session) {
       throw new Error('Session not found');
@@ -89,7 +89,7 @@ export class SessionManager {
 
     for (const key of Object.keys(allData)) {
       if (key.startsWith('session_')) {
-        sessions.push(allData[key]);
+        sessions.push(allData[key] as SessionData);
       }
     }
 

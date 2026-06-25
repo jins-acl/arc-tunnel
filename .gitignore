@@ -1,1 +1,5 @@
 .mcp.json
+
+# Local investigation scratch files
+*.scratch.ts
+*-fix.ts

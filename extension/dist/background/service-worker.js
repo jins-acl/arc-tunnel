@@ -158,6 +158,9 @@ var init_tab_manager = __esm({
             this.debuggerHolds.delete(tabId);
           });
           chrome.debugger.onDetach.addListener((source) => {
+            if (source.tabId == null) {
+              return;
+            }
             const tabInfo = this.tabs.get(source.tabId);
             if (tabInfo) {
               tabInfo.debuggerAttached = false;
@@ -165,7 +168,7 @@ var init_tab_manager = __esm({
             this.attachLocks.delete(source.tabId);
             this.clearDetachTimer(source.tabId);
             this.debuggerHolds.delete(source.tabId);
-            console.log(`[ARC-TUNNEL-DIAG] \u274C Debugger DETACHED from tab ${source.tabId}, reason=${source.reason}`);
+            console.log(`[ARC-TUNNEL-DIAG] \u274C Debugger DETACHED from tab ${source.tabId}, reason=${source.reason || "unknown"}`);
           });
           chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
             const existing = this.tabs.get(tabId);
@@ -1873,7 +1876,7 @@ var require_service_worker = __commonJS({
     async function loadConfig() {
       try {
         const result = await chrome.storage.local.get(["arc_tunnel_ws_url"]);
-        return result.arc_tunnel_ws_url || DEFAULT_WS_URL;
+        return typeof result.arc_tunnel_ws_url === "string" ? result.arc_tunnel_ws_url : DEFAULT_WS_URL;
       } catch {
         return DEFAULT_WS_URL;
       }
@@ -1891,7 +1894,7 @@ var require_service_worker = __commonJS({
     }
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area === "local" && changes.arc_tunnel_ws_url) {
-        const newUrl = changes.arc_tunnel_ws_url.newValue || DEFAULT_WS_URL;
+        const newUrl = typeof changes.arc_tunnel_ws_url.newValue === "string" ? changes.arc_tunnel_ws_url.newValue : DEFAULT_WS_URL;
         console.log(`WebSocket URL changed to: ${newUrl}`);
         wsClient.setUrl(newUrl);
         if (!wsClient.isConnected()) {

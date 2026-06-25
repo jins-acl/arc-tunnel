@@ -39,7 +39,7 @@ const commandHandler = new CommandHandler(
 async function loadConfig(): Promise<string> {
   try {
     const result = await chrome.storage.local.get(['arc_tunnel_ws_url']);
-    return result.arc_tunnel_ws_url || DEFAULT_WS_URL;
+    return typeof result.arc_tunnel_ws_url === 'string' ? result.arc_tunnel_ws_url : DEFAULT_WS_URL;
   } catch {
     return DEFAULT_WS_URL;
   }
@@ -64,7 +64,9 @@ async function initialize() {
 // Listen for configuration changes
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.arc_tunnel_ws_url) {
-    const newUrl = changes.arc_tunnel_ws_url.newValue || DEFAULT_WS_URL;
+    const newUrl = typeof changes.arc_tunnel_ws_url.newValue === 'string'
+      ? changes.arc_tunnel_ws_url.newValue
+      : DEFAULT_WS_URL;
     console.log(`WebSocket URL changed to: ${newUrl}`);
     wsClient.setUrl(newUrl);
     // Trigger reconnect

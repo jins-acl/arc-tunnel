@@ -26,7 +26,7 @@
       }
       function loadConfig(urlInput) {
         chrome.storage.local.get(["arc_tunnel_ws_url"], (result) => {
-          if (result.arc_tunnel_ws_url) {
+          if (typeof result.arc_tunnel_ws_url === "string") {
             urlInput.value = result.arc_tunnel_ws_url;
           }
         });
