@@ -119,6 +119,9 @@ var init_tab_manager = __esm({
         this.tabs = /* @__PURE__ */ new Map();
         this.listenersSetup = false;
         this.attachLocks = /* @__PURE__ */ new Map();
+        this.detachTimers = /* @__PURE__ */ new Map();
+        this.debuggerHolds = /* @__PURE__ */ new Map();
+        this.idleDetachDelayMs = 15e3;
       }
       async syncExistingTabs() {
         const existingTabs = await chrome.tabs.query({});
@@ -151,6 +154,8 @@ var init_tab_manager = __esm({
           chrome.tabs.onRemoved.addListener((tabId) => {
             this.tabs.delete(tabId);
             this.attachLocks.delete(tabId);
+            this.clearDetachTimer(tabId);
+            this.debuggerHolds.delete(tabId);
           });
           chrome.debugger.onDetach.addListener((source) => {
             const tabInfo = this.tabs.get(source.tabId);
@@ -158,6 +163,8 @@ var init_tab_manager = __esm({
               tabInfo.debuggerAttached = false;
             }
             this.attachLocks.delete(source.tabId);
+            this.clearDetachTimer(source.tabId);
+            this.debuggerHolds.delete(source.tabId);
             console.log(`[ARC-TUNNEL-DIAG] \u274C Debugger DETACHED from tab ${source.tabId}, reason=${source.reason}`);
           });
           chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -176,7 +183,9 @@ var init_tab_manager = __esm({
        * Lock is checked BEFORE any async operation to eliminate the race window.
        */
       async ensureDebuggerAttached(tabId) {
+        this.clearDetachTimer(tabId);
         if (this.tabs.get(tabId)?.debuggerAttached) {
+          console.log(`[ARC-TUNNEL-DIAG] Debugger already tracked for tab ${tabId}, reusing attach`);
           return;
         }
         const existingLock = this.attachLocks.get(tabId);
@@ -250,12 +259,14 @@ var init_tab_manager = __esm({
       }
       async detachDebugger(tabId) {
         try {
+          this.clearDetachTimer(tabId);
           await chrome.debugger.detach({ tabId });
           const tabInfo = this.tabs.get(tabId);
           if (tabInfo) {
             tabInfo.debuggerAttached = false;
           }
           this.attachLocks.delete(tabId);
+          this.debuggerHolds.delete(tabId);
           console.log(`Debugger detached from tab ${tabId}`);
         } catch (error) {
           console.error(`Failed to detach debugger from tab ${tabId}:`, error);
@@ -277,6 +288,8 @@ var init_tab_manager = __esm({
       async closeTab(tabId) {
         await chrome.tabs.remove(tabId);
         this.tabs.delete(tabId);
+        this.clearDetachTimer(tabId);
+        this.debuggerHolds.delete(tabId);
       }
       listTabs() {
         return Array.from(this.tabs.values());
@@ -286,6 +299,63 @@ var init_tab_manager = __esm({
       }
       isDebuggerAttached(tabId) {
         return this.tabs.get(tabId)?.debuggerAttached || false;
+      }
+      holdDebuggerAttached(tabId, reason) {
+        this.clearDetachTimer(tabId);
+        const count = (this.debuggerHolds.get(tabId) || 0) + 1;
+        this.debuggerHolds.set(tabId, count);
+        console.log(`[ARC-TUNNEL-DIAG] Debugger hold +1 for tab ${tabId} (${reason}), count=${count}`);
+      }
+      releaseDebuggerAttached(tabId, reason) {
+        const count = this.debuggerHolds.get(tabId) || 0;
+        if (count <= 1) {
+          this.debuggerHolds.delete(tabId);
+          console.log(`[ARC-TUNNEL-DIAG] Debugger hold released for tab ${tabId} (${reason})`);
+        } else {
+          this.debuggerHolds.set(tabId, count - 1);
+          console.log(`[ARC-TUNNEL-DIAG] Debugger hold -1 for tab ${tabId} (${reason}), count=${count - 1}`);
+        }
+        this.scheduleDebuggerDetach(tabId, reason);
+      }
+      scheduleDebuggerDetach(tabId, reason, delayMs = this.idleDetachDelayMs) {
+        if (!this.isDebuggerAttached(tabId)) {
+          return;
+        }
+        if ((this.debuggerHolds.get(tabId) || 0) > 0) {
+          console.log(`[ARC-TUNNEL-DIAG] Debugger detach skipped for tab ${tabId} (${reason}); hold active`);
+          return;
+        }
+        this.clearDetachTimer(tabId);
+        const timer = setTimeout(() => {
+          this.detachTimers.delete(tabId);
+          if ((this.debuggerHolds.get(tabId) || 0) > 0 || !this.isDebuggerAttached(tabId)) {
+            return;
+          }
+          chrome.debugger.detach({ tabId }, () => {
+            if (chrome.runtime.lastError) {
+              console.warn(
+                `[ARC-TUNNEL-DIAG] Idle debugger detach failed for tab ${tabId}:`,
+                chrome.runtime.lastError.message
+              );
+              return;
+            }
+            const tabInfo = this.tabs.get(tabId);
+            if (tabInfo) {
+              tabInfo.debuggerAttached = false;
+            }
+            this.attachLocks.delete(tabId);
+            console.log(`[ARC-TUNNEL-DIAG] Debugger idle-detached from tab ${tabId} (${reason})`);
+          });
+        }, delayMs);
+        this.detachTimers.set(tabId, timer);
+        console.log(`[ARC-TUNNEL-DIAG] Debugger idle detach scheduled for tab ${tabId} in ${delayMs}ms (${reason})`);
+      }
+      clearDetachTimer(tabId) {
+        const timer = this.detachTimers.get(tabId);
+        if (timer) {
+          clearTimeout(timer);
+          this.detachTimers.delete(tabId);
+        }
       }
     };
   }
@@ -849,13 +919,13 @@ var init_console_capture = __esm({
         this.listeners = /* @__PURE__ */ new Map();
       }
       async enableForTab(tabId, debuggerController) {
-        if (this.listeners.has(tabId)) return;
         if (debuggerController) {
           try {
             await debuggerController.sendCommand(tabId, "Runtime.enable");
           } catch {
           }
         }
+        if (this.listeners.has(tabId)) return;
         const handler = (source, method, params) => {
           if (method === "Runtime.consoleAPICalled") {
             const entry = {
@@ -1294,6 +1364,7 @@ var init_command_handler = __esm({
         this.consoleCapture = consoleCapture;
         this.storageManager = storageManager;
         this.lightweightController = lightweightController;
+        this.recordingDebuggerTabId = null;
         this.snapshotEngine = new SnapshotEngine(debuggerController);
         this.inputSimulator = new InputSimulator(debuggerController);
         this.actionabilityChecker = new ActionabilityChecker(debuggerController);
@@ -1324,116 +1395,126 @@ var init_command_handler = __esm({
         switch (cmd) {
           // ─── Core tools (Playwright-inspired) ───
           case "snapshot": {
-            await this.ensureDebuggerAttached(params.tabId);
-            const snapshot = await this.snapshotEngine.getSnapshot(params.tabId, true);
+            const snapshot = await this.runWithDebugger(
+              params.tabId,
+              "snapshot",
+              () => this.snapshotEngine.getSnapshot(params.tabId, true)
+            );
             return { snapshot };
           }
           case "interact": {
             await this.ensureDebuggerAttached(params.tabId);
-            let backendNodeId = null;
-            const target = params.target;
-            if (params.action !== "press") {
-              if (!target || !(target.startsWith("e") && /^e\d+$/.test(target))) {
-                throw new Error(
-                  `Target must be a ref (e.g. "e15") from a snapshot. CSS selectors are no longer supported.`
+            try {
+              let backendNodeId = null;
+              const target = params.target;
+              if (params.action !== "press") {
+                if (!target || !(target.startsWith("e") && /^e\d+$/.test(target))) {
+                  throw new Error(
+                    `Target must be a ref (e.g. "e15") from a snapshot. CSS selectors are no longer supported.`
+                  );
+                }
+                backendNodeId = await this.resolveRef(params.tabId, target);
+                if (!backendNodeId) {
+                  throw new Error(`Ref ${target} not found in snapshot. Run snapshot first.`);
+                }
+                await this.actionabilityChecker.waitForActionable(
+                  params.tabId,
+                  backendNodeId,
+                  params.timeout
                 );
               }
-              backendNodeId = await this.resolveRef(params.tabId, target);
-              if (!backendNodeId) {
-                throw new Error(`Ref ${target} not found in snapshot. Run snapshot first.`);
+              switch (params.action) {
+                case "click":
+                  await this.inputSimulator.dispatchClick(params.tabId, backendNodeId);
+                  break;
+                case "double_click":
+                  await this.inputSimulator.dispatchDoubleClick(params.tabId, backendNodeId);
+                  break;
+                case "hover":
+                  await this.inputSimulator.dispatchHover(params.tabId, backendNodeId);
+                  break;
+                case "type":
+                  if (!params.text) throw new Error("text is required for type action");
+                  await this.inputSimulator.dispatchType(params.tabId, backendNodeId, params.text);
+                  break;
+                case "press":
+                  if (!params.key) throw new Error("key is required for press action");
+                  await this.inputSimulator.dispatchPress(params.tabId, params.key);
+                  break;
+                case "check":
+                  await this.inputSimulator.dispatchCheck(params.tabId, backendNodeId, true);
+                  break;
+                case "uncheck":
+                  await this.inputSimulator.dispatchCheck(params.tabId, backendNodeId, false);
+                  break;
+                default:
+                  throw new Error(`Unknown interact action: ${params.action}`);
               }
-              await this.actionabilityChecker.waitForActionable(
-                params.tabId,
-                backendNodeId,
-                params.timeout
-              );
+              if (params.action !== "hover") {
+                this.snapshotEngine.invalidateCache(params.tabId);
+              }
+              const pageSnapshot = await this.snapshotEngine.getSnapshot(params.tabId, params.action === "hover");
+              return { status: params.action, target, pageSnapshot };
+            } finally {
+              this.tabManager.scheduleDebuggerDetach(params.tabId, "interact");
             }
-            switch (params.action) {
-              case "click":
-                await this.inputSimulator.dispatchClick(params.tabId, backendNodeId);
-                break;
-              case "double_click":
-                await this.inputSimulator.dispatchDoubleClick(params.tabId, backendNodeId);
-                break;
-              case "hover":
-                await this.inputSimulator.dispatchHover(params.tabId, backendNodeId);
-                break;
-              case "type":
-                if (!params.text) throw new Error("text is required for type action");
-                await this.inputSimulator.dispatchType(params.tabId, backendNodeId, params.text);
-                break;
-              case "press":
-                if (!params.key) throw new Error("key is required for press action");
-                await this.inputSimulator.dispatchPress(params.tabId, params.key);
-                break;
-              case "check":
-                await this.inputSimulator.dispatchCheck(params.tabId, backendNodeId, true);
-                break;
-              case "uncheck":
-                await this.inputSimulator.dispatchCheck(params.tabId, backendNodeId, false);
-                break;
-              default:
-                throw new Error(`Unknown interact action: ${params.action}`);
-            }
-            if (params.action !== "hover") {
-              this.snapshotEngine.invalidateCache(params.tabId);
-            }
-            const pageSnapshot = await this.snapshotEngine.getSnapshot(params.tabId, params.action === "hover");
-            return { status: params.action, target, pageSnapshot };
           }
           case "navigate": {
-            await this.ensureDebuggerAttached(params.tabId);
-            switch (params.action) {
-              case "goto":
-                if (!params.url) throw new Error("url is required for goto action");
-                await this.debuggerController.navigate(params.tabId, params.url);
-                this.snapshotEngine.invalidateCache(params.tabId);
-                return { status: "navigated", url: params.url };
-              case "go_back": {
-                const history = await this.debuggerController.sendCommand(
-                  params.tabId,
-                  "Page.getNavigationHistory"
-                );
-                if (history.currentIndex > 0) {
-                  const entry = history.entries[history.currentIndex - 1];
-                  await this.debuggerController.sendCommand(
-                    params.tabId,
-                    "Page.navigateToHistoryEntry",
-                    { entryId: entry.id }
-                  );
+            return await this.runWithDebugger(params.tabId, "navigate", async () => {
+              switch (params.action) {
+                case "goto":
+                  if (!params.url) throw new Error("url is required for goto action");
+                  await this.debuggerController.navigate(params.tabId, params.url);
                   this.snapshotEngine.invalidateCache(params.tabId);
-                  return { status: "went_back", url: entry.url };
-                }
-                return { status: "went_back", url: null };
-              }
-              case "go_forward": {
-                const history = await this.debuggerController.sendCommand(
-                  params.tabId,
-                  "Page.getNavigationHistory"
-                );
-                if (history.currentIndex < history.entries.length - 1) {
-                  const entry = history.entries[history.currentIndex + 1];
-                  await this.debuggerController.sendCommand(
+                  return { status: "navigated", url: params.url };
+                case "go_back": {
+                  const history = await this.debuggerController.sendCommand(
                     params.tabId,
-                    "Page.navigateToHistoryEntry",
-                    { entryId: entry.id }
+                    "Page.getNavigationHistory"
                   );
-                  this.snapshotEngine.invalidateCache(params.tabId);
-                  return { status: "went_forward", url: entry.url };
+                  if (history.currentIndex > 0) {
+                    const entry = history.entries[history.currentIndex - 1];
+                    await this.debuggerController.sendCommand(
+                      params.tabId,
+                      "Page.navigateToHistoryEntry",
+                      { entryId: entry.id }
+                    );
+                    this.snapshotEngine.invalidateCache(params.tabId);
+                    return { status: "went_back", url: entry.url };
+                  }
+                  return { status: "went_back", url: null };
                 }
-                return { status: "went_forward", url: null };
+                case "go_forward": {
+                  const history = await this.debuggerController.sendCommand(
+                    params.tabId,
+                    "Page.getNavigationHistory"
+                  );
+                  if (history.currentIndex < history.entries.length - 1) {
+                    const entry = history.entries[history.currentIndex + 1];
+                    await this.debuggerController.sendCommand(
+                      params.tabId,
+                      "Page.navigateToHistoryEntry",
+                      { entryId: entry.id }
+                    );
+                    this.snapshotEngine.invalidateCache(params.tabId);
+                    return { status: "went_forward", url: entry.url };
+                  }
+                  return { status: "went_forward", url: null };
+                }
+                case "reload":
+                  await this.debuggerController.sendCommand(params.tabId, "Page.reload");
+                  this.snapshotEngine.invalidateCache(params.tabId);
+                  return { status: "reloaded" };
+                default:
+                  throw new Error(`Unknown navigate action: ${params.action}`);
               }
-              case "reload":
-                await this.debuggerController.sendCommand(params.tabId, "Page.reload");
-                this.snapshotEngine.invalidateCache(params.tabId);
-                return { status: "reloaded" };
-              default:
-                throw new Error(`Unknown navigate action: ${params.action}`);
-            }
+            });
           }
           case "get_console_logs": {
-            await this.consoleCapture.enableForTab(params.tabId, this.debuggerController);
-            const logs = this.consoleCapture.getLogs(params.tabId, params.minLevel);
+            const logs = await this.runWithDebugger(params.tabId, "get_console_logs", async () => {
+              await this.consoleCapture.enableForTab(params.tabId, this.debuggerController);
+              return this.consoleCapture.getLogs(params.tabId, params.minLevel);
+            });
             return { logs };
           }
           case "manage_storage": {
@@ -1503,7 +1584,12 @@ var init_command_handler = __esm({
           // ─── Utility & legacy tools ───
           case "screenshot": {
             if (params.fullPage) {
-              await this.ensureDebuggerAttached(params.tabId);
+              const screenshot2 = await this.runWithDebugger(
+                params.tabId,
+                "screenshot.fullPage",
+                () => this.debuggerController.screenshot(params.tabId, params.fullPage)
+              );
+              return { screenshot: screenshot2 };
             }
             let screenshot;
             try {
@@ -1512,8 +1598,11 @@ var init_command_handler = __esm({
               if (params.fullPage) {
                 throw error;
               }
-              await this.ensureDebuggerAttached(params.tabId);
-              screenshot = await this.debuggerController.screenshot(params.tabId, params.fullPage);
+              screenshot = await this.runWithDebugger(
+                params.tabId,
+                "screenshot.fallback",
+                () => this.debuggerController.screenshot(params.tabId, params.fullPage)
+              );
             }
             return { screenshot };
           }
@@ -1570,15 +1659,30 @@ var init_command_handler = __esm({
             if (!tabs.some((t) => t.id === params.tabId)) {
               throw new Error(`Tab ${params.tabId} not found`);
             }
-            await this.ensureDebuggerAttached(params.tabId);
-            const recordingId = await this.recordingEngine.startRecording(params.tabId);
-            await this.recordingEngine.injectListeners(params.tabId);
-            return { recordingId };
+            this.tabManager.holdDebuggerAttached(params.tabId, "recording");
+            try {
+              await this.ensureDebuggerAttached(params.tabId);
+              const recordingId = await this.recordingEngine.startRecording(params.tabId);
+              await this.recordingEngine.injectListeners(params.tabId);
+              this.recordingDebuggerTabId = params.tabId;
+              return { recordingId };
+            } catch (error) {
+              this.tabManager.releaseDebuggerAttached(params.tabId, "recording-start-failed");
+              throw error;
+            }
           }
           case "stop_recording": {
-            await this.recordingEngine.removeListeners();
-            const recording = await this.recordingEngine.stopRecording();
-            return { recording };
+            const recordingTabId = this.recordingDebuggerTabId;
+            try {
+              await this.recordingEngine.removeListeners();
+              const recording = await this.recordingEngine.stopRecording();
+              return { recording };
+            } finally {
+              if (recordingTabId != null) {
+                this.recordingDebuggerTabId = null;
+                this.tabManager.releaseDebuggerAttached(recordingTabId, "recording-stopped");
+              }
+            }
           }
           case "replay_recording": {
             let replayTabId = params.tabId;
@@ -1590,8 +1694,14 @@ var init_command_handler = __esm({
                 replayTabId = await this.tabManager.createTab();
               }
             }
-            await this.ensureDebuggerAttached(replayTabId);
-            await this.playbackEngine.replay(params.recordingId, replayTabId);
+            if (replayTabId == null) {
+              throw new Error("No tab available for replay");
+            }
+            await this.runWithDebugger(
+              replayTabId,
+              "replay_recording",
+              () => this.playbackEngine.replay(params.recordingId, replayTabId)
+            );
             return { status: "replayed", tabId: replayTabId };
           }
           // Session
@@ -1610,6 +1720,14 @@ var init_command_handler = __esm({
       async ensureDebuggerAttached(tabId) {
         await this.tabManager.ensureDebuggerAttached(tabId);
       }
+      async runWithDebugger(tabId, commandName, operation) {
+        await this.ensureDebuggerAttached(tabId);
+        try {
+          return await operation();
+        } finally {
+          this.tabManager.scheduleDebuggerDetach(tabId, commandName);
+        }
+      }
       async runLightweightFirst(tabId, commandName, lightweightOperation, debuggerOperation) {
         try {
           return await lightweightOperation();
@@ -1618,8 +1736,7 @@ var init_command_handler = __esm({
             `[ARC-TUNNEL-DIAG] ${commandName} lightweight path failed, falling back to debugger:`,
             error?.message || error
           );
-          await this.ensureDebuggerAttached(tabId);
-          return await debuggerOperation();
+          return await this.runWithDebugger(tabId, `${commandName}.fallback`, debuggerOperation);
         }
       }
       async resolveRef(tabId, ref) {

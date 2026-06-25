@@ -16,6 +16,7 @@ export class CommandHandler {
   private snapshotEngine: SnapshotEngine;
   private inputSimulator: InputSimulator;
   private actionabilityChecker: ActionabilityChecker;
+  private recordingDebuggerTabId: number | null = null;
 
   constructor(
     private tabManager: TabManager,
@@ -61,13 +62,15 @@ export class CommandHandler {
       // ─── Core tools (Playwright-inspired) ───
 
       case 'snapshot': {
-        await this.ensureDebuggerAttached(params.tabId);
-        const snapshot = await this.snapshotEngine.getSnapshot(params.tabId, true);
+        const snapshot = await this.runWithDebugger(params.tabId, 'snapshot', () =>
+          this.snapshotEngine.getSnapshot(params.tabId, true)
+        );
         return { snapshot };
       }
 
       case 'interact': {
         await this.ensureDebuggerAttached(params.tabId);
+        try {
 
         let backendNodeId: number | null = null;
         const target = params.target as string;
@@ -122,56 +125,62 @@ export class CommandHandler {
         }
         const pageSnapshot = await this.snapshotEngine.getSnapshot(params.tabId, params.action === 'hover');
         return { status: params.action, target, pageSnapshot };
-      }
-
-      case 'navigate': {
-        await this.ensureDebuggerAttached(params.tabId);
-        switch (params.action) {
-          case 'goto':
-            if (!params.url) throw new Error('url is required for goto action');
-            await this.debuggerController.navigate(params.tabId, params.url);
-            this.snapshotEngine.invalidateCache(params.tabId);
-            return { status: 'navigated', url: params.url };
-          case 'go_back': {
-            const history = await this.debuggerController.sendCommand(
-              params.tabId, 'Page.getNavigationHistory'
-            );
-            if (history.currentIndex > 0) {
-              const entry = history.entries[history.currentIndex - 1];
-              await this.debuggerController.sendCommand(
-                params.tabId, 'Page.navigateToHistoryEntry', { entryId: entry.id }
-              );
-              this.snapshotEngine.invalidateCache(params.tabId);
-              return { status: 'went_back', url: entry.url };
-            }
-            return { status: 'went_back', url: null };
-          }
-          case 'go_forward': {
-            const history = await this.debuggerController.sendCommand(
-              params.tabId, 'Page.getNavigationHistory'
-            );
-            if (history.currentIndex < history.entries.length - 1) {
-              const entry = history.entries[history.currentIndex + 1];
-              await this.debuggerController.sendCommand(
-                params.tabId, 'Page.navigateToHistoryEntry', { entryId: entry.id }
-              );
-              this.snapshotEngine.invalidateCache(params.tabId);
-              return { status: 'went_forward', url: entry.url };
-            }
-            return { status: 'went_forward', url: null };
-          }
-          case 'reload':
-            await this.debuggerController.sendCommand(params.tabId, 'Page.reload');
-            this.snapshotEngine.invalidateCache(params.tabId);
-            return { status: 'reloaded' };
-          default:
-            throw new Error(`Unknown navigate action: ${params.action}`);
+        } finally {
+          this.tabManager.scheduleDebuggerDetach(params.tabId, 'interact');
         }
       }
 
+      case 'navigate': {
+        return await this.runWithDebugger(params.tabId, 'navigate', async () => {
+          switch (params.action) {
+            case 'goto':
+              if (!params.url) throw new Error('url is required for goto action');
+              await this.debuggerController.navigate(params.tabId, params.url);
+              this.snapshotEngine.invalidateCache(params.tabId);
+              return { status: 'navigated', url: params.url };
+            case 'go_back': {
+              const history = await this.debuggerController.sendCommand(
+                params.tabId, 'Page.getNavigationHistory'
+              );
+              if (history.currentIndex > 0) {
+                const entry = history.entries[history.currentIndex - 1];
+                await this.debuggerController.sendCommand(
+                  params.tabId, 'Page.navigateToHistoryEntry', { entryId: entry.id }
+                );
+                this.snapshotEngine.invalidateCache(params.tabId);
+                return { status: 'went_back', url: entry.url };
+              }
+              return { status: 'went_back', url: null };
+            }
+            case 'go_forward': {
+              const history = await this.debuggerController.sendCommand(
+                params.tabId, 'Page.getNavigationHistory'
+              );
+              if (history.currentIndex < history.entries.length - 1) {
+                const entry = history.entries[history.currentIndex + 1];
+                await this.debuggerController.sendCommand(
+                  params.tabId, 'Page.navigateToHistoryEntry', { entryId: entry.id }
+                );
+                this.snapshotEngine.invalidateCache(params.tabId);
+                return { status: 'went_forward', url: entry.url };
+              }
+              return { status: 'went_forward', url: null };
+            }
+            case 'reload':
+              await this.debuggerController.sendCommand(params.tabId, 'Page.reload');
+              this.snapshotEngine.invalidateCache(params.tabId);
+              return { status: 'reloaded' };
+            default:
+              throw new Error(`Unknown navigate action: ${params.action}`);
+          }
+        });
+      }
+
       case 'get_console_logs': {
-        await this.consoleCapture.enableForTab(params.tabId, this.debuggerController);
-        const logs = this.consoleCapture.getLogs(params.tabId, params.minLevel);
+        const logs = await this.runWithDebugger(params.tabId, 'get_console_logs', async () => {
+          await this.consoleCapture.enableForTab(params.tabId, this.debuggerController);
+          return this.consoleCapture.getLogs(params.tabId, params.minLevel);
+        });
         return { logs };
       }
 
@@ -244,7 +253,10 @@ export class CommandHandler {
 
       case 'screenshot': {
         if (params.fullPage) {
-          await this.ensureDebuggerAttached(params.tabId);
+          const screenshot = await this.runWithDebugger(params.tabId, 'screenshot.fullPage', () =>
+            this.debuggerController.screenshot(params.tabId, params.fullPage)
+          );
+          return { screenshot };
         }
 
         let screenshot: string;
@@ -254,8 +266,9 @@ export class CommandHandler {
           if (params.fullPage) {
             throw error;
           }
-          await this.ensureDebuggerAttached(params.tabId);
-          screenshot = await this.debuggerController.screenshot(params.tabId, params.fullPage);
+          screenshot = await this.runWithDebugger(params.tabId, 'screenshot.fallback', () =>
+            this.debuggerController.screenshot(params.tabId, params.fullPage)
+          );
         }
         return { screenshot };
       }
@@ -319,16 +332,31 @@ export class CommandHandler {
         if (!tabs.some(t => t.id === params.tabId)) {
           throw new Error(`Tab ${params.tabId} not found`);
         }
-        await this.ensureDebuggerAttached(params.tabId);
-        const recordingId = await this.recordingEngine.startRecording(params.tabId);
-        await this.recordingEngine.injectListeners(params.tabId);
-        return { recordingId };
+        this.tabManager.holdDebuggerAttached(params.tabId, 'recording');
+        try {
+          await this.ensureDebuggerAttached(params.tabId);
+          const recordingId = await this.recordingEngine.startRecording(params.tabId);
+          await this.recordingEngine.injectListeners(params.tabId);
+          this.recordingDebuggerTabId = params.tabId;
+          return { recordingId };
+        } catch (error) {
+          this.tabManager.releaseDebuggerAttached(params.tabId, 'recording-start-failed');
+          throw error;
+        }
       }
 
       case 'stop_recording': {
-        await this.recordingEngine.removeListeners();
-        const recording = await this.recordingEngine.stopRecording();
-        return { recording };
+        const recordingTabId = this.recordingDebuggerTabId;
+        try {
+          await this.recordingEngine.removeListeners();
+          const recording = await this.recordingEngine.stopRecording();
+          return { recording };
+        } finally {
+          if (recordingTabId != null) {
+            this.recordingDebuggerTabId = null;
+            this.tabManager.releaseDebuggerAttached(recordingTabId, 'recording-stopped');
+          }
+        }
       }
 
       case 'replay_recording': {
@@ -341,8 +369,12 @@ export class CommandHandler {
             replayTabId = await this.tabManager.createTab();
           }
         }
-        await this.ensureDebuggerAttached(replayTabId);
-        await this.playbackEngine.replay(params.recordingId, replayTabId);
+        if (replayTabId == null) {
+          throw new Error('No tab available for replay');
+        }
+        await this.runWithDebugger(replayTabId, 'replay_recording', () =>
+          this.playbackEngine.replay(params.recordingId, replayTabId)
+        );
         return { status: 'replayed', tabId: replayTabId };
       }
 
@@ -366,6 +398,19 @@ export class CommandHandler {
     await this.tabManager.ensureDebuggerAttached(tabId);
   }
 
+  private async runWithDebugger<T>(
+    tabId: number,
+    commandName: string,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    await this.ensureDebuggerAttached(tabId);
+    try {
+      return await operation();
+    } finally {
+      this.tabManager.scheduleDebuggerDetach(tabId, commandName);
+    }
+  }
+
   private async runLightweightFirst<T>(
     tabId: number,
     commandName: string,
@@ -379,8 +424,7 @@ export class CommandHandler {
         `[ARC-TUNNEL-DIAG] ${commandName} lightweight path failed, falling back to debugger:`,
         error?.message || error
       );
-      await this.ensureDebuggerAttached(tabId);
-      return await debuggerOperation();
+      return await this.runWithDebugger(tabId, `${commandName}.fallback`, debuggerOperation);
     }
   }
 

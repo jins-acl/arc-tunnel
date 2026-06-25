@@ -15,8 +15,6 @@ export class ConsoleCapture {
   private listeners: Map<number, (source: any, method: string, params: any) => void> = new Map();
 
   async enableForTab(tabId: number, debuggerController?: any): Promise<void> {
-    if (this.listeners.has(tabId)) return;
-
     // Runtime.consoleAPICalled requires explicit Runtime.enable
     if (debuggerController) {
       try {
@@ -25,6 +23,8 @@ export class ConsoleCapture {
         // Runtime may already be enabled — ignore
       }
     }
+
+    if (this.listeners.has(tabId)) return;
 
     const handler = (source: any, method: string, params: any) => {
       if (method === 'Runtime.consoleAPICalled') {
