@@ -8,6 +8,7 @@ import { SessionManager } from './session-manager';
 import { ConsoleCapture } from './console-capture';
 import { StorageManager } from './storage-manager';
 import { CommandHandler } from './command-handler';
+import { LightweightController } from './lightweight-controller';
 import { CommandMessage } from '../types';
 
 // Default configuration
@@ -22,6 +23,7 @@ const playbackEngine = new PlaybackEngine(debuggerController);
 const sessionManager = new SessionManager();
 const consoleCapture = new ConsoleCapture();
 const storageManager = new StorageManager();
+const lightweightController = new LightweightController();
 const commandHandler = new CommandHandler(
   tabManager,
   debuggerController,
@@ -29,7 +31,8 @@ const commandHandler = new CommandHandler(
   playbackEngine,
   sessionManager,
   consoleCapture,
-  storageManager
+  storageManager,
+  lightweightController
 );
 
 // Load configuration from storage

@@ -1285,7 +1285,7 @@ var init_command_handler = __esm({
     init_input_simulator();
     init_actionability_checker();
     CommandHandler = class {
-      constructor(tabManager, debuggerController, recordingEngine, playbackEngine, sessionManager, consoleCapture, storageManager) {
+      constructor(tabManager, debuggerController, recordingEngine, playbackEngine, sessionManager, consoleCapture, storageManager, lightweightController) {
         this.tabManager = tabManager;
         this.debuggerController = debuggerController;
         this.recordingEngine = recordingEngine;
@@ -1293,6 +1293,7 @@ var init_command_handler = __esm({
         this.sessionManager = sessionManager;
         this.consoleCapture = consoleCapture;
         this.storageManager = storageManager;
+        this.lightweightController = lightweightController;
         this.snapshotEngine = new SnapshotEngine(debuggerController);
         this.inputSimulator = new InputSimulator(debuggerController);
         this.actionabilityChecker = new ActionabilityChecker(debuggerController);
@@ -1517,9 +1518,31 @@ var init_command_handler = __esm({
             return { screenshot };
           }
           case "execute_script": {
-            await this.ensureDebuggerAttached(params.tabId);
-            const scriptResult = await this.debuggerController.executeScript(params.tabId, params.script);
+            const scriptResult = await this.runLightweightFirst(
+              params.tabId,
+              "execute_script",
+              () => this.lightweightController.executeScript(params.tabId, params.script),
+              () => this.debuggerController.executeScript(params.tabId, params.script)
+            );
             return { result: scriptResult };
+          }
+          case "get_content": {
+            const content = await this.runLightweightFirst(
+              params.tabId,
+              "get_content",
+              () => this.lightweightController.getContent(params.tabId, params.mode || "text"),
+              () => this.debuggerController.getContent(params.tabId, params.mode || "text")
+            );
+            return { content };
+          }
+          case "wait_for_element": {
+            const found = await this.runLightweightFirst(
+              params.tabId,
+              "wait_for_element",
+              () => this.lightweightController.waitForElement(params.tabId, params.selector, params.timeout),
+              () => this.debuggerController.waitForElement(params.tabId, params.selector, params.timeout)
+            );
+            return { found };
           }
           // Tab management
           case "create_tab": {
@@ -1587,6 +1610,18 @@ var init_command_handler = __esm({
       async ensureDebuggerAttached(tabId) {
         await this.tabManager.ensureDebuggerAttached(tabId);
       }
+      async runLightweightFirst(tabId, commandName, lightweightOperation, debuggerOperation) {
+        try {
+          return await lightweightOperation();
+        } catch (error) {
+          console.warn(
+            `[ARC-TUNNEL-DIAG] ${commandName} lightweight path failed, falling back to debugger:`,
+            error?.message || error
+          );
+          await this.ensureDebuggerAttached(tabId);
+          return await debuggerOperation();
+        }
+      }
       async resolveRef(tabId, ref) {
         try {
           const snapshot = await this.snapshotEngine.getSnapshot(tabId, true);
@@ -1594,6 +1629,92 @@ var init_command_handler = __esm({
         } catch {
           return null;
         }
+      }
+    };
+  }
+});
+
+// src/background/lightweight-controller.ts
+var LightweightController;
+var init_lightweight_controller = __esm({
+  "src/background/lightweight-controller.ts"() {
+    "use strict";
+    LightweightController = class {
+      async executeScript(tabId, script) {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (source) => {
+            return (0, eval)(source);
+          },
+          args: [script]
+        });
+        return results[0]?.result;
+      }
+      async getContent(tabId, mode) {
+        switch (mode) {
+          case "html":
+            return await this.executeScript(tabId, "document.documentElement.outerHTML");
+          case "text":
+            return await this.executeScript(tabId, 'document.body ? document.body.innerText : ""');
+          case "structured":
+            return await this.getStructuredContent(tabId);
+          case "markdown":
+            return await this.getMarkdownContent(tabId);
+          default:
+            throw new Error(`Unknown mode: ${mode}`);
+        }
+      }
+      async waitForElement(tabId, selector, timeout = 1e4) {
+        const startTime = Date.now();
+        while (Date.now() - startTime < timeout) {
+          const exists = await this.executeScript(
+            tabId,
+            `document.querySelector(${JSON.stringify(selector)}) !== null`
+          );
+          if (exists) return true;
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        return false;
+      }
+      async getStructuredContent(tabId) {
+        return await this.executeScript(tabId, `
+      (function() {
+        return {
+          title: document.title,
+          url: window.location.href,
+          text: document.body ? document.body.innerText.substring(0, 50000) : '',
+          links: Array.from(document.querySelectorAll('a')).slice(0, 50).map(function(a) {
+            return { text: (a.textContent || '').trim().substring(0, 100), href: a.href || '' };
+          }),
+          forms: Array.from(document.querySelectorAll('form')).slice(0, 10).map(function(f) {
+            return {
+              id: f.id || '',
+              action: f.action || '',
+              method: f.method || '',
+              fields: Array.from(f.elements).slice(0, 10).map(function(e) {
+                return { name: e.name || '', type: e.type || '' };
+              })
+            };
+          }),
+          images: Array.from(document.querySelectorAll('img')).slice(0, 20).map(function(img) {
+            return { src: img.src || '', alt: img.alt || '' };
+          }),
+          headings: Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6')).slice(0, 30).map(function(h) {
+            return { tag: h.tagName.toLowerCase(), text: (h.textContent || '').trim().substring(0, 200) };
+          })
+        };
+      })()
+    `);
+      }
+      async getMarkdownContent(tabId) {
+        return await this.executeScript(tabId, `
+      (function() {
+        var md = '# ' + document.title + '\\n\\n';
+        var bodyText = document.body ? document.body.innerText : '';
+        md += bodyText.substring(0, 500000);
+        return md;
+      })()
+    `);
       }
     };
   }
@@ -1611,6 +1732,7 @@ var require_service_worker = __commonJS({
     init_console_capture();
     init_storage_manager();
     init_command_handler();
+    init_lightweight_controller();
     var DEFAULT_WS_URL = "ws://localhost:8765";
     var wsClient = new WebSocketClient();
     var tabManager = new TabManager();
@@ -1620,6 +1742,7 @@ var require_service_worker = __commonJS({
     var sessionManager = new SessionManager();
     var consoleCapture = new ConsoleCapture();
     var storageManager = new StorageManager();
+    var lightweightController = new LightweightController();
     var commandHandler = new CommandHandler(
       tabManager,
       debuggerController,
@@ -1627,7 +1750,8 @@ var require_service_worker = __commonJS({
       playbackEngine,
       sessionManager,
       consoleCapture,
-      storageManager
+      storageManager,
+      lightweightController
     );
     async function loadConfig() {
       try {

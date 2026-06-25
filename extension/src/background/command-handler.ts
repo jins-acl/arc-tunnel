@@ -10,6 +10,7 @@ import { InputSimulator } from './input-simulator';
 import { ActionabilityChecker } from './actionability-checker';
 import { ConsoleCapture } from './console-capture';
 import { StorageManager } from './storage-manager';
+import { LightweightController } from './lightweight-controller';
 
 export class CommandHandler {
   private snapshotEngine: SnapshotEngine;
@@ -23,7 +24,8 @@ export class CommandHandler {
     private playbackEngine: PlaybackEngine,
     private sessionManager: SessionManager,
     private consoleCapture: ConsoleCapture,
-    private storageManager: StorageManager
+    private storageManager: StorageManager,
+    private lightweightController: LightweightController
   ) {
     this.snapshotEngine = new SnapshotEngine(debuggerController);
     this.inputSimulator = new InputSimulator(debuggerController);
@@ -259,9 +261,33 @@ export class CommandHandler {
       }
 
       case 'execute_script': {
-        await this.ensureDebuggerAttached(params.tabId);
-        const scriptResult = await this.debuggerController.executeScript(params.tabId, params.script);
+        const scriptResult = await this.runLightweightFirst(
+          params.tabId,
+          'execute_script',
+          () => this.lightweightController.executeScript(params.tabId, params.script),
+          () => this.debuggerController.executeScript(params.tabId, params.script)
+        );
         return { result: scriptResult };
+      }
+
+      case 'get_content': {
+        const content = await this.runLightweightFirst(
+          params.tabId,
+          'get_content',
+          () => this.lightweightController.getContent(params.tabId, params.mode || 'text'),
+          () => this.debuggerController.getContent(params.tabId, params.mode || 'text')
+        );
+        return { content };
+      }
+
+      case 'wait_for_element': {
+        const found = await this.runLightweightFirst(
+          params.tabId,
+          'wait_for_element',
+          () => this.lightweightController.waitForElement(params.tabId, params.selector, params.timeout),
+          () => this.debuggerController.waitForElement(params.tabId, params.selector, params.timeout)
+        );
+        return { found };
       }
 
       // Tab management
@@ -338,6 +364,24 @@ export class CommandHandler {
 
   private async ensureDebuggerAttached(tabId: number): Promise<void> {
     await this.tabManager.ensureDebuggerAttached(tabId);
+  }
+
+  private async runLightweightFirst<T>(
+    tabId: number,
+    commandName: string,
+    lightweightOperation: () => Promise<T>,
+    debuggerOperation: () => Promise<T>
+  ): Promise<T> {
+    try {
+      return await lightweightOperation();
+    } catch (error: any) {
+      console.warn(
+        `[ARC-TUNNEL-DIAG] ${commandName} lightweight path failed, falling back to debugger:`,
+        error?.message || error
+      );
+      await this.ensureDebuggerAttached(tabId);
+      return await debuggerOperation();
+    }
   }
 
   private async resolveRef(tabId: number, ref: string): Promise<number | null> {

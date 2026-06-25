@@ -137,6 +137,35 @@ export function getToolDefinitions(): ToolDefinition[] {
         required: ['tabId', 'script']
       }
     },
+    {
+      name: 'get_content',
+      description: 'Extract page content without interacting with the page. Supports html, text, structured, and markdown modes.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          tabId: { type: 'number', description: 'Tab ID' },
+          mode: {
+            type: 'string',
+            enum: ['html', 'text', 'structured', 'markdown'],
+            description: 'Content extraction mode. Defaults to text.'
+          }
+        },
+        required: ['tabId']
+      }
+    },
+    {
+      name: 'wait_for_element',
+      description: 'Wait for an element matching a CSS selector to appear in the tab.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          tabId: { type: 'number', description: 'Tab ID' },
+          selector: { type: 'string', description: 'CSS selector to wait for' },
+          timeout: { type: 'number', description: 'Timeout in ms. Defaults to 10000.' }
+        },
+        required: ['tabId', 'selector']
+      }
+    },
 
     // Tab management
     {

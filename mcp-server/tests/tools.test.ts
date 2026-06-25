@@ -24,4 +24,22 @@ describe('MCP Tools', () => {
     expect(interactTool?.inputSchema.properties).toHaveProperty('action');
     expect(interactTool?.inputSchema.properties.action.enum).toContain('click');
   });
+
+  it('should include lightweight content tools', () => {
+    const tools = getToolDefinitions();
+    const getContentTool = tools.find(t => t.name === 'get_content');
+    const waitForElementTool = tools.find(t => t.name === 'wait_for_element');
+
+    expect(getContentTool).toBeDefined();
+    expect(getContentTool?.inputSchema.properties.mode.enum).toEqual([
+      'html',
+      'text',
+      'structured',
+      'markdown'
+    ]);
+
+    expect(waitForElementTool).toBeDefined();
+    expect(waitForElementTool?.inputSchema.properties).toHaveProperty('selector');
+    expect(waitForElementTool?.inputSchema.required).toContain('selector');
+  });
 });
