@@ -58,8 +58,19 @@ class FakeWebSocket {
 }
 
 function setupEnvironment() {
+  const originals = {
+    WebSocket: global.WebSocket,
+    chrome: global.chrome,
+    setTimeout: global.setTimeout,
+    clearTimeout: global.clearTimeout,
+    random: Math.random,
+    log: console.log,
+    error: console.error,
+    warn: console.warn
+  };
   const timers = [];
   const alarms = { created: [], cleared: [] };
+  const logs = { log: [], error: [], warn: [] };
   let nextTimerId = 1;
 
   FakeWebSocket.instances = [];
@@ -80,14 +91,39 @@ function setupEnvironment() {
     if (timer) timer.cleared = true;
   };
   Math.random = () => 0;
+  console.log = (...args) => logs.log.push(args);
+  console.error = (...args) => logs.error.push(args);
+  console.warn = (...args) => logs.warn.push(args);
 
   return {
     alarms,
+    logs,
     timers,
     runTimer(timer) {
       if (!timer.cleared) return timer.callback();
+    },
+    restore() {
+      global.WebSocket = originals.WebSocket;
+      global.chrome = originals.chrome;
+      global.setTimeout = originals.setTimeout;
+      global.clearTimeout = originals.clearTimeout;
+      Math.random = originals.random;
+      console.log = originals.log;
+      console.error = originals.error;
+      console.warn = originals.warn;
     }
   };
+}
+
+function environmentTest(name, run) {
+  test(name, { concurrency: false }, async () => {
+    const environment = setupEnvironment();
+    try {
+      await run(environment);
+    } finally {
+      environment.restore();
+    }
+  });
 }
 
 function latestSocket() {
@@ -103,8 +139,7 @@ for (const invalidWelcome of [
   { type: 'welcome', protocolVersion: 99 },
   { type: 'welcome' }
 ]) {
-  test(`invalid welcome ${JSON.stringify(invalidWelcome)} rejects and cleans up`, { concurrency: false }, async (t) => {
-    const env = setupEnvironment(t);
+  environmentTest(`invalid welcome ${JSON.stringify(invalidWelcome)} rejects and cleans up`, async (env) => {
     const client = new WebSocketClient();
     const connection = client.connect().then(
       () => ({ resolved: true }),
@@ -123,8 +158,7 @@ for (const invalidWelcome of [
   });
 }
 
-test('malformed JSON during handshake rejects and cleans up', { concurrency: false }, async (t) => {
-  setupEnvironment(t);
+environmentTest('malformed JSON during handshake rejects and cleans up', async () => {
   const client = new WebSocketClient();
   const connection = client.connect().then(null, error => error);
   const socket = latestSocket();
@@ -136,8 +170,7 @@ test('malformed JSON during handshake rejects and cleans up', { concurrency: fal
   assert.match((await connection).message, /protocol|handshake|json/i);
 });
 
-test('commands are ignored until a valid welcome completes the handshake', { concurrency: false }, async (t) => {
-  setupEnvironment(t);
+environmentTest('commands are ignored until a valid welcome completes the handshake', async () => {
   const client = new WebSocketClient();
   const commands = [];
   client.onCommand(command => commands.push(command));
@@ -153,8 +186,7 @@ test('commands are ignored until a valid welcome completes the handshake', { con
   assert.deepEqual(commands.map(command => command.id), ['ready']);
 });
 
-test('valid v2 welcome resolves and sends the extension hello', { concurrency: false }, async (t) => {
-  setupEnvironment(t);
+environmentTest('valid v2 welcome resolves and sends the extension hello', async () => {
   const client = new WebSocketClient();
   const connection = client.connect();
   const socket = latestSocket();
@@ -165,8 +197,7 @@ test('valid v2 welcome resolves and sends the extension hello', { concurrency: f
   assert.equal(client.isConnected(), true);
 });
 
-test('setUrl invalidates the old generation and one connect creates one replacement', { concurrency: false }, async (t) => {
-  setupEnvironment(t);
+environmentTest('setUrl invalidates the old generation and one connect creates one replacement', async () => {
   const client = new WebSocketClient();
   const oldConnection = client.connect().then(null, error => error);
   const oldSocket = latestSocket();
@@ -184,8 +215,7 @@ test('setUrl invalidates the old generation and one connect creates one replacem
   assert.equal(newSocket.url, 'ws://localhost:9999/extension');
 });
 
-test('stale old-socket callbacks do nothing', { concurrency: false }, async (t) => {
-  const env = setupEnvironment(t);
+environmentTest('stale old-socket callbacks do nothing', async (env) => {
   const client = new WebSocketClient();
   const oldConnection = client.connect().catch(() => undefined);
   const oldSocket = latestSocket();
@@ -205,8 +235,7 @@ test('stale old-socket callbacks do nothing', { concurrency: false }, async (t) 
   await replacement;
 });
 
-test('intentional close does not reconnect', { concurrency: false }, async (t) => {
-  const env = setupEnvironment(t);
+environmentTest('intentional close does not reconnect', async (env) => {
   const client = new WebSocketClient();
   const connection = client.connect();
   const socket = latestSocket();
@@ -220,8 +249,7 @@ test('intentional close does not reconnect', { concurrency: false }, async (t) =
   assert.equal(env.alarms.created.length, 0);
 });
 
-test('timer and alarm reconnect overlap cannot create parallel sockets', { concurrency: false }, async (t) => {
-  const env = setupEnvironment(t);
+environmentTest('timer and alarm reconnect overlap cannot create parallel sockets', async (env) => {
   const client = new WebSocketClient();
   const connection = client.connect();
   const firstSocket = latestSocket();
