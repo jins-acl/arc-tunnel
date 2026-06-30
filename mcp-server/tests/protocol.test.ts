@@ -38,6 +38,14 @@ describe('protocol guards', () => {
       command: 'navigate',
       params: { url: 'https://example.com' }
     })).toBe(false);
+
+    expect(isAgentRequest({
+      type: 'agent_request',
+      requestId: 'req-1',
+      command: 'navigate',
+      params: [],
+      timeout: 5000
+    })).toBe(false);
   });
 
   it('accepts exact agent response envelopes', () => {
@@ -60,6 +68,20 @@ describe('protocol guards', () => {
       requestId: 'req-1',
       success: false
     })).toBe(false);
+
+    expect(isAgentResponse({
+      type: 'agent_response',
+      requestId: 'req-1',
+      success: false,
+      error: {}
+    })).toBe(false);
+
+    expect(isAgentResponse({
+      type: 'agent_response',
+      requestId: 'req-1',
+      success: false,
+      error: []
+    })).toBe(false);
   });
 
   it('accepts exact browser event envelopes', () => {
@@ -81,6 +103,13 @@ describe('protocol guards', () => {
       type: 'event',
       event: 'tab_updated',
       data: { tabId: 3 },
+      timestamp: Date.now()
+    })).toBe(false);
+
+    expect(isBrowserEvent({
+      type: 'event',
+      event: 'tab_created',
+      data: [],
       timestamp: Date.now()
     })).toBe(false);
   });

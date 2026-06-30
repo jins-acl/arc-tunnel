@@ -66,7 +66,13 @@ export function toErrorInfo(error: unknown): ErrorInfo {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isErrorInfo(value: unknown): value is ErrorInfo {
+  return isRecord(value)
+    && typeof value.code === 'string'
+    && typeof value.message === 'string';
 }
 
 export function isHelloMessage(value: unknown): value is HelloMessage {
@@ -98,7 +104,7 @@ export function isAgentResponse(value: unknown): value is AgentResponse {
     && value.type === 'agent_response'
     && typeof value.requestId === 'string'
     && typeof value.success === 'boolean'
-    && (value.success || isRecord(value.error));
+    && (value.success || isErrorInfo(value.error));
 }
 
 export function isBrowserEvent(value: unknown): value is BrowserEvent {
