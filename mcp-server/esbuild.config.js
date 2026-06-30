@@ -1,11 +1,19 @@
 const esbuild = require('esbuild');
 
-esbuild.build({
-  entryPoints: ['src/index.ts'],
+const entries = [
+  ['src/index.ts', 'dist/mcp-server.js'],
+  ['src/broker-entry.ts', 'dist/arc-tunnel-broker.js'],
+  ['src/broker-control.ts', 'dist/arc-tunnel-control.js']
+];
+
+Promise.all(entries.map(([entryPoint, outfile]) => esbuild.build({
+  entryPoints: [entryPoint],
   bundle: true,
   platform: 'node',
   target: 'node18',
-  outfile: 'dist/mcp-server.js',
+  outfile,
   sourcemap: true
-  // All deps bundled - no npm needed at runtime
-}).catch((err) => { console.error('Build failed:', err); process.exit(1); });
+}))).catch((err) => {
+  console.error('Build failed:', err);
+  process.exit(1);
+});

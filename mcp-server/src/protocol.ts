@@ -59,6 +59,13 @@ export function toErrorInfo(error: unknown): ErrorInfo {
     };
   }
 
+  if (error instanceof Error && typeof (error as Error & { code?: unknown }).code === 'string') {
+    return {
+      code: (error as Error & { code: string }).code,
+      message: error.message
+    };
+  }
+
   return {
     code: 'INTERNAL_ERROR',
     message: error instanceof Error ? error.message : String(error)

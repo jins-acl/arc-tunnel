@@ -1,28 +1,24 @@
+import { BrokerClient } from './broker-client';
+import { ensureBroker } from './broker-launcher';
+import { loadBrokerConfig } from './config';
 import { ArcTunnelMCPServer } from './server';
 
-async function main() {
-  const port = parseInt(process.env.WS_PORT || '8765');
-  const server = new ArcTunnelMCPServer(port);
-
-  // Start WebSocket first so it's ready before MCP receives tool calls
-  try {
-    await server.startWebSocketWithRetry();
-  } catch (error: any) {
-    console.error('WebSocket server failed to start:', error.message);
-    // Continue — MCP stdio can still report the connection error to the agent
-  }
-
-  // Start MCP after WebSocket is listening — Claude Code needs stdio initialize
+async function main(): Promise<void> {
+  const config = loadBrokerConfig(process.argv.slice(2), process.env);
+  await ensureBroker(config);
+  const client = await BrokerClient.connect(config);
+  const server = new ArcTunnelMCPServer(client);
   await server.startMCP();
 
-  // Handle graceful shutdown
-  const shutdown = async (signal: string) => {
-    console.log(`${signal} received, shutting down...`);
-    await server.stop();
+  const shutdown = () => {
+    client.close();
     process.exit(0);
   };
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
-main();
+void main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
