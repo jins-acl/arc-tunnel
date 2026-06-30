@@ -67,6 +67,17 @@ export class WebSocketClient {
         reject(error);
       };
 
+      const failHandshake = (error: Error) => {
+        if (generation !== this.connectionGeneration) return;
+        rejectCurrentConnect(error);
+        ++this.connectionGeneration;
+        this.clearReconnectTimer();
+        chrome.alarms.clear('ws-reconnect');
+        if (this.ws === socket) this.ws = null;
+        this.handshakeComplete = false;
+        socket.close();
+      };
+
       socket.onopen = () => {
         if (generation !== this.connectionGeneration) return;
         console.log('Connected to Arc Tunnel broker');
@@ -94,7 +105,11 @@ export class WebSocketClient {
         try {
           const message = JSON.parse(event.data);
           if (!this.handshakeComplete) {
-            if (message.type === 'welcome' && message.protocolVersion === 2) {
+            if (message.type === 'welcome') {
+              if (message.protocolVersion !== 2) {
+                failHandshake(new Error('Arc Tunnel protocol mismatch: expected welcome protocolVersion 2'));
+                return;
+              }
               this.handshakeComplete = true;
               this.reconnectAttempts = 0;
               this.clearReconnectTimer();
@@ -105,6 +120,10 @@ export class WebSocketClient {
           }
           this.handleMessage(message as CommandMessage);
         } catch (error) {
+          if (!this.handshakeComplete) {
+            failHandshake(new Error('Invalid Arc Tunnel handshake message: malformed JSON'));
+            return;
+          }
           console.error('Failed to parse message:', error);
         }
       };

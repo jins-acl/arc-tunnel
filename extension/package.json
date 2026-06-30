@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "build": "node esbuild.config.js",
+    "test": "node --test tests/websocket-client.test.js",
     "watch": "node esbuild.config.js --watch"
   },
   "keywords": [],
