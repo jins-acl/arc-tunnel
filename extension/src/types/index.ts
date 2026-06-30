@@ -24,6 +24,12 @@ export interface EventMessage {
   timestamp: number;
 }
 
+export interface HelloMessage {
+  type: 'hello';
+  role: 'extension';
+  protocolVersion: 2;
+}
+
 export interface ErrorInfo {
   code: string;
   message: string;
@@ -33,6 +39,7 @@ export interface ErrorInfo {
 // Tab management
 export interface TabInfo {
   id: number;
+  windowId: number;
   url: string;
   title: string;
   debuggerAttached: boolean;

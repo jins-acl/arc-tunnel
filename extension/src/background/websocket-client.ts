@@ -1,5 +1,11 @@
-// extension/src/background/websocket-client.ts
-import { CommandMessage, ResponseMessage, EventMessage } from '../types';
+import { CommandMessage, ResponseMessage, EventMessage, HelloMessage } from '../types';
+
+export function normalizeWebSocketUrl(url: string): string {
+  const parsed = new URL(url);
+  if (parsed.pathname !== '/') return url;
+  parsed.pathname = '/extension';
+  return parsed.toString();
+}
 
 export class WebSocketClient {
   private ws: WebSocket | null = null;
@@ -10,71 +16,125 @@ export class WebSocketClient {
   private maxReconnectDelay = 30000;
   private messageHandlers: Map<string, (message: any) => void> = new Map();
   private intentionalClose = false;
+  private connectionGeneration = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private connectPromise: Promise<void> | null = null;
+  private rejectConnect: ((error: Error) => void) | null = null;
+  private handshakeComplete = false;
 
   constructor(url?: string) {
-    this.url = url || 'ws://localhost:8765';
+    this.url = normalizeWebSocketUrl(url || 'ws://localhost:8765');
   }
 
   setUrl(url: string): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.disconnect();
-    }
-    this.url = url;
+    ++this.connectionGeneration;
+    this.clearReconnectTimer();
+    chrome.alarms.clear('ws-reconnect');
+    this.intentionalClose = true;
+    const oldSocket = this.ws;
+    this.ws = null;
+    this.handshakeComplete = false;
+    this.rejectPendingConnect(new Error('Connection superseded by URL change'));
+    oldSocket?.close();
+    this.url = normalizeWebSocketUrl(url);
+    this.intentionalClose = false;
   }
 
   async connect(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(this.url);
+    if (this.isConnected()) return;
+    if (this.connectPromise) return this.connectPromise;
 
-      this.ws.onopen = () => {
-        console.log('Connected to MCP server');
-        this.reconnectAttempts = 0;
+    const generation = ++this.connectionGeneration;
+    this.intentionalClose = false;
+    this.handshakeComplete = false;
+
+    this.connectPromise = new Promise((resolve, reject) => {
+      this.rejectConnect = reject;
+      const socket = new WebSocket(this.url);
+      this.ws = socket;
+
+      const resolveConnect = () => {
+        if (generation !== this.connectionGeneration) return;
+        this.connectPromise = null;
+        this.rejectConnect = null;
         resolve();
       };
 
-      this.ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
+      const rejectCurrentConnect = (error: Error) => {
+        if (generation !== this.connectionGeneration) return;
+        this.connectPromise = null;
+        this.rejectConnect = null;
         reject(error);
       };
 
-      this.ws.onclose = () => {
-        console.log('Disconnected from MCP server');
-        this.handleReconnect();
+      socket.onopen = () => {
+        if (generation !== this.connectionGeneration) return;
+        console.log('Connected to Arc Tunnel broker');
+        this.intentionalClose = false;
+        const hello: HelloMessage = { type: 'hello', role: 'extension', protocolVersion: 2 };
+        socket.send(JSON.stringify(hello));
       };
 
-      this.ws.onmessage = (event) => {
+      socket.onerror = () => {
+        if (generation !== this.connectionGeneration) return;
+        console.error('WebSocket error');
+      };
+
+      socket.onclose = () => {
+        if (generation !== this.connectionGeneration || this.intentionalClose) return;
+        console.log('Disconnected from Arc Tunnel broker');
+        this.ws = null;
+        this.handshakeComplete = false;
+        rejectCurrentConnect(new Error('WebSocket closed before handshake completed'));
+        this.handleReconnect(generation);
+      };
+
+      socket.onmessage = (event) => {
+        if (generation !== this.connectionGeneration) return;
         try {
-          const message: CommandMessage = JSON.parse(event.data);
-          this.handleMessage(message);
+          const message = JSON.parse(event.data);
+          if (!this.handshakeComplete) {
+            if (message.type === 'welcome' && message.protocolVersion === 2) {
+              this.handshakeComplete = true;
+              this.reconnectAttempts = 0;
+              this.clearReconnectTimer();
+              chrome.alarms.clear('ws-reconnect');
+              resolveConnect();
+            }
+            return;
+          }
+          this.handleMessage(message as CommandMessage);
         } catch (error) {
           console.error('Failed to parse message:', error);
         }
       };
     });
+
+    return this.connectPromise;
   }
 
   disconnect(): void {
+    ++this.connectionGeneration;
     this.intentionalClose = true;
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
-    }
+    this.clearReconnectTimer();
+    chrome.alarms.clear('ws-reconnect');
+    const socket = this.ws;
+    this.ws = null;
+    this.handshakeComplete = false;
+    this.rejectPendingConnect(new Error('Connection closed intentionally'));
+    socket?.close();
   }
 
   isConnected(): boolean {
-    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+    return this.handshakeComplete && this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
 
   sendResponse(response: ResponseMessage): void {
-    if (this.isConnected()) {
-      this.ws!.send(JSON.stringify(response));
-    }
+    if (this.isConnected()) this.ws!.send(JSON.stringify(response));
   }
 
   sendEvent(event: EventMessage): void {
-    if (this.isConnected()) {
-      this.ws!.send(JSON.stringify(event));
-    }
+    if (this.isConnected()) this.ws!.send(JSON.stringify(event));
   }
 
   onCommand(handler: (message: CommandMessage) => void): void {
@@ -82,17 +142,16 @@ export class WebSocketClient {
   }
 
   private handleMessage(message: CommandMessage): void {
+    if (message.type !== 'command') return;
     const handler = this.messageHandlers.get('command');
-    if (handler) {
-      handler(message);
-    }
+    if (handler) handler(message);
   }
 
-  private async handleReconnect(): Promise<void> {
-    if (this.intentionalClose) return;
+  private handleReconnect(generation: number): void {
+    if (generation !== this.connectionGeneration || this.intentionalClose || this.reconnectTimer) return;
 
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error(`Reconnect failed after ${this.maxReconnectAttempts} attempts — giving up. Reload the extension to retry.`);
+      console.error(`Reconnect failed after ${this.maxReconnectAttempts} attempts - giving up. Reload the extension to retry.`);
       return;
     }
 
@@ -103,10 +162,9 @@ export class WebSocketClient {
     this.reconnectAttempts++;
 
     console.log(`Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-
-    setTimeout(async () => {
-      // Re-check flag — disconnect() may have been called during the delay
-      if (this.intentionalClose) return;
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
+      if (generation !== this.connectionGeneration || this.intentionalClose) return;
       try {
         await this.connect();
       } catch (error) {
@@ -114,7 +172,20 @@ export class WebSocketClient {
       }
     }, delay);
 
-    // Fallback: schedule chrome.alarms in case SW is terminated during setTimeout
     chrome.alarms.create('ws-reconnect', { delayInMinutes: Math.ceil(delay / 60000) || 1 });
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  private rejectPendingConnect(error: Error): void {
+    const reject = this.rejectConnect;
+    this.rejectConnect = null;
+    this.connectPromise = null;
+    reject?.(error);
   }
 }

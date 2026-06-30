@@ -49,11 +49,14 @@ async function loadConfig(): Promise<string> {
 async function initialize() {
   const wsUrl = await loadConfig();
   wsClient.setUrl(wsUrl);
+  await tabManager.syncExistingTabs();
 
+  await connectClient();
+}
+
+async function connectClient(): Promise<void> {
   try {
     await wsClient.connect();
-    // Auto-discover existing tabs
-    await tabManager.syncExistingTabs();
     console.log('Arc Tunnel extension initialized');
   } catch (error) {
     console.error('Failed to connect to MCP server:', error);
@@ -69,10 +72,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
       : DEFAULT_WS_URL;
     console.log(`WebSocket URL changed to: ${newUrl}`);
     wsClient.setUrl(newUrl);
-    // Trigger reconnect
-    if (!wsClient.isConnected()) {
-      initialize();
-    }
+    void connectClient();
   }
 });
 
@@ -81,6 +81,10 @@ wsClient.onCommand(async (command: CommandMessage) => {
   console.log('Received command:', command.command);
   const response = await commandHandler.handleCommand(command);
   wsClient.sendResponse(response);
+});
+
+tabManager.onLifecycle((event, data) => {
+  wsClient.sendEvent({ type: 'event', event, data, timestamp: Date.now() });
 });
 
 // Respond to popup status queries
@@ -104,9 +108,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     // SW was terminated during a reconnect delay — retry now
     if (!wsClient.isConnected()) {
       console.log('[alarm] SW wakeup — attempting reconnect');
-      // Direct connection attempt (WebSocketClient.handleReconnect will be
-      // called via onclose; this is just for the case where SW died mid-delay)
-      initialize();
+      void connectClient();
     }
   }
 });

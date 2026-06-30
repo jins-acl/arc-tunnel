@@ -1,51 +1,42 @@
 // extension/src/background/tab-manager.ts
 import { TabInfo } from '../types';
 
+type LifecycleEvent = 'tab_created' | 'tab_removed' | 'window_removed';
+type LifecycleListener = (event: LifecycleEvent, data: Record<string, unknown>) => void;
+
 export class TabManager {
   private tabs: Map<number, TabInfo> = new Map();
   private listenersSetup = false;
   private attachLocks: Map<number, Promise<void>> = new Map();
   private detachTimers: Map<number, ReturnType<typeof setTimeout>> = new Map();
   private debuggerHolds: Map<number, number> = new Map();
+  private lifecycleListeners: Set<LifecycleListener> = new Set();
   private readonly idleDetachDelayMs = 15000;
 
   async syncExistingTabs(): Promise<void> {
     const existingTabs = await chrome.tabs.query({});
     for (const tab of existingTabs) {
-      if (tab.id && !this.tabs.has(tab.id)) {
-        // Only record state; never actively attach debugger during sync.
-        this.tabs.set(tab.id, {
-          id: tab.id,
-          url: tab.url || '',
-          title: tab.title || '',
-          debuggerAttached: false
-        });
-      } else if (tab.id && this.tabs.has(tab.id)) {
-        // Update existing tab metadata, preserve debuggerAttached state.
-        const existing = this.tabs.get(tab.id)!;
-        existing.url = tab.url || '';
-        existing.title = tab.title || '';
-      }
+      if (tab.id != null) this.trackTab(tab);
     }
     console.log(`Synced ${existingTabs.length} existing tabs`);
 
     // Setup lifecycle listeners once
     if (!this.listenersSetup) {
       chrome.tabs.onCreated.addListener((tab) => {
-        if (tab.id) {
-          this.tabs.set(tab.id, {
-            id: tab.id,
-            url: tab.url || '',
-            title: tab.title || '',
-            debuggerAttached: false
-          });
+        if (tab.id != null) {
+          this.trackTab(tab);
+          this.notifyLifecycle('tab_created', { tabId: tab.id, windowId: tab.windowId });
         }
       });
-      chrome.tabs.onRemoved.addListener((tabId) => {
+      chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
         this.tabs.delete(tabId);
         this.attachLocks.delete(tabId);
         this.clearDetachTimer(tabId);
         this.debuggerHolds.delete(tabId);
+        this.notifyLifecycle('tab_removed', { tabId, windowId: removeInfo.windowId });
+      });
+      chrome.windows.onRemoved.addListener((windowId) => {
+        this.notifyLifecycle('window_removed', { windowId });
       });
       chrome.debugger.onDetach.addListener((source) => {
         if (source.tabId == null) {
@@ -65,6 +56,9 @@ export class TabManager {
         if (existing) {
           if (changeInfo.url) existing.url = changeInfo.url;
           if (changeInfo.title) existing.title = changeInfo.title;
+          existing.windowId = tab.windowId;
+        } else {
+          this.trackTab(tab);
         }
       });
       this.listenersSetup = true;
@@ -101,12 +95,7 @@ export class TabManager {
       const alreadyAttached = await this._isDebuggerActuallyAttached(tabId);
       if (alreadyAttached) {
         const tab = await chrome.tabs.get(tabId);
-        this.tabs.set(tabId, {
-          id: tabId,
-          url: tab.url || '',
-          title: tab.title || '',
-          debuggerAttached: true
-        });
+        this.trackTab(tab, true);
         console.log(`[ARC-TUNNEL-DIAG] Debugger already attached to tab ${tabId}, skipping attach`);
         return;
       }
@@ -133,23 +122,13 @@ export class TabManager {
     try {
       await chrome.debugger.attach({ tabId }, '1.3');
       const tab = await chrome.tabs.get(tabId);
-      this.tabs.set(tabId, {
-        id: tabId,
-        url: tab.url || '',
-        title: tab.title || '',
-        debuggerAttached: true
-      });
+      this.trackTab(tab, true);
       console.log(`[ARC-TUNNEL-DIAG] ⛓️ Debugger ATTACHED to tab ${tabId} — infobar should appear now`);
     } catch (error: any) {
       if (error?.message?.includes('already attached')) {
         try {
           const tab = await chrome.tabs.get(tabId);
-          this.tabs.set(tabId, {
-            id: tabId,
-            url: tab.url || '',
-            title: tab.title || '',
-            debuggerAttached: true
-          });
+          this.trackTab(tab, true);
           console.log(`[ARC-TUNNEL-DIAG] Debugger already attached to tab ${tabId}, state restored`);
           return;
         } catch (tabError) {
@@ -178,18 +157,24 @@ export class TabManager {
     }
   }
 
-  async createTab(url?: string): Promise<number> {
-    const tab = await chrome.tabs.create({ url, active: true });
-    if (tab.id) {
-      this.tabs.set(tab.id, {
-        id: tab.id,
-        url: tab.url || '',
-        title: tab.title || '',
-        debuggerAttached: false
-      });
-      return tab.id;
-    }
-    throw new Error('Failed to create tab');
+  async createWindow(url?: string): Promise<{ windowId: number; tabId: number }> {
+    const created = await chrome.windows.create({ url: url || 'about:blank', focused: true });
+    const tab = created?.tabs?.[0];
+    if (created?.id == null || tab?.id == null) throw new Error('Failed to create browser window');
+    this.trackTab(tab);
+    return { windowId: created.id, tabId: tab.id };
+  }
+
+  async createTab(url?: string, windowId?: number): Promise<number> {
+    const tab = await chrome.tabs.create({ url, windowId, active: true });
+    if (tab.id == null) throw new Error('Failed to create tab');
+    this.trackTab(tab);
+    return tab.id;
+  }
+
+  onLifecycle(listener: LifecycleListener): () => void {
+    this.lifecycleListeners.add(listener);
+    return () => this.lifecycleListeners.delete(listener);
   }
 
   async closeTab(tabId: number): Promise<void> {
@@ -271,5 +256,21 @@ export class TabManager {
       clearTimeout(timer);
       this.detachTimers.delete(tabId);
     }
+  }
+
+  private trackTab(tab: chrome.tabs.Tab, debuggerAttached?: boolean): void {
+    if (tab.id == null) return;
+    const existing = this.tabs.get(tab.id);
+    this.tabs.set(tab.id, {
+      id: tab.id,
+      windowId: tab.windowId,
+      url: tab.url || '',
+      title: tab.title || '',
+      debuggerAttached: debuggerAttached ?? existing?.debuggerAttached ?? false
+    });
+  }
+
+  private notifyLifecycle(event: LifecycleEvent, data: Record<string, unknown>): void {
+    for (const listener of this.lifecycleListeners) listener(event, data);
   }
 }

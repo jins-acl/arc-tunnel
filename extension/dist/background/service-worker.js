@@ -7,6 +7,12 @@ var __commonJS = (cb, mod) => function __require() {
 };
 
 // src/background/websocket-client.ts
+function normalizeWebSocketUrl(url) {
+  const parsed = new URL(url);
+  if (parsed.pathname !== "/") return url;
+  parsed.pathname = "/extension";
+  return parsed.toString();
+}
 var WebSocketClient;
 var init_websocket_client = __esm({
   "src/background/websocket-client.ts"() {
@@ -20,73 +26,121 @@ var init_websocket_client = __esm({
         this.maxReconnectDelay = 3e4;
         this.messageHandlers = /* @__PURE__ */ new Map();
         this.intentionalClose = false;
-        this.url = url || "ws://localhost:8765";
+        this.connectionGeneration = 0;
+        this.reconnectTimer = null;
+        this.connectPromise = null;
+        this.rejectConnect = null;
+        this.handshakeComplete = false;
+        this.url = normalizeWebSocketUrl(url || "ws://localhost:8765");
       }
       setUrl(url) {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-          this.disconnect();
-        }
-        this.url = url;
+        ++this.connectionGeneration;
+        this.clearReconnectTimer();
+        chrome.alarms.clear("ws-reconnect");
+        this.intentionalClose = true;
+        const oldSocket = this.ws;
+        this.ws = null;
+        this.handshakeComplete = false;
+        this.rejectPendingConnect(new Error("Connection superseded by URL change"));
+        oldSocket?.close();
+        this.url = normalizeWebSocketUrl(url);
+        this.intentionalClose = false;
       }
       async connect() {
-        return new Promise((resolve, reject) => {
-          this.ws = new WebSocket(this.url);
-          this.ws.onopen = () => {
-            console.log("Connected to MCP server");
-            this.reconnectAttempts = 0;
+        if (this.isConnected()) return;
+        if (this.connectPromise) return this.connectPromise;
+        const generation = ++this.connectionGeneration;
+        this.intentionalClose = false;
+        this.handshakeComplete = false;
+        this.connectPromise = new Promise((resolve, reject) => {
+          this.rejectConnect = reject;
+          const socket = new WebSocket(this.url);
+          this.ws = socket;
+          const resolveConnect = () => {
+            if (generation !== this.connectionGeneration) return;
+            this.connectPromise = null;
+            this.rejectConnect = null;
             resolve();
           };
-          this.ws.onerror = (error) => {
-            console.error("WebSocket error:", error);
+          const rejectCurrentConnect = (error) => {
+            if (generation !== this.connectionGeneration) return;
+            this.connectPromise = null;
+            this.rejectConnect = null;
             reject(error);
           };
-          this.ws.onclose = () => {
-            console.log("Disconnected from MCP server");
-            this.handleReconnect();
+          socket.onopen = () => {
+            if (generation !== this.connectionGeneration) return;
+            console.log("Connected to Arc Tunnel broker");
+            this.intentionalClose = false;
+            const hello = { type: "hello", role: "extension", protocolVersion: 2 };
+            socket.send(JSON.stringify(hello));
           };
-          this.ws.onmessage = (event) => {
+          socket.onerror = () => {
+            if (generation !== this.connectionGeneration) return;
+            console.error("WebSocket error");
+          };
+          socket.onclose = () => {
+            if (generation !== this.connectionGeneration || this.intentionalClose) return;
+            console.log("Disconnected from Arc Tunnel broker");
+            this.ws = null;
+            this.handshakeComplete = false;
+            rejectCurrentConnect(new Error("WebSocket closed before handshake completed"));
+            this.handleReconnect(generation);
+          };
+          socket.onmessage = (event) => {
+            if (generation !== this.connectionGeneration) return;
             try {
               const message = JSON.parse(event.data);
+              if (!this.handshakeComplete) {
+                if (message.type === "welcome" && message.protocolVersion === 2) {
+                  this.handshakeComplete = true;
+                  this.reconnectAttempts = 0;
+                  this.clearReconnectTimer();
+                  chrome.alarms.clear("ws-reconnect");
+                  resolveConnect();
+                }
+                return;
+              }
               this.handleMessage(message);
             } catch (error) {
               console.error("Failed to parse message:", error);
             }
           };
         });
+        return this.connectPromise;
       }
       disconnect() {
+        ++this.connectionGeneration;
         this.intentionalClose = true;
-        if (this.ws) {
-          this.ws.close();
-          this.ws = null;
-        }
+        this.clearReconnectTimer();
+        chrome.alarms.clear("ws-reconnect");
+        const socket = this.ws;
+        this.ws = null;
+        this.handshakeComplete = false;
+        this.rejectPendingConnect(new Error("Connection closed intentionally"));
+        socket?.close();
       }
       isConnected() {
-        return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+        return this.handshakeComplete && this.ws !== null && this.ws.readyState === WebSocket.OPEN;
       }
       sendResponse(response) {
-        if (this.isConnected()) {
-          this.ws.send(JSON.stringify(response));
-        }
+        if (this.isConnected()) this.ws.send(JSON.stringify(response));
       }
       sendEvent(event) {
-        if (this.isConnected()) {
-          this.ws.send(JSON.stringify(event));
-        }
+        if (this.isConnected()) this.ws.send(JSON.stringify(event));
       }
       onCommand(handler) {
         this.messageHandlers.set("command", handler);
       }
       handleMessage(message) {
+        if (message.type !== "command") return;
         const handler = this.messageHandlers.get("command");
-        if (handler) {
-          handler(message);
-        }
+        if (handler) handler(message);
       }
-      async handleReconnect() {
-        if (this.intentionalClose) return;
+      handleReconnect(generation) {
+        if (generation !== this.connectionGeneration || this.intentionalClose || this.reconnectTimer) return;
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-          console.error(`Reconnect failed after ${this.maxReconnectAttempts} attempts \u2014 giving up. Reload the extension to retry.`);
+          console.error(`Reconnect failed after ${this.maxReconnectAttempts} attempts - giving up. Reload the extension to retry.`);
           return;
         }
         const delay = Math.min(
@@ -95,8 +149,9 @@ var init_websocket_client = __esm({
         );
         this.reconnectAttempts++;
         console.log(`Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-        setTimeout(async () => {
-          if (this.intentionalClose) return;
+        this.reconnectTimer = setTimeout(async () => {
+          this.reconnectTimer = null;
+          if (generation !== this.connectionGeneration || this.intentionalClose) return;
           try {
             await this.connect();
           } catch (error) {
@@ -104,6 +159,18 @@ var init_websocket_client = __esm({
           }
         }, delay);
         chrome.alarms.create("ws-reconnect", { delayInMinutes: Math.ceil(delay / 6e4) || 1 });
+      }
+      clearReconnectTimer() {
+        if (this.reconnectTimer) {
+          clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = null;
+        }
+      }
+      rejectPendingConnect(error) {
+        const reject = this.rejectConnect;
+        this.rejectConnect = null;
+        this.connectPromise = null;
+        reject?.(error);
       }
     };
   }
@@ -121,41 +188,31 @@ var init_tab_manager = __esm({
         this.attachLocks = /* @__PURE__ */ new Map();
         this.detachTimers = /* @__PURE__ */ new Map();
         this.debuggerHolds = /* @__PURE__ */ new Map();
+        this.lifecycleListeners = /* @__PURE__ */ new Set();
         this.idleDetachDelayMs = 15e3;
       }
       async syncExistingTabs() {
         const existingTabs = await chrome.tabs.query({});
         for (const tab of existingTabs) {
-          if (tab.id && !this.tabs.has(tab.id)) {
-            this.tabs.set(tab.id, {
-              id: tab.id,
-              url: tab.url || "",
-              title: tab.title || "",
-              debuggerAttached: false
-            });
-          } else if (tab.id && this.tabs.has(tab.id)) {
-            const existing = this.tabs.get(tab.id);
-            existing.url = tab.url || "";
-            existing.title = tab.title || "";
-          }
+          if (tab.id != null) this.trackTab(tab);
         }
         console.log(`Synced ${existingTabs.length} existing tabs`);
         if (!this.listenersSetup) {
           chrome.tabs.onCreated.addListener((tab) => {
-            if (tab.id) {
-              this.tabs.set(tab.id, {
-                id: tab.id,
-                url: tab.url || "",
-                title: tab.title || "",
-                debuggerAttached: false
-              });
+            if (tab.id != null) {
+              this.trackTab(tab);
+              this.notifyLifecycle("tab_created", { tabId: tab.id, windowId: tab.windowId });
             }
           });
-          chrome.tabs.onRemoved.addListener((tabId) => {
+          chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
             this.tabs.delete(tabId);
             this.attachLocks.delete(tabId);
             this.clearDetachTimer(tabId);
             this.debuggerHolds.delete(tabId);
+            this.notifyLifecycle("tab_removed", { tabId, windowId: removeInfo.windowId });
+          });
+          chrome.windows.onRemoved.addListener((windowId) => {
+            this.notifyLifecycle("window_removed", { windowId });
           });
           chrome.debugger.onDetach.addListener((source) => {
             if (source.tabId == null) {
@@ -175,6 +232,9 @@ var init_tab_manager = __esm({
             if (existing) {
               if (changeInfo.url) existing.url = changeInfo.url;
               if (changeInfo.title) existing.title = changeInfo.title;
+              existing.windowId = tab.windowId;
+            } else {
+              this.trackTab(tab);
             }
           });
           this.listenersSetup = true;
@@ -204,12 +264,7 @@ var init_tab_manager = __esm({
           const alreadyAttached = await this._isDebuggerActuallyAttached(tabId);
           if (alreadyAttached) {
             const tab = await chrome.tabs.get(tabId);
-            this.tabs.set(tabId, {
-              id: tabId,
-              url: tab.url || "",
-              title: tab.title || "",
-              debuggerAttached: true
-            });
+            this.trackTab(tab, true);
             console.log(`[ARC-TUNNEL-DIAG] Debugger already attached to tab ${tabId}, skipping attach`);
             return;
           }
@@ -232,23 +287,13 @@ var init_tab_manager = __esm({
         try {
           await chrome.debugger.attach({ tabId }, "1.3");
           const tab = await chrome.tabs.get(tabId);
-          this.tabs.set(tabId, {
-            id: tabId,
-            url: tab.url || "",
-            title: tab.title || "",
-            debuggerAttached: true
-          });
+          this.trackTab(tab, true);
           console.log(`[ARC-TUNNEL-DIAG] \u26D3\uFE0F Debugger ATTACHED to tab ${tabId} \u2014 infobar should appear now`);
         } catch (error) {
           if (error?.message?.includes("already attached")) {
             try {
               const tab = await chrome.tabs.get(tabId);
-              this.tabs.set(tabId, {
-                id: tabId,
-                url: tab.url || "",
-                title: tab.title || "",
-                debuggerAttached: true
-              });
+              this.trackTab(tab, true);
               console.log(`[ARC-TUNNEL-DIAG] Debugger already attached to tab ${tabId}, state restored`);
               return;
             } catch (tabError) {
@@ -275,18 +320,22 @@ var init_tab_manager = __esm({
           console.error(`Failed to detach debugger from tab ${tabId}:`, error);
         }
       }
-      async createTab(url) {
-        const tab = await chrome.tabs.create({ url, active: true });
-        if (tab.id) {
-          this.tabs.set(tab.id, {
-            id: tab.id,
-            url: tab.url || "",
-            title: tab.title || "",
-            debuggerAttached: false
-          });
-          return tab.id;
-        }
-        throw new Error("Failed to create tab");
+      async createWindow(url) {
+        const created = await chrome.windows.create({ url: url || "about:blank", focused: true });
+        const tab = created?.tabs?.[0];
+        if (created?.id == null || tab?.id == null) throw new Error("Failed to create browser window");
+        this.trackTab(tab);
+        return { windowId: created.id, tabId: tab.id };
+      }
+      async createTab(url, windowId) {
+        const tab = await chrome.tabs.create({ url, windowId, active: true });
+        if (tab.id == null) throw new Error("Failed to create tab");
+        this.trackTab(tab);
+        return tab.id;
+      }
+      onLifecycle(listener) {
+        this.lifecycleListeners.add(listener);
+        return () => this.lifecycleListeners.delete(listener);
       }
       async closeTab(tabId) {
         await chrome.tabs.remove(tabId);
@@ -359,6 +408,20 @@ var init_tab_manager = __esm({
           clearTimeout(timer);
           this.detachTimers.delete(tabId);
         }
+      }
+      trackTab(tab, debuggerAttached) {
+        if (tab.id == null) return;
+        const existing = this.tabs.get(tab.id);
+        this.tabs.set(tab.id, {
+          id: tab.id,
+          windowId: tab.windowId,
+          url: tab.url || "",
+          title: tab.title || "",
+          debuggerAttached: debuggerAttached ?? existing?.debuggerAttached ?? false
+        });
+      }
+      notifyLifecycle(event, data) {
+        for (const listener of this.lifecycleListeners) listener(event, data);
       }
     };
   }
@@ -1637,8 +1700,10 @@ var init_command_handler = __esm({
             return { found };
           }
           // Tab management
+          case "create_window":
+            return await this.tabManager.createWindow(params.url);
           case "create_tab": {
-            const tabId = await this.tabManager.createTab(params.url);
+            const tabId = await this.tabManager.createTab(params.url, params.windowId);
             return { tabId };
           }
           case "close_tab": {
@@ -1648,11 +1713,12 @@ var init_command_handler = __esm({
           case "list_tabs": {
             const allTabs = await chrome.tabs.query({});
             return {
-              tabs: allTabs.map((t) => ({
+              tabs: allTabs.filter((t) => t.id != null).map((t) => ({
                 tabId: t.id,
+                windowId: t.windowId,
                 url: t.url || "",
                 title: t.title || "",
-                active: t.active
+                active: !!t.active
               }))
             };
           }
@@ -1884,9 +1950,12 @@ var require_service_worker = __commonJS({
     async function initialize() {
       const wsUrl = await loadConfig();
       wsClient.setUrl(wsUrl);
+      await tabManager.syncExistingTabs();
+      await connectClient();
+    }
+    async function connectClient() {
       try {
         await wsClient.connect();
-        await tabManager.syncExistingTabs();
         console.log("Arc Tunnel extension initialized");
       } catch (error) {
         console.error("Failed to connect to MCP server:", error);
@@ -1897,15 +1966,16 @@ var require_service_worker = __commonJS({
         const newUrl = typeof changes.arc_tunnel_ws_url.newValue === "string" ? changes.arc_tunnel_ws_url.newValue : DEFAULT_WS_URL;
         console.log(`WebSocket URL changed to: ${newUrl}`);
         wsClient.setUrl(newUrl);
-        if (!wsClient.isConnected()) {
-          initialize();
-        }
+        void connectClient();
       }
     });
     wsClient.onCommand(async (command) => {
       console.log("Received command:", command.command);
       const response = await commandHandler.handleCommand(command);
       wsClient.sendResponse(response);
+    });
+    tabManager.onLifecycle((event, data) => {
+      wsClient.sendEvent({ type: "event", event, data, timestamp: Date.now() });
     });
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message.type === "get_status") {
@@ -1922,7 +1992,7 @@ var require_service_worker = __commonJS({
       } else if (alarm.name === "ws-reconnect") {
         if (!wsClient.isConnected()) {
           console.log("[alarm] SW wakeup \u2014 attempting reconnect");
-          initialize();
+          void connectClient();
         }
       }
     });

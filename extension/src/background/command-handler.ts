@@ -304,8 +304,11 @@ export class CommandHandler {
       }
 
       // Tab management
+      case 'create_window':
+        return await this.tabManager.createWindow(params.url);
+
       case 'create_tab': {
-        const tabId = await this.tabManager.createTab(params.url);
+        const tabId = await this.tabManager.createTab(params.url, params.windowId);
         return { tabId };
       }
 
@@ -317,11 +320,12 @@ export class CommandHandler {
       case 'list_tabs': {
         const allTabs = await chrome.tabs.query({});
         return {
-          tabs: allTabs.map(t => ({
-            tabId: t.id,
+          tabs: allTabs.filter(t => t.id != null).map(t => ({
+            tabId: t.id!,
+            windowId: t.windowId,
             url: t.url || '',
             title: t.title || '',
-            active: t.active
+            active: !!t.active
           }))
         };
       }
