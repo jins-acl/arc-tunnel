@@ -98,8 +98,9 @@ describe('broker launcher', () => {
     await new Promise<void>((resolve) => foreign.listen(port, '127.0.0.1', resolve));
     const bounded = createBrokerLauncher({ homeDir, startupTimeout: 100 });
     const lockDir = path.join(homeDir, '.arc-tunnel');
+    const lockPath = path.join(lockDir, 'broker.lock');
     fs.mkdirSync(lockDir, { recursive: true });
-    fs.writeFileSync(path.join(lockDir, 'broker.lock'), JSON.stringify({ pid: process.pid, port, protocolVersion: 2 }));
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, port, protocolVersion: 2 }));
     const started = Date.now();
     const pending = bounded.ensureBroker({ host: '127.0.0.1', port })
       .then(() => ({ code: 'STARTED' }), (error) => ({ code: error.code }));
@@ -111,6 +112,7 @@ describe('broker launcher', () => {
     destroyConnections();
     await new Promise((resolve) => setTimeout(resolve, 25));
     await new Promise<void>((resolve) => foreign.close(() => resolve()));
+    fs.rmSync(lockPath, { force: true });
     expect(outcome).toMatchObject({ code: 'PORT_IN_USE' });
     expect(Date.now() - started).toBeLessThan(500);
   });
@@ -148,8 +150,9 @@ describe('broker launcher', () => {
     await new Promise<void>((resolve) => foreign.listen(port, '127.0.0.1', resolve));
     const bounded = createBrokerLauncher({ homeDir, startupTimeout: 120 });
     const lockDir = path.join(homeDir, '.arc-tunnel');
+    const lockPath = path.join(lockDir, 'broker.lock');
     fs.mkdirSync(lockDir, { recursive: true });
-    fs.writeFileSync(path.join(lockDir, 'broker.lock'), JSON.stringify({ pid: process.pid, port, protocolVersion: 2 }));
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, port, protocolVersion: 2 }));
     const started = Date.now();
     const pending = bounded.ensureBroker({ host: '127.0.0.1', port })
       .then(() => ({ code: 'STARTED' }), (error) => ({ code: error.code }));
@@ -161,6 +164,7 @@ describe('broker launcher', () => {
     destroyConnections();
     await new Promise((resolve) => setTimeout(resolve, 25));
     await new Promise<void>((resolve) => foreign.close(() => resolve()));
+    fs.rmSync(lockPath, { force: true });
     expect(outcome).toMatchObject({ code: 'PORT_IN_USE' });
     expect(Date.now() - started).toBeLessThan(500);
   });
@@ -185,6 +189,77 @@ describe('broker launcher', () => {
     await launcher.stopBroker(config);
     await expect(launcher.getBrokerStatus(config)).resolves.toEqual({ running: false, port });
     expect(fs.existsSync(path.join(homeDir, '.arc-tunnel', 'broker.lock'))).toBe(false);
+  });
+
+  it('does not remove an empty lock owned by a concurrent starter', async () => {
+    const lockDir = path.join(homeDir, '.arc-tunnel');
+    const lockPath = path.join(lockDir, 'broker.lock');
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(lockPath, '');
+    const bounded = createBrokerLauncher({ homeDir, startupTimeout: 100 });
+
+    const outcome = await bounded.stopBroker({ host: '127.0.0.1', port })
+      .then(() => ({ code: 'STOPPED' }), (error) => ({ code: error.code }));
+    const lockContents = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : null;
+    fs.rmSync(lockPath, { force: true });
+
+    expect(outcome).toMatchObject({ code: 'CONNECTION_LOST' });
+    expect(lockContents).toBe('');
+  });
+
+  it('does not remove a matching startup lock whose recorded process is alive', async () => {
+    const lockDir = path.join(homeDir, '.arc-tunnel');
+    const lockPath = path.join(lockDir, 'broker.lock');
+    const raw = JSON.stringify({ pid: process.pid, port, protocolVersion: 2 });
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(lockPath, raw);
+    const bounded = createBrokerLauncher({ homeDir, startupTimeout: 100 });
+
+    const outcome = await bounded.stopBroker({ host: '127.0.0.1', port })
+      .then(() => ({ code: 'STOPPED' }), (error) => ({ code: error.code }));
+    const lockContents = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : null;
+    fs.rmSync(lockPath, { force: true });
+
+    expect(outcome).toMatchObject({ code: 'CONNECTION_LOST' });
+    expect(lockContents).toBe(raw);
+  });
+
+  it('removes a genuinely stale dead-process lock when health is absent', async () => {
+    const lockDir = path.join(homeDir, '.arc-tunnel');
+    const lockPath = path.join(lockDir, 'broker.lock');
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: 2147483647, port, protocolVersion: 2 }));
+
+    await launcher.stopBroker({ host: '127.0.0.1', port });
+
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
+  it('retains a replacement lock when ownership changes before stale unlink', async () => {
+    const lockDir = path.join(homeDir, '.arc-tunnel');
+    const lockPath = path.join(lockDir, 'broker.lock');
+    const replacement = JSON.stringify({ pid: process.pid, port, protocolVersion: 2 });
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: 2147483647, port, protocolVersion: 2 }));
+    const originalRead = fs.readFileSync.bind(fs);
+    let lockReads = 0;
+    const readSpy = jest.spyOn(fs, 'readFileSync').mockImplementation(((file: fs.PathOrFileDescriptor, options: any) => {
+      if (String(file) === lockPath && ++lockReads === 2) fs.writeFileSync(lockPath, replacement);
+      return originalRead(file, options);
+    }) as typeof fs.readFileSync);
+
+    let outcome: { code: string };
+    try {
+      outcome = await launcher.stopBroker({ host: '127.0.0.1', port })
+        .then(() => ({ code: 'STOPPED' }), (error) => ({ code: error.code }));
+    } finally {
+      readSpy.mockRestore();
+    }
+    const lockContents = fs.readFileSync(lockPath, 'utf8');
+    fs.rmSync(lockPath, { force: true });
+
+    expect(outcome!).toMatchObject({ code: 'CONNECTION_LOST' });
+    expect(lockContents).toBe(replacement);
   });
 
   it('retains the lock and fails when a Broker remains healthy after stop timeout', async () => {

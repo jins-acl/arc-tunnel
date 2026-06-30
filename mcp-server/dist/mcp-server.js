@@ -10763,19 +10763,29 @@ function createBrokerLauncher(options = {}) {
       return false;
     }
   }
-  function readLock() {
+  function readLockSnapshot() {
     try {
-      const lock = JSON.parse(import_fs.default.readFileSync(lockPath, "utf8"));
-      return typeof lock.pid === "number" && typeof lock.port === "number" && typeof lock.protocolVersion === "number" ? lock : null;
-    } catch {
-      return null;
+      const raw = import_fs.default.readFileSync(lockPath, "utf8");
+      let value = null;
+      try {
+        value = JSON.parse(raw);
+      } catch {
+      }
+      const lock = value && typeof value.pid === "number" && typeof value.port === "number" && typeof value.protocolVersion === "number" ? value : null;
+      return { raw, lock };
+    } catch (error2) {
+      if (error2.code === "ENOENT") return null;
+      throw error2;
     }
   }
-  function removeLock() {
+  function removeLock(expectedRaw) {
+    if (expectedRaw !== void 0 && readLockSnapshot()?.raw !== expectedRaw) return false;
     try {
       import_fs.default.unlinkSync(lockPath);
+      return true;
     } catch (error2) {
       if (error2.code !== "ENOENT") throw error2;
+      return false;
     }
   }
   async function waitForBroker(config2, deadline) {
@@ -10795,15 +10805,16 @@ function createBrokerLauncher(options = {}) {
       if (current.kind === "foreign") {
         throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Port ${config2.port} is not Arc Tunnel`);
       }
-      const lock = readLock();
-      if (lock) {
+      const snapshot = readLockSnapshot();
+      const lock = snapshot?.lock;
+      if (lock && snapshot) {
         const lockProbe = lock.port === config2.port ? current : await probe({ host: "127.0.0.1", port: lock.port }, deadline);
         if (lockProbe.kind === "arc") {
           if (lock.port === config2.port) return;
           throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Arc Tunnel Broker is already running on port ${lock.port}`);
         }
         if (!pidAlive(lock.pid)) {
-          removeLock();
+          if (!removeLock(snapshot.raw)) continue;
           return launch(config2, deadline);
         }
       }
@@ -10827,8 +10838,10 @@ function createBrokerLauncher(options = {}) {
         return;
       }
       let child;
+      let ownedLockRaw;
       try {
-        import_fs.default.writeFileSync(fd, JSON.stringify({ pid: process.pid, port: config2.port, protocolVersion: PROTOCOL_VERSION }));
+        ownedLockRaw = JSON.stringify({ pid: process.pid, port: config2.port, protocolVersion: PROTOCOL_VERSION });
+        import_fs.default.writeFileSync(fd, ownedLockRaw);
         import_fs.default.closeSync(fd);
         child = spawnProcess(process.execPath, [brokerEntry, ...brokerArgs(config2)], {
           detached: true,
@@ -10837,7 +10850,8 @@ function createBrokerLauncher(options = {}) {
         });
         child.unref();
         if (typeof child.pid !== "number") throw new Error("Broker process did not provide a pid");
-        import_fs.default.writeFileSync(lockPath, JSON.stringify({ pid: child.pid, port: config2.port, protocolVersion: PROTOCOL_VERSION }));
+        ownedLockRaw = JSON.stringify({ pid: child.pid, port: config2.port, protocolVersion: PROTOCOL_VERSION });
+        import_fs.default.writeFileSync(lockPath, ownedLockRaw);
         await waitForBroker(config2, deadline);
         return;
       } catch (error2) {
@@ -10845,7 +10859,7 @@ function createBrokerLauncher(options = {}) {
           process.kill(child.pid);
         } catch {
         }
-        removeLock();
+        if (ownedLockRaw !== void 0) removeLock(ownedLockRaw);
         throw error2;
       }
     }
@@ -10896,9 +10910,37 @@ function createBrokerLauncher(options = {}) {
       if (stillRunning) {
         throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, `Broker on port ${config2.port} did not stop within ${startupTimeout}ms`);
       }
+      await removeStoppedLock(config2, deadline, true);
+      return;
     }
-    const lock = readLock();
-    if (!lock || lock.port === config2.port) removeLock();
+    await removeStoppedLock(config2, deadline, false);
+  }
+  async function removeStoppedLock(config2, deadline, waitForProcess) {
+    const snapshot = readLockSnapshot();
+    if (!snapshot) return;
+    if (!snapshot.lock) {
+      throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, "Broker startup lock is still in progress");
+    }
+    if (snapshot.lock.port !== config2.port) return;
+    if (waitForProcess) {
+      while (pidAlive(snapshot.lock.pid) && Date.now() < deadline) {
+        const delay = Math.min(25, Math.max(0, deadline - Date.now()));
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+    if (pidAlive(snapshot.lock.pid)) {
+      throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, `Broker process ${snapshot.lock.pid} is still starting or stopping`);
+    }
+    if (Date.now() >= deadline) {
+      throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, "Broker cleanup deadline expired before ownership could be verified");
+    }
+    const health = await probe(config2, deadline);
+    if (health.kind !== "absent") {
+      throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, `Broker health on port ${config2.port} is not absent`);
+    }
+    if (!removeLock(snapshot.raw)) {
+      throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, "Broker lock ownership changed during cleanup");
+    }
   }
   return { ensureBroker: ensureBroker2, getBrokerStatus: getBrokerStatus2, stopBroker: stopBroker2 };
 }
