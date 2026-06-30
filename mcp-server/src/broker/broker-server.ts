@@ -288,13 +288,16 @@ export class BrokerServer {
     if (event.event !== 'tab_removed' && event.event !== 'window_removed') return;
     const tabId = event.data?.tabId;
     const windowId = event.data?.windowId;
-    if (typeof tabId === 'number') this.registry.releaseTab(tabId);
-    const tabIds = event.data?.tabIds;
-    if (Array.isArray(tabIds)) {
-      for (const id of tabIds) if (typeof id === 'number') this.registry.releaseTab(id);
+    const removedTabIds = new Set<number>();
+    if (typeof tabId === 'number') {
+      this.registry.releaseTab(tabId);
+      removedTabIds.add(tabId);
+    }
+    if (event.event === 'window_removed' && typeof windowId === 'number') {
+      for (const id of this.registry.releaseWindow(windowId)) removedTabIds.add(id);
     }
     for (const [id, route] of this.routes) {
-      const matchesTab = typeof tabId === 'number' && route.params.tabId === tabId;
+      const matchesTab = typeof route.params.tabId === 'number' && removedTabIds.has(route.params.tabId);
       const matchesWindow = typeof windowId === 'number' && route.params.windowId === windowId;
       if (!matchesTab && !matchesWindow) continue;
       clearTimeout(route.timer);

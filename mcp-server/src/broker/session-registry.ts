@@ -72,6 +72,22 @@ export class SessionRegistry {
     this.tabOwners.delete(tabId);
   }
 
+  releaseWindow(windowId: number): number[] {
+    const released: number[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.windowId !== windowId) continue;
+      for (const tabId of session.tabIds) {
+        if (this.tabOwners.get(tabId) === session.id) {
+          this.tabOwners.delete(tabId);
+          released.push(tabId);
+        }
+      }
+      session.tabIds.clear();
+      session.windowId = null;
+    }
+    return released;
+  }
+
   assertOwnsTab(sessionId: string, tabId: number): void {
     this.requireSession(sessionId);
     if (this.tabOwners.get(tabId) !== sessionId) {

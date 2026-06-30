@@ -38,6 +38,19 @@ describe('SessionRegistry', () => {
     ]);
   });
 
+  it('releases every owned tab for a removed window atomically', () => {
+    const registry = new SessionRegistry();
+    const alpha = registry.createSession('alpha');
+    const beta = registry.createSession('beta');
+
+    registry.assignWindow(alpha.id, 88, [701, 702]);
+
+    expect(registry.releaseWindow(88)).toEqual([701, 702]);
+    expect(registry.claimTab(beta.id, 701)).toEqual({ ok: true });
+    expect(registry.claimTab(beta.id, 702)).toEqual({ ok: true });
+    expect(registry.releaseWindow(88)).toEqual([]);
+  });
+
   it('replaces previously assigned window tabs for the same session', () => {
     const registry = new SessionRegistry();
     const alpha = registry.createSession('alpha');

@@ -231,16 +231,23 @@ describe('BrokerServer', () => {
   });
 
   it('rejects matching work with TAB_CLOSED when a window is removed', async () => {
+    const registry = new SessionRegistry();
+    await broker.stop();
+    broker = new BrokerServer({ host: '127.0.0.1', port: 0 }, { registry });
+    await broker.start();
     const port = broker.address().port;
     const extension = await connectRole(port, '/extension', 'extension');
     const alpha = await connectRole(port, '/agent', 'agent');
-    sockets.push(extension.ws, alpha.ws);
+    const beta = await connectRole(port, '/agent', 'agent');
+    sockets.push(extension.ws, alpha.ws, beta.ws);
+    registry.assignWindow(alpha.welcome.sessionId, 88, [77]);
     const command = nextMessage(extension.ws);
-    alpha.ws.send(JSON.stringify({ type: 'agent_request', requestId: 'window-work', command: 'create_tab', params: { windowId: 88 }, timeout: 1_000 }));
+    alpha.ws.send(JSON.stringify({ type: 'agent_request', requestId: 'window-work', command: 'navigate', params: { tabId: 77 }, timeout: 1_000 }));
     await command;
     const response = nextMessage(alpha.ws);
-    extension.ws.send(JSON.stringify({ type: 'event', event: 'window_removed', data: { windowId: 88, tabIds: [77] }, timestamp: Date.now() }));
+    extension.ws.send(JSON.stringify({ type: 'event', event: 'window_removed', data: { windowId: 88 }, timestamp: Date.now() }));
     await expect(response).resolves.toMatchObject({ requestId: 'window-work', error: { code: ErrorCode.TAB_CLOSED } });
+    expect(registry.claimTab(beta.welcome.sessionId, 77)).toEqual({ ok: true });
   });
 
   it('rejects in-flight routes before closing sockets on shutdown', async () => {
