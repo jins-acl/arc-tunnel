@@ -51,6 +51,34 @@ describe('SessionRegistry', () => {
     expect(registry.claimTab(beta.id, 303)).toEqual({ ok: false, code: ErrorCode.TAB_NOT_OWNED });
   });
 
+  it('rejects a window assignment collision without partially mutating ownership', () => {
+    const registry = new SessionRegistry();
+    const alpha = registry.createSession('alpha');
+    const beta = registry.createSession('beta');
+    const gamma = registry.createSession('gamma');
+
+    registry.assignWindow(alpha.id, 10, [301, 302]);
+    registry.assignWindow(beta.id, 20, [401]);
+
+    expect(() => registry.assignWindow(beta.id, 21, [402, 301])).toThrow(ErrorCode.TAB_NOT_OWNED);
+    expect(() => registry.assertOwnsTab(alpha.id, 301)).not.toThrow();
+    expect(() => registry.assertOwnsTab(alpha.id, 302)).not.toThrow();
+    expect(() => registry.assertOwnsTab(beta.id, 401)).not.toThrow();
+    expect(registry.claimTab(gamma.id, 402)).toEqual({ ok: true });
+  });
+
+  it('rejects a duplicate session ID without corrupting existing ownership', () => {
+    const registry = new SessionRegistry();
+    const alpha = registry.createSession('alpha');
+    const beta = registry.createSession('beta');
+
+    registry.assignWindow(alpha.id, 10, [501]);
+
+    expect(() => registry.createSession(alpha.id)).toThrow('Session already exists: alpha');
+    expect(() => registry.assertOwnsTab(alpha.id, 501)).not.toThrow();
+    expect(registry.claimTab(beta.id, 501)).toEqual({ ok: false, code: ErrorCode.TAB_NOT_OWNED });
+  });
+
   it('expires disconnected ownership at exactly 30 seconds', () => {
     const registry = new SessionRegistry();
     const alpha = registry.createSession('alpha');

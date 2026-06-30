@@ -19,6 +19,9 @@ export class SessionRegistry {
   private readonly tabOwners = new Map<number, string>();
 
   createSession(id: string): AgentSession {
+    if (this.sessions.has(id)) {
+      throw new Error(`Session already exists: ${id}`);
+    }
     const session: AgentSession = {
       id,
       connected: true,
@@ -34,6 +37,12 @@ export class SessionRegistry {
 
   assignWindow(sessionId: string, windowId: number, tabIds: number[]): void {
     const session = this.requireSession(sessionId);
+    for (const tabId of tabIds) {
+      const owner = this.tabOwners.get(tabId);
+      if (owner && owner !== sessionId) {
+        throw new ArcTunnelError(ErrorCode.TAB_NOT_OWNED, ErrorCode.TAB_NOT_OWNED);
+      }
+    }
     for (const tabId of session.tabIds) {
       this.tabOwners.delete(tabId);
     }
