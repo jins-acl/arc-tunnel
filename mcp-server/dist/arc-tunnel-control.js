@@ -50,31 +50,55 @@ function createBrokerLauncher(options = {}) {
   const startupTimeout = options.startupTimeout ?? 5e3;
   const spawnProcess = options.spawnProcess ?? import_child_process.spawn;
   const starting = /* @__PURE__ */ new Map();
-  async function probe(config) {
+  async function probe(config, deadline = Date.now() + Math.min(250, startupTimeout)) {
     return new Promise((resolve) => {
-      const request = import_http.default.get({ hostname: "127.0.0.1", port: config.port, path: "/health", timeout: 250 }, (response) => {
+      let settled = false;
+      let connected = false;
+      let response;
+      let timer;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        response?.destroy();
+        request.destroy();
+        resolve(result);
+      };
+      const request = import_http.default.get({ hostname: "127.0.0.1", port: config.port, path: "/health" }, (incoming) => {
+        response = incoming;
+        connected = true;
         let body = "";
-        response.setEncoding("utf8");
-        response.on("data", (chunk) => {
+        incoming.setEncoding("utf8");
+        incoming.on("data", (chunk) => {
           body += chunk;
         });
-        response.on("end", () => {
-          if (response.statusCode !== 200) return resolve({ kind: "foreign" });
+        incoming.once("aborted", () => finish({ kind: "foreign", transient: true }));
+        incoming.once("error", () => finish({ kind: "foreign", transient: true }));
+        incoming.on("end", () => {
+          if (incoming.statusCode !== 200) return finish({ kind: "foreign" });
           try {
             const health = JSON.parse(body);
             if (health.name === "arc-tunnel" && health.protocolVersion === PROTOCOL_VERSION && typeof health.pid === "number" && health.port === config.port) {
-              resolve({ kind: "arc", health });
-            } else resolve({ kind: "foreign" });
+              finish({ kind: "arc", health });
+            } else finish({ kind: "foreign" });
           } catch {
-            resolve({ kind: "foreign" });
+            finish({ kind: "foreign" });
           }
         });
       });
-      request.once("timeout", () => request.destroy());
+      request.once("socket", (socket) => socket.once("connect", () => {
+        connected = true;
+      }));
       request.once("error", (error) => {
-        const absent = ["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH"];
-        resolve({ kind: absent.includes(error.code || "") ? "absent" : "foreign" });
+        if (error.code === "ECONNRESET") {
+          finish({ kind: "foreign", transient: true });
+          return;
+        }
+        const absent = ["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"];
+        finish({ kind: !connected && absent.includes(error.code || "") ? "absent" : "foreign" });
       });
+      const remaining = Math.max(0, deadline - Date.now());
+      timer = setTimeout(() => finish({ kind: "foreign" }), remaining);
     });
   }
   function pidAlive(pid) {
@@ -101,18 +125,42 @@ function createBrokerLauncher(options = {}) {
     }
   }
   async function waitForBroker(config, deadline) {
-    while (Date.now() <= deadline) {
-      const result = await probe(config);
+    while (Date.now() < deadline) {
+      const result = await probe(config, deadline);
       if (result.kind === "arc") return;
       if (result.kind === "foreign") throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Port ${config.port} is not Arc Tunnel`);
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      const delay = Math.min(50, Math.max(0, deadline - Date.now()));
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
     }
     throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, `Broker did not become healthy within ${startupTimeout}ms`);
   }
-  async function launch(config) {
-    const deadline = Date.now() + startupTimeout;
+  async function waitForLockOwner(config, deadline) {
+    while (Date.now() < deadline) {
+      const current = await probe(config, deadline);
+      if (current.kind === "arc") return;
+      if (current.kind === "foreign") {
+        throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Port ${config.port} is not Arc Tunnel`);
+      }
+      const lock = readLock();
+      if (lock) {
+        const lockProbe = lock.port === config.port ? current : await probe({ host: "127.0.0.1", port: lock.port }, deadline);
+        if (lockProbe.kind === "arc") {
+          if (lock.port === config.port) return;
+          throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Arc Tunnel Broker is already running on port ${lock.port}`);
+        }
+        if (!pidAlive(lock.pid)) {
+          removeLock();
+          return launch(config, deadline);
+        }
+      }
+      const delay = Math.min(25, Math.max(0, deadline - Date.now()));
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+    throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, `Broker lock did not become healthy within ${startupTimeout}ms`);
+  }
+  async function launch(config, deadline = Date.now() + startupTimeout) {
     while (true) {
-      const current = await probe(config);
+      const current = await probe(config, deadline);
       if (current.kind === "arc") return;
       if (current.kind === "foreign") throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Port ${config.port} is already in use`);
       import_fs.default.mkdirSync(arcDir, { recursive: true });
@@ -121,17 +169,7 @@ function createBrokerLauncher(options = {}) {
         fd = import_fs.default.openSync(lockPath, "wx");
       } catch (error) {
         if (error.code !== "EEXIST") throw error;
-        const lock = readLock();
-        const lockProbe = lock ? await probe({ host: "127.0.0.1", port: lock.port }) : { kind: "absent" };
-        if (lockProbe.kind === "arc") {
-          if (lock?.port === config.port) return;
-          throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Arc Tunnel Broker is already running on port ${lock?.port}`);
-        }
-        if (!lock || !pidAlive(lock.pid)) {
-          removeLock();
-          continue;
-        }
-        await waitForBroker(config, deadline);
+        await waitForLockOwner(config, deadline);
         return;
       }
       let child;
@@ -171,7 +209,16 @@ function createBrokerLauncher(options = {}) {
     return { running: true, port: config.port, protocolVersion: result.health.protocolVersion, pid: result.health.pid };
   }
   async function stopBroker2(config) {
-    const result = await probe(config);
+    const deadline = Date.now() + startupTimeout;
+    let result = await probe(config, deadline);
+    while (result.kind === "foreign" && result.transient && Date.now() < deadline) {
+      const delay = Math.min(25, Math.max(0, deadline - Date.now()));
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      result = await probe(config, deadline);
+    }
+    if (result.kind === "foreign" && result.transient) {
+      throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, `Broker state on port ${config.port} did not settle within ${startupTimeout}ms`);
+    }
     if (result.kind === "foreign") throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Port ${config.port} is not Arc Tunnel`);
     if (result.kind === "arc") {
       try {
@@ -179,9 +226,21 @@ function createBrokerLauncher(options = {}) {
       } catch (error) {
         if (error.code !== "ESRCH") throw error;
       }
-      const deadline = Date.now() + startupTimeout;
-      while (Date.now() <= deadline && (await probe(config)).kind === "arc") {
-        await new Promise((resolve) => setTimeout(resolve, 50));
+      let stillRunning = true;
+      while (Date.now() < deadline) {
+        const stopped = await probe(config, deadline);
+        if (stopped.kind === "absent") {
+          stillRunning = false;
+          break;
+        }
+        if (stopped.kind === "foreign" && !stopped.transient) {
+          throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Port ${config.port} is not Arc Tunnel`);
+        }
+        const delay = Math.min(50, Math.max(0, deadline - Date.now()));
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+      if (stillRunning) {
+        throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, `Broker on port ${config.port} did not stop within ${startupTimeout}ms`);
       }
     }
     const lock = readLock();

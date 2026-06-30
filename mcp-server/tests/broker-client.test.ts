@@ -1,3 +1,4 @@
+import net from 'net';
 import { WebSocketServer } from 'ws';
 import { BrokerClient } from '../src/broker-client';
 import { PROTOCOL_VERSION } from '../src/protocol';
@@ -65,4 +66,27 @@ describe('BrokerClient', () => {
     socket.close();
     await expect(pending).rejects.toMatchObject({ code: 'CONNECTION_LOST' });
   });
+
+  it('times out a CONNECTING handshake without an uncaught socket error', async () => {
+    const sockets = new Set<net.Socket>();
+    const tcp = net.createServer((tcpSocket) => {
+      sockets.add(tcpSocket);
+      tcpSocket.once('close', () => sockets.delete(tcpSocket));
+    });
+    await new Promise<void>((resolve) => tcp.listen(0, '127.0.0.1', resolve));
+    const hangingPort = (tcp.address() as net.AddressInfo).port;
+    const uncaught: unknown[] = [];
+    const onUncaught = (error: unknown) => uncaught.push(error);
+    process.prependListener('uncaughtException', onUncaught);
+    try {
+      await expect(BrokerClient.connect({ host: '127.0.0.1', port: hangingPort }))
+        .rejects.toMatchObject({ code: 'CONNECTION_LOST' });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(uncaught).toEqual([]);
+    } finally {
+      process.off('uncaughtException', onUncaught);
+      for (const tcpSocket of sockets) tcpSocket.destroy();
+      await new Promise<void>((resolve) => tcp.close(() => resolve()));
+    }
+  }, 10_000);
 });

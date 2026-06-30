@@ -1,7 +1,9 @@
 import fs from 'fs';
 import http from 'http';
+import net from 'net';
 import os from 'os';
 import path from 'path';
+import { spawn } from 'child_process';
 import { createBrokerLauncher } from '../src/broker-launcher';
 
 async function freePort(): Promise<number> {
@@ -10,6 +12,17 @@ async function freePort(): Promise<number> {
   const port = (server.address() as any).port;
   await new Promise<void>((resolve) => server.close(() => resolve()));
   return port;
+}
+
+function connectionCleanup(server: http.Server): () => void {
+  const sockets = new Set<net.Socket>();
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
+  return () => {
+    for (const socket of sockets) socket.destroy();
+  };
 }
 
 describe('broker launcher', () => {
@@ -41,6 +54,32 @@ describe('broker launcher', () => {
     expect(fs.readFileSync(countFile, 'utf8').trim().split('\n')).toHaveLength(1);
   });
 
+  it('does not delete an empty lock while its owner is starting the Broker', async () => {
+    const config = { host: '127.0.0.1' as const, port };
+    const lockDir = path.join(homeDir, '.arc-tunnel');
+    const lockPath = path.join(lockDir, 'broker.lock');
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.closeSync(fs.openSync(lockPath, 'wx'));
+    const externalStart = new Promise<void>((resolve) => setTimeout(() => {
+      const child = spawn(process.execPath, [path.join(__dirname, 'fixtures', 'fake-broker.js'), String(port), countFile], {
+        detached: true, stdio: 'ignore', windowsHide: true
+      });
+      child.unref();
+      fs.writeFileSync(lockPath, JSON.stringify({ pid: child.pid, port, protocolVersion: 2 }));
+      resolve();
+    }, 75));
+    const contender = createBrokerLauncher({
+      homeDir,
+      brokerEntry: path.join(__dirname, 'fixtures', 'fake-broker.js'),
+      brokerArgs: () => [String(port), countFile]
+    });
+
+    await Promise.all([launcher.ensureBroker(config), contender.ensureBroker(config), externalStart]);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(fs.readFileSync(countFile, 'utf8').trim().split('\n')).toHaveLength(1);
+  });
+
   it('fails immediately when the port is not Arc Tunnel', async () => {
     const foreign = http.createServer((_request, response) => { response.writeHead(200); response.end('foreign'); });
     await new Promise<void>((resolve) => foreign.listen(port, '127.0.0.1', resolve));
@@ -48,6 +87,82 @@ describe('broker launcher', () => {
     await expect(launcher.ensureBroker({ host: '127.0.0.1', port })).rejects.toMatchObject({ code: 'PORT_IN_USE' });
     expect(Date.now() - started).toBeLessThan(1000);
     await new Promise<void>((resolve) => foreign.close(() => resolve()));
+  });
+
+  it('treats a foreign listener that never sends health headers as PORT_IN_USE', async () => {
+    let respond = false;
+    const foreign = http.createServer((_request, response) => {
+      if (respond) { response.writeHead(200); response.end('foreign'); }
+    });
+    const destroyConnections = connectionCleanup(foreign);
+    await new Promise<void>((resolve) => foreign.listen(port, '127.0.0.1', resolve));
+    const bounded = createBrokerLauncher({ homeDir, startupTimeout: 100 });
+    const lockDir = path.join(homeDir, '.arc-tunnel');
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(path.join(lockDir, 'broker.lock'), JSON.stringify({ pid: process.pid, port, protocolVersion: 2 }));
+    const started = Date.now();
+    const pending = bounded.ensureBroker({ host: '127.0.0.1', port })
+      .then(() => ({ code: 'STARTED' }), (error) => ({ code: error.code }));
+    const outcome = await Promise.race([
+      pending,
+      new Promise<{ code: string }>((resolve) => setTimeout(() => resolve({ code: 'HUNG' }), 400))
+    ]);
+    respond = true;
+    destroyConnections();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await new Promise<void>((resolve) => foreign.close(() => resolve()));
+    expect(outcome).toMatchObject({ code: 'PORT_IN_USE' });
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it('does not spawn when a foreign listener accepts and resets health connections', async () => {
+    const foreign = net.createServer((socket) => socket.destroy());
+    await new Promise<void>((resolve) => foreign.listen(port, '127.0.0.1', resolve));
+    const bounded = createBrokerLauncher({
+      homeDir,
+      startupTimeout: 100,
+      brokerEntry: path.join(__dirname, 'fixtures', 'fake-broker.js'),
+      brokerArgs: () => [String(port), countFile]
+    });
+    const outcome = await bounded.ensureBroker({ host: '127.0.0.1', port })
+      .then(() => ({ code: 'STARTED' }), (error) => ({ code: error.code }));
+    await new Promise<void>((resolve) => foreign.close(() => resolve()));
+
+    expect(outcome).toMatchObject({ code: 'PORT_IN_USE' });
+    expect(fs.existsSync(countFile)).toBe(false);
+  });
+
+  it('uses an absolute health deadline even when a foreign response keeps sending chunks', async () => {
+    let stream = true;
+    const foreign = http.createServer((_request, response) => {
+      if (!stream) {
+        response.writeHead(200);
+        response.end('foreign');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'application/json' });
+      const timer = setInterval(() => response.write(' '), 10);
+      response.once('close', () => clearInterval(timer));
+    });
+    const destroyConnections = connectionCleanup(foreign);
+    await new Promise<void>((resolve) => foreign.listen(port, '127.0.0.1', resolve));
+    const bounded = createBrokerLauncher({ homeDir, startupTimeout: 120 });
+    const lockDir = path.join(homeDir, '.arc-tunnel');
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(path.join(lockDir, 'broker.lock'), JSON.stringify({ pid: process.pid, port, protocolVersion: 2 }));
+    const started = Date.now();
+    const pending = bounded.ensureBroker({ host: '127.0.0.1', port })
+      .then(() => ({ code: 'STARTED' }), (error) => ({ code: error.code }));
+    const outcome = await Promise.race([
+      pending,
+      new Promise<{ code: string }>((resolve) => setTimeout(() => resolve({ code: 'HUNG' }), 400))
+    ]);
+    stream = false;
+    destroyConnections();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await new Promise<void>((resolve) => foreign.close(() => resolve()));
+    expect(outcome).toMatchObject({ code: 'PORT_IN_USE' });
+    expect(Date.now() - started).toBeLessThan(500);
   });
 
   it('removes a stale lock only when its process and health check are both dead', async () => {
@@ -70,5 +185,25 @@ describe('broker launcher', () => {
     await launcher.stopBroker(config);
     await expect(launcher.getBrokerStatus(config)).resolves.toEqual({ running: false, port });
     expect(fs.existsSync(path.join(homeDir, '.arc-tunnel', 'broker.lock'))).toBe(false);
+  });
+
+  it('retains the lock and fails when a Broker remains healthy after stop timeout', async () => {
+    const health = http.createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ name: 'arc-tunnel', protocolVersion: 2, pid: 2147483647, port }));
+    });
+    await new Promise<void>((resolve) => health.listen(port, '127.0.0.1', resolve));
+    const lockDir = path.join(homeDir, '.arc-tunnel');
+    const lockPath = path.join(lockDir, 'broker.lock');
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: 2147483647, port, protocolVersion: 2 }));
+    const bounded = createBrokerLauncher({ homeDir, startupTimeout: 100 });
+
+    const outcome = await bounded.stopBroker({ host: '127.0.0.1', port })
+      .then(() => ({ code: 'STOPPED', message: '' }), (error) => ({ code: error.code, message: error.message }));
+    const lockExists = fs.existsSync(lockPath);
+    await new Promise<void>((resolve) => health.close(() => resolve()));
+    expect(outcome).toMatchObject({ code: 'CONNECTION_LOST', message: expect.stringContaining('did not stop') });
+    expect(lockExists).toBe(true);
   });
 });

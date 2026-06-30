@@ -10575,16 +10575,21 @@ var BrokerClient = class _BrokerClient {
   static async connect(config2) {
     const ws = new wrapper_default(`ws://127.0.0.1:${config2.port}/agent`);
     await new Promise((resolve, reject) => {
-      const cleanup = () => {
+      let settled = false;
+      const cleanup = (removeErrorListener = true) => {
         clearTimeout(timer);
         ws.off("open", onOpen);
         ws.off("message", onMessage);
-        ws.off("error", onError);
         ws.off("close", onClose);
+        if (removeErrorListener) ws.off("error", onError);
       };
       const fail = (error2) => {
-        cleanup();
-        ws.close();
+        if (settled) return;
+        settled = true;
+        cleanup(false);
+        ws.once("close", () => ws.off("error", onError));
+        if (ws.readyState === wrapper_default.CONNECTING) ws.terminate();
+        else ws.close();
         reject(error2);
       };
       const onOpen = () => ws.send(JSON.stringify({
@@ -10605,10 +10610,13 @@ var BrokerClient = class _BrokerClient {
           fail(new ArcTunnelError("PROTOCOL_MISMATCH" /* PROTOCOL_MISMATCH */, "Broker protocol mismatch"));
           return;
         }
+        settled = true;
         cleanup();
         resolve();
       };
-      const onError = () => fail(new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, "Unable to connect to Broker"));
+      const onError = () => {
+        if (!settled) fail(new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, "Unable to connect to Broker"));
+      };
       const onClose = () => fail(new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, "Broker closed during handshake"));
       const timer = setTimeout(() => fail(new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, "Broker handshake timed out")), 5e3);
       ws.once("open", onOpen);
@@ -10696,31 +10704,55 @@ function createBrokerLauncher(options = {}) {
   const startupTimeout = options.startupTimeout ?? 5e3;
   const spawnProcess = options.spawnProcess ?? import_child_process.spawn;
   const starting = /* @__PURE__ */ new Map();
-  async function probe(config2) {
+  async function probe(config2, deadline = Date.now() + Math.min(250, startupTimeout)) {
     return new Promise((resolve) => {
-      const request = import_http.default.get({ hostname: "127.0.0.1", port: config2.port, path: "/health", timeout: 250 }, (response) => {
+      let settled = false;
+      let connected = false;
+      let response;
+      let timer;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        response?.destroy();
+        request.destroy();
+        resolve(result);
+      };
+      const request = import_http.default.get({ hostname: "127.0.0.1", port: config2.port, path: "/health" }, (incoming) => {
+        response = incoming;
+        connected = true;
         let body = "";
-        response.setEncoding("utf8");
-        response.on("data", (chunk) => {
+        incoming.setEncoding("utf8");
+        incoming.on("data", (chunk) => {
           body += chunk;
         });
-        response.on("end", () => {
-          if (response.statusCode !== 200) return resolve({ kind: "foreign" });
+        incoming.once("aborted", () => finish({ kind: "foreign", transient: true }));
+        incoming.once("error", () => finish({ kind: "foreign", transient: true }));
+        incoming.on("end", () => {
+          if (incoming.statusCode !== 200) return finish({ kind: "foreign" });
           try {
             const health = JSON.parse(body);
             if (health.name === "arc-tunnel" && health.protocolVersion === PROTOCOL_VERSION && typeof health.pid === "number" && health.port === config2.port) {
-              resolve({ kind: "arc", health });
-            } else resolve({ kind: "foreign" });
+              finish({ kind: "arc", health });
+            } else finish({ kind: "foreign" });
           } catch {
-            resolve({ kind: "foreign" });
+            finish({ kind: "foreign" });
           }
         });
       });
-      request.once("timeout", () => request.destroy());
+      request.once("socket", (socket) => socket.once("connect", () => {
+        connected = true;
+      }));
       request.once("error", (error2) => {
-        const absent = ["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH"];
-        resolve({ kind: absent.includes(error2.code || "") ? "absent" : "foreign" });
+        if (error2.code === "ECONNRESET") {
+          finish({ kind: "foreign", transient: true });
+          return;
+        }
+        const absent = ["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"];
+        finish({ kind: !connected && absent.includes(error2.code || "") ? "absent" : "foreign" });
       });
+      const remaining = Math.max(0, deadline - Date.now());
+      timer = setTimeout(() => finish({ kind: "foreign" }), remaining);
     });
   }
   function pidAlive(pid) {
@@ -10747,18 +10779,42 @@ function createBrokerLauncher(options = {}) {
     }
   }
   async function waitForBroker(config2, deadline) {
-    while (Date.now() <= deadline) {
-      const result = await probe(config2);
+    while (Date.now() < deadline) {
+      const result = await probe(config2, deadline);
       if (result.kind === "arc") return;
       if (result.kind === "foreign") throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Port ${config2.port} is not Arc Tunnel`);
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      const delay = Math.min(50, Math.max(0, deadline - Date.now()));
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
     }
     throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, `Broker did not become healthy within ${startupTimeout}ms`);
   }
-  async function launch(config2) {
-    const deadline = Date.now() + startupTimeout;
+  async function waitForLockOwner(config2, deadline) {
+    while (Date.now() < deadline) {
+      const current = await probe(config2, deadline);
+      if (current.kind === "arc") return;
+      if (current.kind === "foreign") {
+        throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Port ${config2.port} is not Arc Tunnel`);
+      }
+      const lock = readLock();
+      if (lock) {
+        const lockProbe = lock.port === config2.port ? current : await probe({ host: "127.0.0.1", port: lock.port }, deadline);
+        if (lockProbe.kind === "arc") {
+          if (lock.port === config2.port) return;
+          throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Arc Tunnel Broker is already running on port ${lock.port}`);
+        }
+        if (!pidAlive(lock.pid)) {
+          removeLock();
+          return launch(config2, deadline);
+        }
+      }
+      const delay = Math.min(25, Math.max(0, deadline - Date.now()));
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+    throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, `Broker lock did not become healthy within ${startupTimeout}ms`);
+  }
+  async function launch(config2, deadline = Date.now() + startupTimeout) {
     while (true) {
-      const current = await probe(config2);
+      const current = await probe(config2, deadline);
       if (current.kind === "arc") return;
       if (current.kind === "foreign") throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Port ${config2.port} is already in use`);
       import_fs.default.mkdirSync(arcDir, { recursive: true });
@@ -10767,17 +10823,7 @@ function createBrokerLauncher(options = {}) {
         fd = import_fs.default.openSync(lockPath, "wx");
       } catch (error2) {
         if (error2.code !== "EEXIST") throw error2;
-        const lock = readLock();
-        const lockProbe = lock ? await probe({ host: "127.0.0.1", port: lock.port }) : { kind: "absent" };
-        if (lockProbe.kind === "arc") {
-          if (lock?.port === config2.port) return;
-          throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Arc Tunnel Broker is already running on port ${lock?.port}`);
-        }
-        if (!lock || !pidAlive(lock.pid)) {
-          removeLock();
-          continue;
-        }
-        await waitForBroker(config2, deadline);
+        await waitForLockOwner(config2, deadline);
         return;
       }
       let child;
@@ -10817,7 +10863,16 @@ function createBrokerLauncher(options = {}) {
     return { running: true, port: config2.port, protocolVersion: result.health.protocolVersion, pid: result.health.pid };
   }
   async function stopBroker2(config2) {
-    const result = await probe(config2);
+    const deadline = Date.now() + startupTimeout;
+    let result = await probe(config2, deadline);
+    while (result.kind === "foreign" && result.transient && Date.now() < deadline) {
+      const delay = Math.min(25, Math.max(0, deadline - Date.now()));
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      result = await probe(config2, deadline);
+    }
+    if (result.kind === "foreign" && result.transient) {
+      throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, `Broker state on port ${config2.port} did not settle within ${startupTimeout}ms`);
+    }
     if (result.kind === "foreign") throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Port ${config2.port} is not Arc Tunnel`);
     if (result.kind === "arc") {
       try {
@@ -10825,9 +10880,21 @@ function createBrokerLauncher(options = {}) {
       } catch (error2) {
         if (error2.code !== "ESRCH") throw error2;
       }
-      const deadline = Date.now() + startupTimeout;
-      while (Date.now() <= deadline && (await probe(config2)).kind === "arc") {
-        await new Promise((resolve) => setTimeout(resolve, 50));
+      let stillRunning = true;
+      while (Date.now() < deadline) {
+        const stopped = await probe(config2, deadline);
+        if (stopped.kind === "absent") {
+          stillRunning = false;
+          break;
+        }
+        if (stopped.kind === "foreign" && !stopped.transient) {
+          throw new ArcTunnelError("PORT_IN_USE" /* PORT_IN_USE */, `Port ${config2.port} is not Arc Tunnel`);
+        }
+        const delay = Math.min(50, Math.max(0, deadline - Date.now()));
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+      if (stillRunning) {
+        throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, `Broker on port ${config2.port} did not stop within ${startupTimeout}ms`);
       }
     }
     const lock = readLock();

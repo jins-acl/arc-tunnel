@@ -25,16 +25,21 @@ export class BrokerClient {
   static async connect(config: BrokerConfig): Promise<BrokerClient> {
     const ws = new WebSocket(`ws://127.0.0.1:${config.port}/agent`);
     await new Promise<void>((resolve, reject) => {
-      const cleanup = () => {
+      let settled = false;
+      const cleanup = (removeErrorListener = true) => {
         clearTimeout(timer);
         ws.off('open', onOpen);
         ws.off('message', onMessage);
-        ws.off('error', onError);
         ws.off('close', onClose);
+        if (removeErrorListener) ws.off('error', onError);
       };
       const fail = (error: Error) => {
-        cleanup();
-        ws.close();
+        if (settled) return;
+        settled = true;
+        cleanup(false);
+        ws.once('close', () => ws.off('error', onError));
+        if (ws.readyState === WebSocket.CONNECTING) ws.terminate();
+        else ws.close();
         reject(error);
       };
       const onOpen = () => ws.send(JSON.stringify({
@@ -50,10 +55,13 @@ export class BrokerClient {
           fail(new ArcTunnelError(ErrorCode.PROTOCOL_MISMATCH, 'Broker protocol mismatch'));
           return;
         }
+        settled = true;
         cleanup();
         resolve();
       };
-      const onError = () => fail(new ArcTunnelError(ErrorCode.CONNECTION_LOST, 'Unable to connect to Broker'));
+      const onError = () => {
+        if (!settled) fail(new ArcTunnelError(ErrorCode.CONNECTION_LOST, 'Unable to connect to Broker'));
+      };
       const onClose = () => fail(new ArcTunnelError(ErrorCode.CONNECTION_LOST, 'Broker closed during handshake'));
       const timer = setTimeout(() => fail(new ArcTunnelError(ErrorCode.CONNECTION_LOST, 'Broker handshake timed out')), 5_000);
       ws.once('open', onOpen);
