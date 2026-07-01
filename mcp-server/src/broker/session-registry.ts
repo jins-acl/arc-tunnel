@@ -7,6 +7,7 @@ export interface AgentSession {
   windowId: number | null;
   tabIds: Set<number>;
   recordingIds: Set<string>;
+  activeRecordingId: string | null;
   savedSessionIds: Set<string>;
 }
 
@@ -29,6 +30,7 @@ export class SessionRegistry {
       windowId: null,
       tabIds: new Set(),
       recordingIds: new Set(),
+      activeRecordingId: null,
       savedSessionIds: new Set()
     };
     this.sessions.set(id, session);
@@ -37,6 +39,48 @@ export class SessionRegistry {
 
   windowId(sessionId: string): number | null {
     return this.requireSession(sessionId).windowId;
+  }
+
+  ownedTabIds(sessionId: string): number[] {
+    return [...this.requireSession(sessionId).tabIds];
+  }
+
+  addRecording(sessionId: string, recordingId: string): void {
+    const session = this.requireSession(sessionId);
+    session.recordingIds.add(recordingId);
+    session.activeRecordingId = recordingId;
+  }
+
+  assertOwnsRecording(sessionId: string, recordingId?: unknown): void {
+    const session = this.requireSession(sessionId);
+    const owns = typeof recordingId === 'string'
+      ? session.recordingIds.has(recordingId)
+      : session.activeRecordingId !== null;
+    if (!owns) throw new ArcTunnelError(ErrorCode.RECORDING_NOT_FOUND, ErrorCode.RECORDING_NOT_FOUND);
+  }
+
+  hasActiveRecording(): boolean {
+    return [...this.sessions.values()].some(session => session.activeRecordingId !== null);
+  }
+
+  clearRecordings(sessionId: string): void {
+    this.requireSession(sessionId).activeRecordingId = null;
+  }
+
+  addSavedSession(sessionId: string, savedSessionId: string): void {
+    this.requireSession(sessionId).savedSessionIds.add(savedSessionId);
+  }
+
+  assertOwnsSavedSession(sessionId: string, savedSessionId: unknown): void {
+    if (typeof savedSessionId !== 'string' || !this.requireSession(sessionId).savedSessionIds.has(savedSessionId)) {
+      throw new ArcTunnelError(ErrorCode.SESSION_NOT_FOUND, ErrorCode.SESSION_NOT_FOUND);
+    }
+  }
+
+  reconcileTabs(existingTabIds: Set<number>): void {
+    for (const tabId of [...this.tabOwners.keys()]) {
+      if (!existingTabIds.has(tabId)) this.releaseTab(tabId);
+    }
   }
 
   assignWindow(sessionId: string, windowId: number, tabIds: number[]): void {
@@ -124,6 +168,9 @@ export class SessionRegistry {
       }
       session.tabIds.clear();
       session.windowId = null;
+      session.recordingIds.clear();
+      session.activeRecordingId = null;
+      session.savedSessionIds.clear();
     }
     return expired;
   }

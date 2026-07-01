@@ -97,6 +97,12 @@ describe('Broker ownership', () => {
         result = { tabId: tab.tabId };
       } else if (command.command === 'list_tabs') {
         result = { tabs };
+      } else if (command.command === 'start_recording') {
+        result = { recordingId: 'recording-alpha' };
+      } else if (command.command === 'save_session') {
+        result = { sessionId: 'session-alpha' };
+      } else if (command.command === 'restore_session') {
+        result = { tabIds: [nextTab++] };
       } else {
         result = { ok: true };
       }
@@ -252,5 +258,63 @@ describe('Broker ownership', () => {
     expect(afterFirst.map(command => command.params.tabId)).toEqual([101, 202, 101]);
     extension.send(JSON.stringify({ id: afterFirst[2].id, type: 'response', success: true, result: { tabId: 101, order: 2 } }));
     await expect(second).resolves.toEqual({ tabId: 101, order: 2 });
+  });
+
+  it('does not leak recording or saved-session identifiers across agents', async () => {
+    await alpha.call('claim_tab', { tabId: 101 });
+    await beta.call('claim_tab', { tabId: 202 });
+    const { recordingId } = await alpha.call('start_recording', { tabId: 101 });
+    await expect(beta.call('stop_recording')).rejects.toMatchObject({ code: ErrorCode.RECORDING_NOT_FOUND });
+    await expect(beta.call('replay_recording', { recordingId, tabId: 202 }))
+      .rejects.toMatchObject({ code: ErrorCode.RECORDING_NOT_FOUND });
+    await alpha.call('stop_recording');
+    await expect(alpha.call('replay_recording', { recordingId, tabId: 101 }))
+      .resolves.toEqual({ ok: true });
+
+    const { sessionId } = await alpha.call('save_session', { name: 'alpha' });
+    await expect(beta.call('restore_session', { sessionId }))
+      .rejects.toMatchObject({ code: ErrorCode.SESSION_NOT_FOUND });
+  });
+
+  it('scopes save and restore commands to the owning workspace', async () => {
+    const created = await alpha.call('create_tab', { url: 'https://owned.example' });
+    const { sessionId } = await alpha.call('save_session', { name: 'alpha' });
+    await alpha.call('restore_session', { sessionId });
+
+    expect(commands.find(command => command.command === 'save_session')?.params.tabIds)
+      .toEqual(expect.arrayContaining([created.tabId]));
+    expect(commands.find(command => command.command === 'restore_session')?.params.windowId)
+      .toBe(created.windowId);
+  });
+
+  it('retains only existing tab ownership after extension reconnect', async () => {
+    await alpha.call('claim_tab', { tabId: 101 });
+    await alpha.call('claim_tab', { tabId: 202 });
+    tabs.splice(tabs.findIndex(tab => tab.tabId === 202), 1);
+    extension.close();
+    extension = await new Promise<WebSocket>((resolve, reject) => {
+      const socket = new WebSocket(`ws://127.0.0.1:${broker.address().port}/extension`, { origin: 'chrome-extension://test' });
+      socket.once('open', () => resolve(socket));
+      socket.once('error', reject);
+    });
+    extension.on('message', data => {
+      const command = JSON.parse(data.toString());
+      if (command.type === 'command' && command.command === 'list_tabs') {
+        extension.send(JSON.stringify({ id: command.id, type: 'response', success: true, result: { tabs } }));
+      }
+    });
+    const welcome = nextMessage(extension);
+    extension.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    await welcome;
+
+    const visible = await alpha.call('list_tabs');
+    expect(visible.tabs).toContainEqual(expect.objectContaining({ tabId: 101, ownership: 'owned' }));
+    expect((broker as any).registry.visibleTabs((alphaSocket as any).welcome.sessionId,
+      [{ tabId: 202 }])[0].ownership).toBe('unclaimed');
+  });
+
+  it('starts synchronized tabs unclaimed in a fresh broker process', async () => {
+    const visible = await alpha.call('list_tabs');
+    expect(visible.tabs).toContainEqual(expect.objectContaining({ tabId: 101, ownership: 'unclaimed' }));
   });
 });

@@ -909,9 +909,9 @@ var init_session_manager = __esm({
   "src/background/session-manager.ts"() {
     "use strict";
     SessionManager = class {
-      async saveSession(name) {
+      async saveSession(name, tabIds) {
         const sessionId = crypto.randomUUID();
-        const tabs = await chrome.tabs.query({});
+        const tabs = await Promise.all(tabIds.map((tabId) => chrome.tabs.get(tabId)));
         const tabStates = [];
         for (const tab of tabs) {
           if (tab.id && tab.url) {
@@ -941,17 +941,19 @@ var init_session_manager = __esm({
         console.log(`Session saved: ${sessionId} (${tabStates.length} tabs)`);
         return sessionId;
       }
-      async restoreSession(sessionId) {
+      async restoreSession(sessionId, windowId) {
         const result = await chrome.storage.local.get(`session_${sessionId}`);
         const session = result[`session_${sessionId}`];
         if (!session) {
           throw new Error("Session not found");
         }
         console.log(`Restoring session: ${sessionId} (${session.tabs.length} tabs)`);
+        const tabIds = [];
         for (const tabState of session.tabs) {
           try {
-            const tab = await chrome.tabs.create({ url: tabState.url });
+            const tab = await chrome.tabs.create({ url: tabState.url, windowId, active: false });
             if (tab.id) {
+              tabIds.push(tab.id);
               for (const cookie of tabState.cookies) {
                 try {
                   await chrome.cookies.set({
@@ -973,6 +975,7 @@ var init_session_manager = __esm({
           }
         }
         console.log("Session restored");
+        return tabIds;
       }
       async listSessions() {
         const allData = await chrome.storage.local.get(null);
@@ -1468,7 +1471,7 @@ var init_command_handler = __esm({
             type: "response",
             success: false,
             error: {
-              code: "EXECUTION_ERROR",
+              code: typeof error?.code === "string" ? error.code : "EXECUTION_ERROR",
               message: error.message || "Unknown error"
             }
           };
@@ -1742,6 +1745,11 @@ var init_command_handler = __esm({
           }
           // Recording
           case "start_recording": {
+            if (this.recordingEngine.isCurrentlyRecording()) {
+              const error = new Error("RECORDING_BUSY");
+              error.code = "RECORDING_BUSY";
+              throw error;
+            }
             const tabs = await chrome.tabs.query({});
             if (!tabs.some((t) => t.id === params.tabId)) {
               throw new Error(`Tab ${params.tabId} not found`);
@@ -1793,12 +1801,12 @@ var init_command_handler = __esm({
           }
           // Session
           case "save_session": {
-            const sessionId = await this.sessionManager.saveSession(params.name);
+            const sessionId = await this.sessionManager.saveSession(params.name, params.tabIds);
             return { sessionId };
           }
           case "restore_session": {
-            await this.sessionManager.restoreSession(params.sessionId);
-            return { status: "restored" };
+            const tabIds = await this.sessionManager.restoreSession(params.sessionId, params.windowId);
+            return { status: "restored", tabIds };
           }
           default:
             throw new Error(`Unknown command: ${cmd}`);

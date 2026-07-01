@@ -2,9 +2,9 @@
 import { SessionData, TabState } from '../types';
 
 export class SessionManager {
-  async saveSession(name: string): Promise<string> {
+  async saveSession(name: string, tabIds: number[]): Promise<string> {
     const sessionId = crypto.randomUUID();
-    const tabs = await chrome.tabs.query({});
+    const tabs = await Promise.all(tabIds.map(tabId => chrome.tabs.get(tabId)));
     const tabStates: TabState[] = [];
 
     for (const tab of tabs) {
@@ -42,7 +42,7 @@ export class SessionManager {
     return sessionId;
   }
 
-  async restoreSession(sessionId: string): Promise<void> {
+  async restoreSession(sessionId: string, windowId: number): Promise<number[]> {
     const result = await chrome.storage.local.get(`session_${sessionId}`);
     const session = result[`session_${sessionId}`] as SessionData | undefined;
 
@@ -52,13 +52,15 @@ export class SessionManager {
 
     console.log(`Restoring session: ${sessionId} (${session.tabs.length} tabs)`);
 
+    const tabIds: number[] = [];
     for (const tabState of session.tabs) {
       try {
         // Create tab
-        const tab = await chrome.tabs.create({ url: tabState.url });
+        const tab = await chrome.tabs.create({ url: tabState.url, windowId, active: false });
 
         // Restore cookies
         if (tab.id) {
+          tabIds.push(tab.id);
           for (const cookie of tabState.cookies) {
             try {
               await chrome.cookies.set({
@@ -81,6 +83,7 @@ export class SessionManager {
     }
 
     console.log('Session restored');
+    return tabIds;
   }
 
   async listSessions(): Promise<SessionData[]> {

@@ -3714,6 +3714,7 @@ var SessionRegistry = class {
       windowId: null,
       tabIds: /* @__PURE__ */ new Set(),
       recordingIds: /* @__PURE__ */ new Set(),
+      activeRecordingId: null,
       savedSessionIds: /* @__PURE__ */ new Set()
     };
     this.sessions.set(id, session);
@@ -3721,6 +3722,38 @@ var SessionRegistry = class {
   }
   windowId(sessionId) {
     return this.requireSession(sessionId).windowId;
+  }
+  ownedTabIds(sessionId) {
+    return [...this.requireSession(sessionId).tabIds];
+  }
+  addRecording(sessionId, recordingId) {
+    const session = this.requireSession(sessionId);
+    session.recordingIds.add(recordingId);
+    session.activeRecordingId = recordingId;
+  }
+  assertOwnsRecording(sessionId, recordingId) {
+    const session = this.requireSession(sessionId);
+    const owns = typeof recordingId === "string" ? session.recordingIds.has(recordingId) : session.activeRecordingId !== null;
+    if (!owns) throw new ArcTunnelError("RECORDING_NOT_FOUND" /* RECORDING_NOT_FOUND */, "RECORDING_NOT_FOUND" /* RECORDING_NOT_FOUND */);
+  }
+  hasActiveRecording() {
+    return [...this.sessions.values()].some((session) => session.activeRecordingId !== null);
+  }
+  clearRecordings(sessionId) {
+    this.requireSession(sessionId).activeRecordingId = null;
+  }
+  addSavedSession(sessionId, savedSessionId) {
+    this.requireSession(sessionId).savedSessionIds.add(savedSessionId);
+  }
+  assertOwnsSavedSession(sessionId, savedSessionId) {
+    if (typeof savedSessionId !== "string" || !this.requireSession(sessionId).savedSessionIds.has(savedSessionId)) {
+      throw new ArcTunnelError("SESSION_NOT_FOUND" /* SESSION_NOT_FOUND */, "SESSION_NOT_FOUND" /* SESSION_NOT_FOUND */);
+    }
+  }
+  reconcileTabs(existingTabIds) {
+    for (const tabId of [...this.tabOwners.keys()]) {
+      if (!existingTabIds.has(tabId)) this.releaseTab(tabId);
+    }
   }
   assignWindow(sessionId, windowId, tabIds) {
     const session = this.requireSession(sessionId);
@@ -3800,6 +3833,9 @@ var SessionRegistry = class {
       }
       session.tabIds.clear();
       session.windowId = null;
+      session.recordingIds.clear();
+      session.activeRecordingId = null;
+      session.savedSessionIds.clear();
     }
     return expired;
   }
@@ -3835,6 +3871,19 @@ var TabScheduler = class {
 };
 
 // src/broker/broker-server.ts
+function isRecord2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function tabIdsFromResult(value, field = "tabs") {
+  if (!isRecord2(value) || !Array.isArray(value[field])) return [];
+  return value[field].flatMap((item) => {
+    if (field === "tabIds") return typeof item === "number" ? [item] : [];
+    return isRecord2(item) && typeof item.tabId === "number" ? [item.tabId] : [];
+  });
+}
+function stringResultField(value, field) {
+  return isRecord2(value) && typeof value[field] === "string" ? value[field] : null;
+}
 var BrokerServer = class {
   constructor(config, dependencies = {}) {
     this.config = config;
@@ -3852,6 +3901,8 @@ var BrokerServer = class {
     this.listeningPort = null;
     this.stopPromise = null;
     this.stopping = false;
+    this.extensionSync = Promise.resolve();
+    this.hasActivatedExtension = false;
     this.handleAgentConnection = (ws) => {
       this.awaitHello(ws, "agent", (hello) => {
         if (hello.role !== "agent") return false;
@@ -3997,6 +4048,14 @@ var BrokerServer = class {
     this.extension = ws;
     if (sendWelcome) this.send(ws, { type: "welcome", protocolVersion: PROTOCOL_VERSION });
     ws.on("message", (data) => this.handleExtensionMessage(data));
+    if (this.hasActivatedExtension) {
+      this.extensionSync = new Promise((resolve) => setImmediate(resolve)).then(() => this.syncExtensionInventory(ws)).catch((error) => {
+        if (this.extension === ws) throw error;
+      });
+    } else {
+      this.hasActivatedExtension = true;
+      this.extensionSync = Promise.resolve();
+    }
     ws.once("close", () => {
       if (this.extension !== ws) return;
       this.extension = null;
@@ -4018,6 +4077,7 @@ var BrokerServer = class {
       return;
     }
     try {
+      await this.extensionSync;
       const result = await this.executeRequest(sessionId, request);
       this.replySuccess(sessionId, request.requestId, result);
     } catch (error) {
@@ -4030,6 +4090,18 @@ var BrokerServer = class {
     if (request.command === "release_tab") return Promise.resolve(this.releaseTab(sessionId, request.params));
     if (request.command === "create_tab") return this.queueOwnedTabCreation(sessionId, request);
     if (request.command === "list_tabs") return this.listVisibleTabs(sessionId, request);
+    if (request.command === "start_recording" && this.registry.hasActiveRecording()) {
+      throw new ArcTunnelError("RECORDING_BUSY" /* RECORDING_BUSY */, "RECORDING_BUSY" /* RECORDING_BUSY */);
+    }
+    if (request.command === "stop_recording") this.registry.assertOwnsRecording(sessionId);
+    if (request.command === "replay_recording") this.registry.assertOwnsRecording(sessionId, request.params.recordingId);
+    if (request.command === "save_session") {
+      return this.sendExtensionCommand(sessionId, {
+        ...request,
+        params: { ...request.params, tabIds: this.registry.ownedTabIds(sessionId) }
+      });
+    }
+    if (request.command === "restore_session") return this.restoreOwnedSession(sessionId, request);
     const tabId = request.params.tabId;
     if (typeof tabId === "number") {
       this.registry.assertOwnsTab(sessionId, tabId);
@@ -4046,6 +4118,28 @@ var BrokerServer = class {
       });
     }
     return this.sendExtensionCommand(sessionId, request);
+  }
+  async restoreOwnedSession(sessionId, request) {
+    this.registry.assertOwnsSavedSession(sessionId, request.params.sessionId);
+    let windowId = this.registry.windowId(sessionId);
+    if (windowId == null) {
+      const created = await this.sendExtensionCommand(sessionId, { ...request, command: "create_window", params: {} });
+      const tabIds = typeof created?.tabId === "number" ? [created.tabId] : [];
+      if (typeof created?.windowId !== "number") {
+        throw new ArcTunnelError("SESSION_RESTORE_FAILED" /* SESSION_RESTORE_FAILED */, "SESSION_RESTORE_FAILED" /* SESSION_RESTORE_FAILED */);
+      }
+      const createdWindowId = created.windowId;
+      windowId = createdWindowId;
+      this.registry.assignWindow(sessionId, createdWindowId, tabIds);
+    }
+    const result = await this.sendExtensionCommand(sessionId, {
+      ...request,
+      params: { ...request.params, windowId }
+    });
+    if (Array.isArray(result?.tabIds)) {
+      for (const tabId of result.tabIds) if (typeof tabId === "number") this.registry.claimTab(sessionId, tabId);
+    }
+    return result;
   }
   async claimTab(sessionId, request) {
     const tabId = request.params.tabId;
@@ -4118,6 +4212,7 @@ var BrokerServer = class {
         sessionId,
         agentRequestId: request.requestId,
         params: request.params,
+        command: request.command,
         timer,
         resolve,
         reject
@@ -4149,8 +4244,31 @@ var BrokerServer = class {
     if (!route) return;
     clearTimeout(route.timer);
     this.routes.delete(response.id);
-    if (response.success) route.resolve(response.result);
-    else route.reject(new ArcTunnelError(response.error?.code, response.error?.message ?? "Extension command failed", response.error?.details));
+    if (response.success) {
+      const result = response.result;
+      const recordingId = stringResultField(result, "recordingId");
+      const savedSessionId = stringResultField(result, "sessionId");
+      if (route.command === "start_recording" && recordingId) {
+        this.registry.addRecording(route.sessionId, recordingId);
+      }
+      if (route.command === "stop_recording") this.registry.clearRecordings(route.sessionId);
+      if (route.command === "save_session" && savedSessionId) {
+        this.registry.addSavedSession(route.sessionId, savedSessionId);
+      }
+      route.resolve(result);
+    } else route.reject(new ArcTunnelError(response.error?.code, response.error?.message ?? "Extension command failed", response.error?.details));
+  }
+  async syncExtensionInventory(ws) {
+    if (this.extension !== ws || ws.readyState !== wrapper_default.OPEN) return;
+    const result = await this.sendExtensionCommand("", {
+      type: "agent_request",
+      requestId: "extension-sync",
+      command: "list_tabs",
+      params: {},
+      timeout: 1e3
+    });
+    if (this.extension !== ws) return;
+    this.registry.reconcileTabs(new Set(tabIdsFromResult(result)));
   }
   handleBrowserEvent(event) {
     if (event.event === "tab_created") {

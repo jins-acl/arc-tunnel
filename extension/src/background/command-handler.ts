@@ -48,7 +48,7 @@ export class CommandHandler {
         type: 'response',
         success: false,
         error: {
-          code: 'EXECUTION_ERROR',
+          code: typeof error?.code === 'string' ? error.code : 'EXECUTION_ERROR',
           message: error.message || 'Unknown error'
         }
       };
@@ -332,6 +332,11 @@ export class CommandHandler {
 
       // Recording
       case 'start_recording': {
+        if (this.recordingEngine.isCurrentlyRecording()) {
+          const error = new Error('RECORDING_BUSY');
+          (error as Error & { code?: string }).code = 'RECORDING_BUSY';
+          throw error;
+        }
         const tabs = await chrome.tabs.query({});
         if (!tabs.some(t => t.id === params.tabId)) {
           throw new Error(`Tab ${params.tabId} not found`);
@@ -384,13 +389,13 @@ export class CommandHandler {
 
       // Session
       case 'save_session': {
-        const sessionId = await this.sessionManager.saveSession(params.name);
+        const sessionId = await this.sessionManager.saveSession(params.name, params.tabIds);
         return { sessionId };
       }
 
       case 'restore_session': {
-        await this.sessionManager.restoreSession(params.sessionId);
-        return { status: 'restored' };
+        const tabIds = await this.sessionManager.restoreSession(params.sessionId, params.windowId);
+        return { status: 'restored', tabIds };
       }
 
       default:

@@ -22,6 +22,7 @@ interface PendingRoute {
   sessionId: string;
   agentRequestId: string;
   params: Record<string, unknown>;
+  command: string;
   timer: NodeJS.Timeout;
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
@@ -29,6 +30,22 @@ interface PendingRoute {
 
 interface BrokerDependencies {
   registry?: SessionRegistry;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function tabIdsFromResult(value: unknown, field: 'tabs' | 'tabIds' = 'tabs'): number[] {
+  if (!isRecord(value) || !Array.isArray(value[field])) return [];
+  return value[field].flatMap(item => {
+    if (field === 'tabIds') return typeof item === 'number' ? [item] : [];
+    return isRecord(item) && typeof item.tabId === 'number' ? [item.tabId] : [];
+  });
+}
+
+function stringResultField(value: unknown, field: 'recordingId' | 'sessionId'): string | null {
+  return isRecord(value) && typeof value[field] === 'string' ? value[field] as string : null;
 }
 
 export interface BrokerAddress {
@@ -52,6 +69,8 @@ export class BrokerServer {
   private listeningPort: number | null = null;
   private stopPromise: Promise<void> | null = null;
   private stopping = false;
+  private extensionSync: Promise<void> = Promise.resolve();
+  private hasActivatedExtension = false;
 
   constructor(private readonly config: BrokerConfig, dependencies: BrokerDependencies = {}) {
     this.registry = dependencies.registry ?? new SessionRegistry();
@@ -222,6 +241,16 @@ export class BrokerServer {
     this.extension = ws;
     if (sendWelcome) this.send(ws, { type: 'welcome', protocolVersion: PROTOCOL_VERSION } satisfies WelcomeMessage);
     ws.on('message', (data) => this.handleExtensionMessage(data));
+    if (this.hasActivatedExtension) {
+      this.extensionSync = new Promise(resolve => setImmediate(resolve))
+        .then(() => this.syncExtensionInventory(ws))
+        .catch(error => {
+          if (this.extension === ws) throw error;
+        });
+    } else {
+      this.hasActivatedExtension = true;
+      this.extensionSync = Promise.resolve();
+    }
     ws.once('close', () => {
       if (this.extension !== ws) return;
       this.extension = null;
@@ -245,6 +274,7 @@ export class BrokerServer {
       return;
     }
     try {
+      await this.extensionSync;
       const result = await this.executeRequest(sessionId, request);
       this.replySuccess(sessionId, request.requestId, result);
     } catch (error) {
@@ -258,6 +288,18 @@ export class BrokerServer {
     if (request.command === 'release_tab') return Promise.resolve(this.releaseTab(sessionId, request.params));
     if (request.command === 'create_tab') return this.queueOwnedTabCreation(sessionId, request);
     if (request.command === 'list_tabs') return this.listVisibleTabs(sessionId, request);
+    if (request.command === 'start_recording' && this.registry.hasActiveRecording()) {
+      throw new ArcTunnelError(ErrorCode.RECORDING_BUSY, ErrorCode.RECORDING_BUSY);
+    }
+    if (request.command === 'stop_recording') this.registry.assertOwnsRecording(sessionId);
+    if (request.command === 'replay_recording') this.registry.assertOwnsRecording(sessionId, request.params.recordingId);
+    if (request.command === 'save_session') {
+      return this.sendExtensionCommand(sessionId, {
+        ...request,
+        params: { ...request.params, tabIds: this.registry.ownedTabIds(sessionId) }
+      });
+    }
+    if (request.command === 'restore_session') return this.restoreOwnedSession(sessionId, request);
 
     const tabId = request.params.tabId;
     if (typeof tabId === 'number') {
@@ -275,6 +317,28 @@ export class BrokerServer {
       });
     }
     return this.sendExtensionCommand(sessionId, request);
+  }
+
+  private async restoreOwnedSession(sessionId: string, request: AgentRequest): Promise<unknown> {
+    this.registry.assertOwnsSavedSession(sessionId, request.params.sessionId);
+    let windowId = this.registry.windowId(sessionId);
+    if (windowId == null) {
+      const created = await this.sendExtensionCommand(sessionId, { ...request, command: 'create_window', params: {} }) as any;
+      const tabIds = typeof created?.tabId === 'number' ? [created.tabId] : [];
+      if (typeof created?.windowId !== 'number') {
+        throw new ArcTunnelError(ErrorCode.SESSION_RESTORE_FAILED, ErrorCode.SESSION_RESTORE_FAILED);
+      }
+      const createdWindowId = created.windowId as number;
+      windowId = createdWindowId;
+      this.registry.assignWindow(sessionId, createdWindowId, tabIds);
+    }
+    const result = await this.sendExtensionCommand(sessionId, {
+      ...request, params: { ...request.params, windowId }
+    }) as any;
+    if (Array.isArray(result?.tabIds)) {
+      for (const tabId of result.tabIds) if (typeof tabId === 'number') this.registry.claimTab(sessionId, tabId);
+    }
+    return result;
   }
 
   private async claimTab(sessionId: string, request: AgentRequest): Promise<{ tabId: number; ownership: 'owned' }> {
@@ -354,6 +418,7 @@ export class BrokerServer {
         sessionId,
         agentRequestId: request.requestId,
         params: request.params,
+        command: request.command,
         timer,
         resolve,
         reject
@@ -387,8 +452,29 @@ export class BrokerServer {
     if (!route) return;
     clearTimeout(route.timer);
     this.routes.delete(response.id);
-    if (response.success) route.resolve(response.result);
+    if (response.success) {
+      const result = response.result;
+      const recordingId = stringResultField(result, 'recordingId');
+      const savedSessionId = stringResultField(result, 'sessionId');
+      if (route.command === 'start_recording' && recordingId) {
+        this.registry.addRecording(route.sessionId, recordingId);
+      }
+      if (route.command === 'stop_recording') this.registry.clearRecordings(route.sessionId);
+      if (route.command === 'save_session' && savedSessionId) {
+        this.registry.addSavedSession(route.sessionId, savedSessionId);
+      }
+      route.resolve(result);
+    }
     else route.reject(new ArcTunnelError(response.error?.code as ErrorCode, response.error?.message ?? 'Extension command failed', response.error?.details));
+  }
+
+  private async syncExtensionInventory(ws: WebSocket): Promise<void> {
+    if (this.extension !== ws || ws.readyState !== WebSocket.OPEN) return;
+    const result = await this.sendExtensionCommand('', {
+      type: 'agent_request', requestId: 'extension-sync', command: 'list_tabs', params: {}, timeout: 1_000
+    });
+    if (this.extension !== ws) return;
+    this.registry.reconcileTabs(new Set(tabIdsFromResult(result)));
   }
 
   private handleBrowserEvent(event: { event: string; data?: Record<string, unknown> }): void {
