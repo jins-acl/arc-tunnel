@@ -42,7 +42,22 @@ async function call(peer, name, arguments_ = {}) {
 function isTransientNavigationError(error) {
   if (['TAB_NOT_OWNED', 'TAB_CLOSED', 'EXTENSION_DISCONNECTED', 'CONNECTION_LOST'].includes(error?.code)) return false;
   return ['EXECUTION_ERROR', 'INTERNAL_ERROR'].includes(error?.code)
-    && /execution context|context.*destroy|navigation|frame.*detach|cannot access contents/i.test(error?.message || '');
+    && /execution context (?:was )?destroyed|context.*destroyed|frame (?:was )?detached|cannot access contents/i.test(error?.message || '');
+}
+
+async function settleBeforeDeadline(operation, deadline) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return { timedOut: true };
+  let timer;
+  const observed = operation.then(
+    value => ({ timedOut: false, value }),
+    error => ({ timedOut: false, error })
+  );
+  const timeout = new Promise(resolve => { timer = setTimeout(() => resolve({ timedOut: true }), remaining); });
+  const outcome = await Promise.race([observed, timeout]);
+  clearTimeout(timer);
+  if (outcome.error) throw outcome.error;
+  return outcome;
 }
 
 async function waitForExpectedLocation(peer, tabId, expectedUrl, deadline = Date.now() + 15_000, pollInterval = 100) {
@@ -50,7 +65,12 @@ async function waitForExpectedLocation(peer, tabId, expectedUrl, deadline = Date
   let transientError = null;
   while (Date.now() < deadline) {
     try {
-      const response = await call(peer, 'execute_script', { tabId, script: 'location.href' });
+      const outcome = await settleBeforeDeadline(
+        call(peer, 'execute_script', { tabId, script: 'location.href' }),
+        deadline
+      );
+      if (outcome.timedOut) break;
+      const response = outcome.value;
       observed = response?.result ?? null;
       transientError = null;
       if (observed === expectedUrl) return observed;
