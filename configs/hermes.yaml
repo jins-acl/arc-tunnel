@@ -1,5 +1,6 @@
 mcp_servers:
   arc-tunnel:
+    # Lightweight MCP client that connects to or starts the shared Browser Broker.
     command: "node"
     args:
       - "{{REPO_PATH}}/mcp-server/dist/mcp-server.js"

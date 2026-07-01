@@ -10,6 +10,7 @@ const os = require('os');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const MCP_SERVER_PATH = path.join(REPO_ROOT, 'mcp-server', 'dist', 'mcp-server.js');
+const BROKER_PATH = path.join(REPO_ROOT, 'mcp-server', 'dist', 'arc-tunnel-broker.js');
 
 // Normalize path for JSON/YAML (backslashes → forward slashes on Windows)
 function normalizePath(p) {
@@ -147,8 +148,9 @@ function install() {
   log(`Repository: ${REPO_ROOT}`);
   log('');
 
-  if (!fs.existsSync(MCP_SERVER_PATH)) {
-    warn(`MCP server not found at ${MCP_SERVER_PATH}`);
+  const missingBundles = [MCP_SERVER_PATH, BROKER_PATH].filter(bundle => !fs.existsSync(bundle));
+  if (missingBundles.length > 0) {
+    missingBundles.forEach(bundle => warn(`Required bundle not found at ${bundle}`));
     warn('Run: cd mcp-server && npm install && npm run build');
     process.exit(1);
   }
@@ -250,6 +252,10 @@ function install() {
   log('  2. Open Chrome/Edge → chrome://extensions → Developer mode → Load unpacked');
   log('  3. Select the extension/dist folder');
   log('  4. Restart your AI agent tool');
+  log('  5. The first MCP client starts one shared Broker; later clients connect to it.');
+  log('     Manage it with: node scripts/start.js [start|status|stop] [--port N]');
+  log('     For a custom port, use the same WS_PORT in every client config and');
+  log('     select that port in the browser extension popup.');
   log('');
   log('Arc Tunnel is ready to use! 🚀');
 }

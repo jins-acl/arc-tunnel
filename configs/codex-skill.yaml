@@ -1,10 +1,10 @@
-# Add this to your Codex skill's agents/openai.yaml
-# Arc Tunnel — Browser automation MCP server
+# Add this to your Codex skill's agents/openai.yaml.
+# The lightweight MCP client connects to or starts the shared Browser Broker.
 dependencies:
   tools:
     - type: "mcp"
       value: "arc-tunnel"
-      description: "Arc Tunnel browser automation — navigate, click, type, screenshot, record and replay"
+      description: "Arc Tunnel client for the shared multi-agent Browser Broker"
       transport: "stdio"
       command: "node"
       args:
