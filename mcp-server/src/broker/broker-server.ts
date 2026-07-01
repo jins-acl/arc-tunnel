@@ -11,6 +11,7 @@ import {
   PROTOCOL_VERSION,
   WelcomeMessage,
   isAgentRequest,
+  isBrowserEvent,
   ArcTunnelError,
   toErrorInfo
 } from '../protocol';
@@ -48,6 +49,23 @@ function stringResultField(value: unknown, field: 'recordingId' | 'sessionId'): 
   return isRecord(value) && typeof value[field] === 'string' ? value[field] as string : null;
 }
 
+function isExtensionResponse(value: unknown): value is ResponseMessage {
+  if (!isRecord(value) || value.type !== 'response' || typeof value.id !== 'string' || typeof value.success !== 'boolean') {
+    return false;
+  }
+  if (value.success) return true;
+  return isRecord(value.error)
+    && typeof value.error.code === 'string'
+    && typeof value.error.message === 'string';
+}
+
+function restoredTabIds(value: unknown): number[] | null {
+  if (!isRecord(value) || !Array.isArray(value.tabIds)) return null;
+  return value.tabIds.every(id => typeof id === 'number' && Number.isSafeInteger(id) && id >= 0)
+    ? value.tabIds as number[]
+    : null;
+}
+
 export interface BrokerAddress {
   host: '127.0.0.1';
   port: number;
@@ -62,6 +80,7 @@ export class BrokerServer {
   private readonly routes = new Map<string, PendingRoute>();
   private readonly ownershipTimers = new Map<string, NodeJS.Timeout>();
   private readonly tabCreationTails = new Map<string, Promise<unknown>>();
+  private readonly windowInitializations = new Map<string, Promise<{ windowId: number; result: unknown }>>();
   private readonly closedTabIds = new Set<number>();
   private readonly tabGenerations = new Map<number, number>();
   private httpServer: http.Server | null = null;
@@ -71,6 +90,7 @@ export class BrokerServer {
   private stopping = false;
   private extensionSync: Promise<void> = Promise.resolve();
   private hasActivatedExtension = false;
+  private recordingReservationSessionId: string | null = null;
 
   constructor(private readonly config: BrokerConfig, dependencies: BrokerDependencies = {}) {
     this.registry = dependencies.registry ?? new SessionRegistry();
@@ -288,9 +308,7 @@ export class BrokerServer {
     if (request.command === 'release_tab') return Promise.resolve(this.releaseTab(sessionId, request.params));
     if (request.command === 'create_tab') return this.queueOwnedTabCreation(sessionId, request);
     if (request.command === 'list_tabs') return this.listVisibleTabs(sessionId, request);
-    if (request.command === 'start_recording' && this.registry.hasActiveRecording()) {
-      throw new ArcTunnelError(ErrorCode.RECORDING_BUSY, ErrorCode.RECORDING_BUSY);
-    }
+    if (request.command === 'start_recording') return this.startRecording(sessionId, request);
     if (request.command === 'stop_recording') this.registry.assertOwnsRecording(sessionId);
     if (request.command === 'replay_recording') this.registry.assertOwnsRecording(sessionId, request.params.recordingId);
     if (request.command === 'save_session') {
@@ -319,25 +337,42 @@ export class BrokerServer {
     return this.sendExtensionCommand(sessionId, request);
   }
 
+  private async startRecording(sessionId: string, request: AgentRequest): Promise<unknown> {
+    if (this.recordingReservationSessionId !== null || this.registry.hasActiveRecording()) {
+      throw new ArcTunnelError(ErrorCode.RECORDING_BUSY, ErrorCode.RECORDING_BUSY);
+    }
+    this.recordingReservationSessionId = sessionId;
+    try {
+      return await this.sendOwnedTabCommand(sessionId, request);
+    } catch (error) {
+      if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
+      throw error;
+    }
+  }
+
+  private sendOwnedTabCommand(sessionId: string, request: AgentRequest): Promise<unknown> {
+    const tabId = request.params.tabId;
+    if (typeof tabId !== 'number') return this.sendExtensionCommand(sessionId, request);
+    this.registry.assertOwnsTab(sessionId, tabId);
+    const generation = this.tabGeneration(tabId);
+    return this.scheduler.run(tabId, () => {
+      if (this.tabGeneration(tabId) !== generation || this.closedTabIds.has(tabId)) {
+        throw new ArcTunnelError(ErrorCode.TAB_CLOSED, ErrorCode.TAB_CLOSED);
+      }
+      this.registry.assertOwnsTab(sessionId, tabId);
+      return this.sendExtensionCommand(sessionId, request);
+    });
+  }
+
   private async restoreOwnedSession(sessionId: string, request: AgentRequest): Promise<unknown> {
     this.registry.assertOwnsSavedSession(sessionId, request.params.sessionId);
-    let windowId = this.registry.windowId(sessionId);
-    if (windowId == null) {
-      const created = await this.sendExtensionCommand(sessionId, { ...request, command: 'create_window', params: {} }) as any;
-      const tabIds = typeof created?.tabId === 'number' ? [created.tabId] : [];
-      if (typeof created?.windowId !== 'number') {
-        throw new ArcTunnelError(ErrorCode.SESSION_RESTORE_FAILED, ErrorCode.SESSION_RESTORE_FAILED);
-      }
-      const createdWindowId = created.windowId as number;
-      windowId = createdWindowId;
-      this.registry.assignWindow(sessionId, createdWindowId, tabIds);
-    }
+    const { windowId } = await this.ensureOwnedWindow(sessionId, request, {});
     const result = await this.sendExtensionCommand(sessionId, {
       ...request, params: { ...request.params, windowId }
-    }) as any;
-    if (Array.isArray(result?.tabIds)) {
-      for (const tabId of result.tabIds) if (typeof tabId === 'number') this.registry.claimTab(sessionId, tabId);
-    }
+    });
+    const tabIds = restoredTabIds(result);
+    if (tabIds === null) throw new ArcTunnelError(ErrorCode.SESSION_RESTORE_FAILED, ErrorCode.SESSION_RESTORE_FAILED);
+    this.registry.claimTabsAtomically(sessionId, tabIds);
     return result;
   }
 
@@ -369,13 +404,7 @@ export class BrokerServer {
   private async createOwnedTab(sessionId: string, request: AgentRequest): Promise<unknown> {
     const windowId = this.registry.windowId(sessionId);
     if (windowId == null) {
-      const result = await this.sendExtensionCommand(sessionId, { ...request, command: 'create_window' }) as any;
-      const tabs = Array.isArray(result?.tabs) ? result.tabs : [];
-      const tabIds = tabs.flatMap((tab: any) => typeof tab.tabId === 'number' ? [tab.tabId] : []);
-      if (typeof result?.tabId === 'number') tabIds.push(result.tabId);
-      this.registry.assignWindow(sessionId, result.windowId, tabIds);
-      for (const tabId of tabIds) this.closedTabIds.delete(tabId);
-      return result;
+      return (await this.ensureOwnedWindow(sessionId, request, request.params)).result;
     }
     const result = await this.sendExtensionCommand(sessionId, {
       ...request,
@@ -384,6 +413,34 @@ export class BrokerServer {
     if (typeof result?.tabId === 'number') this.registry.claimTab(sessionId, result.tabId);
     if (typeof result?.tabId === 'number') this.closedTabIds.delete(result.tabId);
     return result;
+  }
+
+  private ensureOwnedWindow(
+    sessionId: string,
+    request: AgentRequest,
+    params: Record<string, unknown>
+  ): Promise<{ windowId: number; result: unknown }> {
+    const existing = this.registry.windowId(sessionId);
+    if (existing != null) return Promise.resolve({ windowId: existing, result: { windowId: existing } });
+    const pending = this.windowInitializations.get(sessionId);
+    if (pending) return pending;
+    const initialization = this.sendExtensionCommand(sessionId, { ...request, command: 'create_window', params })
+      .then(result => {
+        if (!isRecord(result) || typeof result.windowId !== 'number') {
+          throw new ArcTunnelError(ErrorCode.SESSION_RESTORE_FAILED, ErrorCode.SESSION_RESTORE_FAILED);
+        }
+        const tabIds = tabIdsFromResult(result);
+        if (typeof result.tabId === 'number') tabIds.push(result.tabId);
+        this.registry.assignWindow(sessionId, result.windowId, tabIds);
+        for (const tabId of tabIds) this.closedTabIds.delete(tabId);
+        return { windowId: result.windowId, result };
+      });
+    this.windowInitializations.set(sessionId, initialization);
+    const clear = () => {
+      if (this.windowInitializations.get(sessionId) === initialization) this.windowInitializations.delete(sessionId);
+    };
+    void initialization.then(clear, clear);
+    return initialization;
   }
 
   private queueOwnedTabCreation(sessionId: string, request: AgentRequest): Promise<unknown> {
@@ -434,15 +491,15 @@ export class BrokerServer {
   }
 
   private handleExtensionMessage(data: RawData): void {
-    let message: any;
+    let message: unknown;
     try {
       message = JSON.parse(data.toString());
     } catch {
       return;
     }
-    if (message.type === 'response') {
-      this.handleExtensionResponse(message as ResponseMessage);
-    } else if (message.type === 'event') {
+    if (isExtensionResponse(message)) {
+      this.handleExtensionResponse(message);
+    } else if (isBrowserEvent(message)) {
       this.handleBrowserEvent(message);
     }
   }
@@ -460,6 +517,9 @@ export class BrokerServer {
         this.registry.addRecording(route.sessionId, recordingId);
       }
       if (route.command === 'stop_recording') this.registry.clearRecordings(route.sessionId);
+      if (route.command === 'stop_recording' && this.recordingReservationSessionId === route.sessionId) {
+        this.recordingReservationSessionId = null;
+      }
       if (route.command === 'save_session' && savedSessionId) {
         this.registry.addSavedSession(route.sessionId, savedSessionId);
       }
@@ -519,6 +579,7 @@ export class BrokerServer {
 
   private handleAgentDisconnect(sessionId: string): void {
     this.agents.delete(sessionId);
+    if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
     for (const [id, route] of this.routes) {
       if (route.sessionId !== sessionId) continue;
       clearTimeout(route.timer);

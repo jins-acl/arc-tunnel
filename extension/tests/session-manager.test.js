@@ -44,3 +44,29 @@ test('CommandHandler returns RECORDING_BUSY for its singleton recording engine',
   assert.equal(response.success, false);
   assert.equal(response.error.code, 'RECORDING_BUSY');
 });
+
+test('CommandHandler synchronously reserves recording while start awaits', async () => {
+  let release;
+  let starts = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  global.chrome = { tabs: { query: async () => [{ id: 1 }, { id: 2 }] } };
+  const recordingEngine = {
+    isCurrentlyRecording: () => false,
+    startRecording: async () => { starts++; await gate; return 'recording'; },
+    injectListeners: async () => {}
+  };
+  const tabManager = {
+    holdDebuggerAttached() {},
+    ensureDebuggerAttached: async () => {},
+    releaseDebuggerAttached() {}
+  };
+  const handler = new CommandHandler(tabManager, {}, recordingEngine, {}, {}, {}, {}, {});
+  const first = handler.handleCommand({ id: 'first', type: 'command', command: 'start_recording', params: { tabId: 1 } });
+  const second = handler.handleCommand({ id: 'second', type: 'command', command: 'start_recording', params: { tabId: 2 } });
+  await new Promise(resolve => setImmediate(resolve));
+  release();
+  const secondResponse = await second;
+  assert.equal(secondResponse.error.code, 'RECORDING_BUSY');
+  assert.equal(starts, 1);
+  assert.equal((await first).success, true);
+});

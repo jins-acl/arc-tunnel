@@ -113,6 +113,20 @@ export class SessionRegistry {
     return { ok: true };
   }
 
+  claimTabsAtomically(sessionId: string, tabIds: number[]): void {
+    const session = this.requireSession(sessionId);
+    for (const tabId of tabIds) {
+      const owner = this.tabOwners.get(tabId);
+      if (owner && owner !== sessionId) {
+        throw new ArcTunnelError(ErrorCode.TAB_NOT_OWNED, ErrorCode.TAB_NOT_OWNED);
+      }
+    }
+    for (const tabId of tabIds) {
+      session.tabIds.add(tabId);
+      this.tabOwners.set(tabId, sessionId);
+    }
+  }
+
   releaseTab(tabId: number): void {
     const owner = this.tabOwners.get(tabId);
     if (!owner) return;

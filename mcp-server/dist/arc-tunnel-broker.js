@@ -3696,6 +3696,9 @@ function isRecord(value) {
 function isAgentRequest(value) {
   return isRecord(value) && value.type === "agent_request" && typeof value.requestId === "string" && typeof value.command === "string" && isRecord(value.params) && typeof value.timeout === "number";
 }
+function isBrowserEvent(value) {
+  return isRecord(value) && value.type === "event" && (value.event === "heartbeat" || value.event === "tab_created" || value.event === "tab_removed" || value.event === "window_removed") && isRecord(value.data) && typeof value.timestamp === "number";
+}
 
 // src/broker/session-registry.ts
 var SessionRegistry = class {
@@ -3782,6 +3785,19 @@ var SessionRegistry = class {
     session.tabIds.add(tabId);
     this.tabOwners.set(tabId, sessionId);
     return { ok: true };
+  }
+  claimTabsAtomically(sessionId, tabIds) {
+    const session = this.requireSession(sessionId);
+    for (const tabId of tabIds) {
+      const owner = this.tabOwners.get(tabId);
+      if (owner && owner !== sessionId) {
+        throw new ArcTunnelError("TAB_NOT_OWNED" /* TAB_NOT_OWNED */, "TAB_NOT_OWNED" /* TAB_NOT_OWNED */);
+      }
+    }
+    for (const tabId of tabIds) {
+      session.tabIds.add(tabId);
+      this.tabOwners.set(tabId, sessionId);
+    }
   }
   releaseTab(tabId) {
     const owner = this.tabOwners.get(tabId);
@@ -3884,6 +3900,17 @@ function tabIdsFromResult(value, field = "tabs") {
 function stringResultField(value, field) {
   return isRecord2(value) && typeof value[field] === "string" ? value[field] : null;
 }
+function isExtensionResponse(value) {
+  if (!isRecord2(value) || value.type !== "response" || typeof value.id !== "string" || typeof value.success !== "boolean") {
+    return false;
+  }
+  if (value.success) return true;
+  return isRecord2(value.error) && typeof value.error.code === "string" && typeof value.error.message === "string";
+}
+function restoredTabIds(value) {
+  if (!isRecord2(value) || !Array.isArray(value.tabIds)) return null;
+  return value.tabIds.every((id) => typeof id === "number" && Number.isSafeInteger(id) && id >= 0) ? value.tabIds : null;
+}
 var BrokerServer = class {
   constructor(config, dependencies = {}) {
     this.config = config;
@@ -3894,6 +3921,7 @@ var BrokerServer = class {
     this.routes = /* @__PURE__ */ new Map();
     this.ownershipTimers = /* @__PURE__ */ new Map();
     this.tabCreationTails = /* @__PURE__ */ new Map();
+    this.windowInitializations = /* @__PURE__ */ new Map();
     this.closedTabIds = /* @__PURE__ */ new Set();
     this.tabGenerations = /* @__PURE__ */ new Map();
     this.httpServer = null;
@@ -3903,6 +3931,7 @@ var BrokerServer = class {
     this.stopping = false;
     this.extensionSync = Promise.resolve();
     this.hasActivatedExtension = false;
+    this.recordingReservationSessionId = null;
     this.handleAgentConnection = (ws) => {
       this.awaitHello(ws, "agent", (hello) => {
         if (hello.role !== "agent") return false;
@@ -4090,9 +4119,7 @@ var BrokerServer = class {
     if (request.command === "release_tab") return Promise.resolve(this.releaseTab(sessionId, request.params));
     if (request.command === "create_tab") return this.queueOwnedTabCreation(sessionId, request);
     if (request.command === "list_tabs") return this.listVisibleTabs(sessionId, request);
-    if (request.command === "start_recording" && this.registry.hasActiveRecording()) {
-      throw new ArcTunnelError("RECORDING_BUSY" /* RECORDING_BUSY */, "RECORDING_BUSY" /* RECORDING_BUSY */);
-    }
+    if (request.command === "start_recording") return this.startRecording(sessionId, request);
     if (request.command === "stop_recording") this.registry.assertOwnsRecording(sessionId);
     if (request.command === "replay_recording") this.registry.assertOwnsRecording(sessionId, request.params.recordingId);
     if (request.command === "save_session") {
@@ -4119,26 +4146,41 @@ var BrokerServer = class {
     }
     return this.sendExtensionCommand(sessionId, request);
   }
+  async startRecording(sessionId, request) {
+    if (this.recordingReservationSessionId !== null || this.registry.hasActiveRecording()) {
+      throw new ArcTunnelError("RECORDING_BUSY" /* RECORDING_BUSY */, "RECORDING_BUSY" /* RECORDING_BUSY */);
+    }
+    this.recordingReservationSessionId = sessionId;
+    try {
+      return await this.sendOwnedTabCommand(sessionId, request);
+    } catch (error) {
+      if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
+      throw error;
+    }
+  }
+  sendOwnedTabCommand(sessionId, request) {
+    const tabId = request.params.tabId;
+    if (typeof tabId !== "number") return this.sendExtensionCommand(sessionId, request);
+    this.registry.assertOwnsTab(sessionId, tabId);
+    const generation = this.tabGeneration(tabId);
+    return this.scheduler.run(tabId, () => {
+      if (this.tabGeneration(tabId) !== generation || this.closedTabIds.has(tabId)) {
+        throw new ArcTunnelError("TAB_CLOSED" /* TAB_CLOSED */, "TAB_CLOSED" /* TAB_CLOSED */);
+      }
+      this.registry.assertOwnsTab(sessionId, tabId);
+      return this.sendExtensionCommand(sessionId, request);
+    });
+  }
   async restoreOwnedSession(sessionId, request) {
     this.registry.assertOwnsSavedSession(sessionId, request.params.sessionId);
-    let windowId = this.registry.windowId(sessionId);
-    if (windowId == null) {
-      const created = await this.sendExtensionCommand(sessionId, { ...request, command: "create_window", params: {} });
-      const tabIds = typeof created?.tabId === "number" ? [created.tabId] : [];
-      if (typeof created?.windowId !== "number") {
-        throw new ArcTunnelError("SESSION_RESTORE_FAILED" /* SESSION_RESTORE_FAILED */, "SESSION_RESTORE_FAILED" /* SESSION_RESTORE_FAILED */);
-      }
-      const createdWindowId = created.windowId;
-      windowId = createdWindowId;
-      this.registry.assignWindow(sessionId, createdWindowId, tabIds);
-    }
+    const { windowId } = await this.ensureOwnedWindow(sessionId, request, {});
     const result = await this.sendExtensionCommand(sessionId, {
       ...request,
       params: { ...request.params, windowId }
     });
-    if (Array.isArray(result?.tabIds)) {
-      for (const tabId of result.tabIds) if (typeof tabId === "number") this.registry.claimTab(sessionId, tabId);
-    }
+    const tabIds = restoredTabIds(result);
+    if (tabIds === null) throw new ArcTunnelError("SESSION_RESTORE_FAILED" /* SESSION_RESTORE_FAILED */, "SESSION_RESTORE_FAILED" /* SESSION_RESTORE_FAILED */);
+    this.registry.claimTabsAtomically(sessionId, tabIds);
     return result;
   }
   async claimTab(sessionId, request) {
@@ -4166,13 +4208,7 @@ var BrokerServer = class {
   async createOwnedTab(sessionId, request) {
     const windowId = this.registry.windowId(sessionId);
     if (windowId == null) {
-      const result2 = await this.sendExtensionCommand(sessionId, { ...request, command: "create_window" });
-      const tabs = Array.isArray(result2?.tabs) ? result2.tabs : [];
-      const tabIds = tabs.flatMap((tab) => typeof tab.tabId === "number" ? [tab.tabId] : []);
-      if (typeof result2?.tabId === "number") tabIds.push(result2.tabId);
-      this.registry.assignWindow(sessionId, result2.windowId, tabIds);
-      for (const tabId of tabIds) this.closedTabIds.delete(tabId);
-      return result2;
+      return (await this.ensureOwnedWindow(sessionId, request, request.params)).result;
     }
     const result = await this.sendExtensionCommand(sessionId, {
       ...request,
@@ -4181,6 +4217,28 @@ var BrokerServer = class {
     if (typeof result?.tabId === "number") this.registry.claimTab(sessionId, result.tabId);
     if (typeof result?.tabId === "number") this.closedTabIds.delete(result.tabId);
     return result;
+  }
+  ensureOwnedWindow(sessionId, request, params) {
+    const existing = this.registry.windowId(sessionId);
+    if (existing != null) return Promise.resolve({ windowId: existing, result: { windowId: existing } });
+    const pending = this.windowInitializations.get(sessionId);
+    if (pending) return pending;
+    const initialization = this.sendExtensionCommand(sessionId, { ...request, command: "create_window", params }).then((result) => {
+      if (!isRecord2(result) || typeof result.windowId !== "number") {
+        throw new ArcTunnelError("SESSION_RESTORE_FAILED" /* SESSION_RESTORE_FAILED */, "SESSION_RESTORE_FAILED" /* SESSION_RESTORE_FAILED */);
+      }
+      const tabIds = tabIdsFromResult(result);
+      if (typeof result.tabId === "number") tabIds.push(result.tabId);
+      this.registry.assignWindow(sessionId, result.windowId, tabIds);
+      for (const tabId of tabIds) this.closedTabIds.delete(tabId);
+      return { windowId: result.windowId, result };
+    });
+    this.windowInitializations.set(sessionId, initialization);
+    const clear = () => {
+      if (this.windowInitializations.get(sessionId) === initialization) this.windowInitializations.delete(sessionId);
+    };
+    void initialization.then(clear, clear);
+    return initialization;
   }
   queueOwnedTabCreation(sessionId, request) {
     const previous = this.tabCreationTails.get(sessionId) ?? Promise.resolve();
@@ -4233,9 +4291,9 @@ var BrokerServer = class {
     } catch {
       return;
     }
-    if (message.type === "response") {
+    if (isExtensionResponse(message)) {
       this.handleExtensionResponse(message);
-    } else if (message.type === "event") {
+    } else if (isBrowserEvent(message)) {
       this.handleBrowserEvent(message);
     }
   }
@@ -4252,6 +4310,9 @@ var BrokerServer = class {
         this.registry.addRecording(route.sessionId, recordingId);
       }
       if (route.command === "stop_recording") this.registry.clearRecordings(route.sessionId);
+      if (route.command === "stop_recording" && this.recordingReservationSessionId === route.sessionId) {
+        this.recordingReservationSessionId = null;
+      }
       if (route.command === "save_session" && savedSessionId) {
         this.registry.addSavedSession(route.sessionId, savedSessionId);
       }
@@ -4309,6 +4370,7 @@ var BrokerServer = class {
   }
   handleAgentDisconnect(sessionId) {
     this.agents.delete(sessionId);
+    if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
     for (const [id, route] of this.routes) {
       if (route.sessionId !== sessionId) continue;
       clearTimeout(route.timer);

@@ -42,12 +42,12 @@ class Agent {
       message.success ? pending.resolve(message.result) : pending.reject(message.error);
     });
   }
-  call(command: string, params: Record<string, unknown> = {}): Promise<any> {
+  call(command: string, params: Record<string, unknown> = {}, timeout = 1_000): Promise<any> {
     const requestId = String(++this.requestId);
     const response = new Promise((resolve, reject) => {
       this.pending.set(requestId, { resolve, reject });
     });
-    this.ws.send(JSON.stringify({ type: 'agent_request', requestId, command, params, timeout: 1_000 }));
+    this.ws.send(JSON.stringify({ type: 'agent_request', requestId, command, params, timeout }));
     return response;
   }
 }
@@ -314,7 +314,137 @@ describe('Broker ownership', () => {
   });
 
   it('starts synchronized tabs unclaimed in a fresh broker process', async () => {
-    const visible = await alpha.call('list_tabs');
-    expect(visible.tabs).toContainEqual(expect.objectContaining({ tabId: 101, ownership: 'unclaimed' }));
+    const fresh = new BrokerServer({ host: '127.0.0.1', port: 0 });
+    await fresh.start();
+    const freshExtension = await connect(fresh.address().port, '/extension', 'extension');
+    freshExtension.on('message', data => {
+      const command = JSON.parse(data.toString());
+      if (command.type === 'command' && command.command === 'list_tabs') {
+        freshExtension.send(JSON.stringify({ id: command.id, type: 'response', success: true, result: { tabs: initialTabs } }));
+      }
+    });
+    const freshAgentSocket = await connect(fresh.address().port, '/agent', 'agent');
+    const freshAgent = new Agent(freshAgentSocket);
+    try {
+      const visible = await freshAgent.call('list_tabs');
+      expect(visible.tabs).toContainEqual(expect.objectContaining({ tabId: 101, ownership: 'unclaimed' }));
+      expect(visible.tabs).toContainEqual(expect.objectContaining({ tabId: 202, ownership: 'unclaimed' }));
+    } finally {
+      freshAgentSocket.close();
+      freshExtension.close();
+      await fresh.stop();
+    }
+  });
+
+  it('atomically reserves the singleton recording across concurrent agents and rolls back failure', async () => {
+    await alpha.call('claim_tab', { tabId: 101 });
+    await beta.call('claim_tab', { tabId: 202 });
+    (extension as any).manualResponses = true;
+    const offset = commands.length;
+    const first = alpha.call('start_recording', { tabId: 101 });
+    const competing = beta.call('start_recording', { tabId: 202 }).then(() => null, error => error);
+    await waitUntil(() => commands.slice(offset).some(command => command.command === 'start_recording'));
+    await new Promise(resolve => setImmediate(resolve));
+    const starts = commands.slice(offset).filter(command => command.command === 'start_recording');
+    for (const start of starts) extension.send(JSON.stringify({ id: start.id, type: 'response', success: false,
+      error: { code: 'EXECUTION_ERROR', message: 'failed' } }));
+    await expect(first).rejects.toMatchObject({ code: 'EXECUTION_ERROR' });
+    const competingError = await competing;
+    expect(starts).toHaveLength(1);
+    expect(competingError).toMatchObject({ code: ErrorCode.RECORDING_BUSY });
+
+    const retry = beta.call('start_recording', { tabId: 202 });
+    await waitUntil(() => commands.slice(offset).filter(command => command.command === 'start_recording').length === 2);
+    const retryCommand = commands.slice(offset).filter(command => command.command === 'start_recording')[1];
+    extension.send(JSON.stringify({ id: retryCommand.id, type: 'response', success: true,
+      result: { recordingId: 'beta-recording' } }));
+    await expect(retry).resolves.toEqual({ recordingId: 'beta-recording' });
+  });
+
+  it('rolls back an in-flight recording reservation on timeout and extension disconnect', async () => {
+    await alpha.call('claim_tab', { tabId: 101 });
+    await beta.call('claim_tab', { tabId: 202 });
+    (extension as any).manualResponses = true;
+    await expect(alpha.call('start_recording', { tabId: 101 }, 10))
+      .rejects.toMatchObject({ code: ErrorCode.COMMAND_TIMEOUT });
+
+    const pending = beta.call('start_recording', { tabId: 202 });
+    await waitUntil(() => commands.filter(command => command.command === 'start_recording').length >= 2);
+    extension.close();
+    await expect(pending).rejects.toMatchObject({ code: ErrorCode.EXTENSION_DISCONNECTED });
+
+    extension = await new Promise<WebSocket>((resolve, reject) => {
+      const socket = new WebSocket(`ws://127.0.0.1:${broker.address().port}/extension`, { origin: 'chrome-extension://test' });
+      socket.once('open', () => resolve(socket));
+      socket.once('error', reject);
+    });
+    extension.on('message', data => {
+      const command = JSON.parse(data.toString());
+      if (command.type !== 'command') return;
+      const result = command.command === 'list_tabs' ? { tabs } : { recordingId: 'after-disconnect' };
+      extension.send(JSON.stringify({ id: command.id, type: 'response', success: true, result }));
+    });
+    const welcome = nextMessage(extension);
+    extension.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    await welcome;
+    await expect(alpha.call('start_recording', { tabId: 101 }))
+      .resolves.toEqual({ recordingId: 'after-disconnect' });
+  });
+
+  it('shares one lazy window across concurrent restores', async () => {
+    const { sessionId } = await alpha.call('save_session', { name: 'alpha' });
+    const offset = commands.length;
+    await Promise.all([
+      alpha.call('restore_session', { sessionId }),
+      alpha.call('restore_session', { sessionId })
+    ]);
+    const concurrent = commands.slice(offset);
+    expect(concurrent.filter(command => command.command === 'create_window')).toHaveLength(1);
+    const windowIds = concurrent.filter(command => command.command === 'restore_session')
+      .map(command => command.params.windowId);
+    expect(new Set(windowIds).size).toBe(1);
+  });
+
+  it('rejects malformed and colliding restore tab IDs without partial claims', async () => {
+    await alpha.call('create_tab', { url: 'https://alpha.example' });
+    const { sessionId } = await alpha.call('save_session', { name: 'alpha' });
+    await beta.call('claim_tab', { tabId: 202 });
+    (extension as any).manualResponses = true;
+
+    const malformed = alpha.call('restore_session', { sessionId });
+    await waitUntil(() => commands.some(command => command.command === 'restore_session'));
+    let restores = commands.filter(command => command.command === 'restore_session');
+    let restore = restores[restores.length - 1];
+    extension.send(JSON.stringify({ id: restore.id, type: 'response', success: true, result: { tabIds: [401, 'bad'] } }));
+    await expect(malformed).rejects.toMatchObject({ code: ErrorCode.SESSION_RESTORE_FAILED });
+    expect((broker as any).registry.visibleTabs((alphaSocket as any).welcome.sessionId, [{ tabId: 401 }])[0].ownership)
+      .toBe('unclaimed');
+
+    const collision = alpha.call('restore_session', { sessionId });
+    await waitUntil(() => commands.filter(command => command.command === 'restore_session').length >= 2);
+    restores = commands.filter(command => command.command === 'restore_session');
+    restore = restores[restores.length - 1];
+    extension.send(JSON.stringify({ id: restore.id, type: 'response', success: true, result: { tabIds: [402, 202] } }));
+    await expect(collision).rejects.toMatchObject({ code: ErrorCode.TAB_NOT_OWNED });
+    expect((broker as any).registry.visibleTabs((alphaSocket as any).welcome.sessionId, [{ tabId: 402 }])[0].ownership)
+      .toBe('unclaimed');
+  });
+
+  it('ignores malformed response envelopes without mutating recording ownership', async () => {
+    await alpha.call('claim_tab', { tabId: 101 });
+    (extension as any).manualResponses = true;
+    const pending = alpha.call('start_recording', { tabId: 101 });
+    await waitUntil(() => commands.some(command => command.command === 'start_recording'));
+    const command = commands.find(command => command.command === 'start_recording')!;
+    extension.send(JSON.stringify({ id: 123, type: 'response', success: true, result: { recordingId: 'wrong-id' } }));
+    extension.send(JSON.stringify({ id: command.id, type: 'response', success: false,
+      error: { code: 'EXECUTION_ERROR', message: 123 } }));
+    extension.send(JSON.stringify({ id: command.id, type: 'response', success: 'yes', result: { recordingId: 'leaked' } }));
+    await new Promise(resolve => setImmediate(resolve));
+    extension.send(JSON.stringify({ id: command.id, type: 'response', success: false,
+      error: { code: 'EXECUTION_ERROR', message: 'failed' } }));
+    await expect(pending).rejects.toMatchObject({ code: 'EXECUTION_ERROR' });
+    await expect(alpha.call('replay_recording', { recordingId: 'leaked', tabId: 101 }))
+      .rejects.toMatchObject({ code: ErrorCode.RECORDING_NOT_FOUND });
   });
 });

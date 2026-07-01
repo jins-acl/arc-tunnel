@@ -17,6 +17,7 @@ export class CommandHandler {
   private inputSimulator: InputSimulator;
   private actionabilityChecker: ActionabilityChecker;
   private recordingDebuggerTabId: number | null = null;
+  private recordingStartReserved = false;
 
   constructor(
     private tabManager: TabManager,
@@ -332,13 +333,21 @@ export class CommandHandler {
 
       // Recording
       case 'start_recording': {
-        if (this.recordingEngine.isCurrentlyRecording()) {
+        if (this.recordingStartReserved || this.recordingEngine.isCurrentlyRecording()) {
           const error = new Error('RECORDING_BUSY');
           (error as Error & { code?: string }).code = 'RECORDING_BUSY';
           throw error;
         }
-        const tabs = await chrome.tabs.query({});
+        this.recordingStartReserved = true;
+        let tabs: chrome.tabs.Tab[];
+        try {
+          tabs = await chrome.tabs.query({});
+        } catch (error) {
+          this.recordingStartReserved = false;
+          throw error;
+        }
         if (!tabs.some(t => t.id === params.tabId)) {
+          this.recordingStartReserved = false;
           throw new Error(`Tab ${params.tabId} not found`);
         }
         this.tabManager.holdDebuggerAttached(params.tabId, 'recording');
@@ -349,6 +358,7 @@ export class CommandHandler {
           this.recordingDebuggerTabId = params.tabId;
           return { recordingId };
         } catch (error) {
+          this.recordingStartReserved = false;
           this.tabManager.releaseDebuggerAttached(params.tabId, 'recording-start-failed');
           throw error;
         }
@@ -361,6 +371,7 @@ export class CommandHandler {
           const recording = await this.recordingEngine.stopRecording();
           return { recording };
         } finally {
+          this.recordingStartReserved = false;
           if (recordingTabId != null) {
             this.recordingDebuggerTabId = null;
             this.tabManager.releaseDebuggerAttached(recordingTabId, 'recording-stopped');
