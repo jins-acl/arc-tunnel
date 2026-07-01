@@ -35,6 +35,10 @@ export class SessionRegistry {
     return session;
   }
 
+  windowId(sessionId: string): number | null {
+    return this.requireSession(sessionId).windowId;
+  }
+
   assignWindow(sessionId: string, windowId: number, tabIds: number[]): void {
     const session = this.requireSession(sessionId);
     for (const tabId of tabIds) {

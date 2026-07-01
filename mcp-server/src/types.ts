@@ -28,6 +28,8 @@ export interface ErrorInfo {
   details?: unknown;
 }
 
+export type TabOwnership = 'owned' | 'unclaimed';
+
 // Error codes
 export enum ErrorCode {
   CONNECTION_LOST = 'CONNECTION_LOST',

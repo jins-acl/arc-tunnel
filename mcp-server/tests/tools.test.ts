@@ -42,4 +42,15 @@ describe('MCP Tools', () => {
     expect(waitForElementTool?.inputSchema.properties).toHaveProperty('selector');
     expect(waitForElementTool?.inputSchema.required).toContain('selector');
   });
+
+  it('exposes tab ownership tools and warns that storage shares a browser profile', () => {
+    const tools = getToolDefinitions();
+    for (const name of ['claim_tab', 'release_tab']) {
+      const tool = tools.find(candidate => candidate.name === name);
+      expect(tool?.inputSchema.required).toEqual(['tabId']);
+      expect(tool?.inputSchema.properties.tabId.type).toBe('number');
+    }
+    expect(tools.find(tool => tool.name === 'manage_storage')?.description)
+      .toMatch(/cookie and storage mutations share the same browser profile across Agent sessions/i);
+  });
 });

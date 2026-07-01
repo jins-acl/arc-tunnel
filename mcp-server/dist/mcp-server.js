@@ -19617,7 +19617,7 @@ function getToolDefinitions() {
     },
     {
       name: "manage_storage",
-      description: "Manage cookies, localStorage, or sessionStorage. Supports list, get, set, delete, clear actions.",
+      description: "Manage cookies, localStorage, or sessionStorage. Supports list, get, set, delete, clear actions. WARNING: cookie and storage mutations share the same browser profile across Agent sessions.",
       inputSchema: {
         type: "object",
         properties: {
@@ -19733,6 +19733,24 @@ function getToolDefinitions() {
         type: "object",
         properties: {},
         required: []
+      }
+    },
+    {
+      name: "claim_tab",
+      description: "Claim an unowned manually opened tab for this Agent session.",
+      inputSchema: {
+        type: "object",
+        properties: { tabId: { type: "number" } },
+        required: ["tabId"]
+      }
+    },
+    {
+      name: "release_tab",
+      description: "Release an owned tab without closing it so another Agent may claim it.",
+      inputSchema: {
+        type: "object",
+        properties: { tabId: { type: "number" } },
+        required: ["tabId"]
       }
     },
     // Recording and playback

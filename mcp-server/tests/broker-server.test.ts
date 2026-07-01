@@ -218,10 +218,15 @@ describe('BrokerServer', () => {
   });
 
   it('rejects matching work with TAB_CLOSED when a tab is removed', async () => {
+    const registry = new SessionRegistry();
+    await broker.stop();
+    broker = new BrokerServer({ host: '127.0.0.1', port: 0 }, { registry });
+    await broker.start();
     const port = broker.address().port;
     const extension = await connectRole(port, '/extension', 'extension');
     const alpha = await connectRole(port, '/agent', 'agent');
     sockets.push(extension.ws, alpha.ws);
+    registry.claimTab(alpha.welcome.sessionId, 77);
     const command = nextMessage(extension.ws);
     alpha.ws.send(JSON.stringify({ type: 'agent_request', requestId: 'tab-work', command: 'navigate', params: { tabId: 77 }, timeout: 1_000 }));
     await command;

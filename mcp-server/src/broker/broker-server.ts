@@ -10,16 +10,21 @@ import {
   HelloMessage,
   PROTOCOL_VERSION,
   WelcomeMessage,
-  isAgentRequest
+  isAgentRequest,
+  ArcTunnelError,
+  toErrorInfo
 } from '../protocol';
 import { ResponseMessage } from '../types';
 import { SessionRegistry } from './session-registry';
+import { TabScheduler } from './tab-scheduler';
 
 interface PendingRoute {
   sessionId: string;
   agentRequestId: string;
   params: Record<string, unknown>;
   timer: NodeJS.Timeout;
+  resolve: (value: unknown) => void;
+  reject: (error: unknown) => void;
 }
 
 interface BrokerDependencies {
@@ -35,9 +40,11 @@ export class BrokerServer {
   private readonly agentWss = new WebSocketServer({ noServer: true });
   private readonly extensionWss = new WebSocketServer({ noServer: true });
   private readonly registry: SessionRegistry;
+  private readonly scheduler = new TabScheduler();
   private readonly agents = new Map<string, WebSocket>();
   private readonly routes = new Map<string, PendingRoute>();
   private readonly ownershipTimers = new Map<string, NodeJS.Timeout>();
+  private readonly tabCreationTails = new Map<string, Promise<unknown>>();
   private httpServer: http.Server | null = null;
   private extension: WebSocket | null = null;
   private listeningPort: number | null = null;
@@ -127,6 +134,7 @@ export class BrokerServer {
     this.stopping = true;
 
     this.rejectAllRoutes(ErrorCode.EXTENSION_DISCONNECTED);
+    await new Promise<void>((resolve) => setImmediate(resolve));
     for (const timer of this.ownershipTimers.values()) clearTimeout(timer);
     this.ownershipTimers.clear();
 
@@ -226,32 +234,114 @@ export class BrokerServer {
     } catch {
       return;
     }
-    if (isAgentRequest(request)) this.forward(sessionId, request);
+    if (isAgentRequest(request)) void this.forward(sessionId, request);
   }
 
-  private forward(sessionId: string, request: AgentRequest): void {
+  private async forward(sessionId: string, request: AgentRequest): Promise<void> {
     if (!this.extension || this.extension.readyState !== WebSocket.OPEN) {
       this.replyError(sessionId, request.requestId, ErrorCode.EXTENSION_DISCONNECTED);
       return;
     }
+    try {
+      const result = await this.executeRequest(sessionId, request);
+      this.replySuccess(sessionId, request.requestId, result);
+    } catch (error) {
+      const info = toErrorInfo(error);
+      this.replyError(sessionId, request.requestId, info.code as ErrorCode, info.message);
+    }
+  }
+
+  private executeRequest(sessionId: string, request: AgentRequest): Promise<unknown> {
+    if (request.command === 'claim_tab') return Promise.resolve(this.claimTab(sessionId, request.params));
+    if (request.command === 'release_tab') return Promise.resolve(this.releaseTab(sessionId, request.params));
+    if (request.command === 'create_tab') return this.queueOwnedTabCreation(sessionId, request);
+    if (request.command === 'list_tabs') return this.listVisibleTabs(sessionId, request);
+
+    const tabId = request.params.tabId;
+    if (typeof tabId === 'number') {
+      this.registry.assertOwnsTab(sessionId, tabId);
+      return this.scheduler.run(tabId, () => this.sendExtensionCommand(sessionId, request));
+    }
+    return this.sendExtensionCommand(sessionId, request);
+  }
+
+  private claimTab(sessionId: string, params: Record<string, unknown>): { tabId: number; ownership: 'owned' } {
+    const tabId = params.tabId;
+    if (typeof tabId !== 'number') throw new ArcTunnelError(ErrorCode.TAB_NOT_OWNED, ErrorCode.TAB_NOT_OWNED);
+    const result = this.registry.claimTab(sessionId, tabId);
+    if (!result.ok) throw new ArcTunnelError(result.code, result.code);
+    return { tabId, ownership: 'owned' };
+  }
+
+  private releaseTab(sessionId: string, params: Record<string, unknown>): { tabId: number; ownership: 'unclaimed' } {
+    const tabId = params.tabId;
+    if (typeof tabId !== 'number') throw new ArcTunnelError(ErrorCode.TAB_NOT_OWNED, ErrorCode.TAB_NOT_OWNED);
+    this.registry.assertOwnsTab(sessionId, tabId);
+    this.registry.releaseTab(tabId);
+    return { tabId, ownership: 'unclaimed' };
+  }
+
+  private async createOwnedTab(sessionId: string, request: AgentRequest): Promise<unknown> {
+    const windowId = this.registry.windowId(sessionId);
+    if (windowId == null) {
+      const result = await this.sendExtensionCommand(sessionId, { ...request, command: 'create_window' }) as any;
+      const tabs = Array.isArray(result?.tabs) ? result.tabs : [];
+      const tabIds = tabs.flatMap((tab: any) => typeof tab.tabId === 'number' ? [tab.tabId] : []);
+      if (typeof result?.tabId === 'number') tabIds.push(result.tabId);
+      this.registry.assignWindow(sessionId, result.windowId, tabIds);
+      return result;
+    }
+    const result = await this.sendExtensionCommand(sessionId, {
+      ...request,
+      params: { ...request.params, windowId }
+    }) as any;
+    if (typeof result?.tabId === 'number') this.registry.claimTab(sessionId, result.tabId);
+    return result;
+  }
+
+  private queueOwnedTabCreation(sessionId: string, request: AgentRequest): Promise<unknown> {
+    const previous = this.tabCreationTails.get(sessionId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(() => this.createOwnedTab(sessionId, request));
+    this.tabCreationTails.set(sessionId, current);
+    const clear = () => {
+      if (this.tabCreationTails.get(sessionId) === current) this.tabCreationTails.delete(sessionId);
+    };
+    void current.then(clear, clear);
+    return current;
+  }
+
+  private async listVisibleTabs(sessionId: string, request: AgentRequest): Promise<unknown> {
+    const result = await this.sendExtensionCommand(sessionId, request) as any;
+    const tabs = Array.isArray(result?.tabs) ? result.tabs : [];
+    return { ...result, tabs: this.registry.visibleTabs(sessionId, tabs) };
+  }
+
+  private sendExtensionCommand(sessionId: string, request: AgentRequest): Promise<unknown> {
+    if (!this.extension || this.extension.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new ArcTunnelError(ErrorCode.EXTENSION_DISCONNECTED, ErrorCode.EXTENSION_DISCONNECTED));
+    }
     const extensionCommandId = randomUUID();
     const timeout = Math.max(0, request.timeout);
-    const timer = setTimeout(() => {
-      this.routes.delete(extensionCommandId);
-      this.replyError(sessionId, request.requestId, ErrorCode.COMMAND_TIMEOUT);
-    }, timeout);
-    this.routes.set(extensionCommandId, {
-      sessionId,
-      agentRequestId: request.requestId,
-      params: request.params,
-      timer
-    });
-    this.send(this.extension, {
-      id: extensionCommandId,
-      type: 'command',
-      command: request.command,
-      params: request.params,
-      timeout: request.timeout
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.routes.delete(extensionCommandId);
+        reject(new ArcTunnelError(ErrorCode.COMMAND_TIMEOUT, ErrorCode.COMMAND_TIMEOUT));
+      }, timeout);
+      this.routes.set(extensionCommandId, {
+        sessionId,
+        agentRequestId: request.requestId,
+        params: request.params,
+        timer,
+        resolve,
+        reject
+      });
+      this.send(this.extension!, {
+        id: extensionCommandId,
+        type: 'command',
+        command: request.command,
+        params: request.params,
+        timeout: request.timeout
+      });
     });
   }
 
@@ -274,14 +364,8 @@ export class BrokerServer {
     if (!route) return;
     clearTimeout(route.timer);
     this.routes.delete(response.id);
-    const message: AgentResponse = {
-      type: 'agent_response',
-      requestId: route.agentRequestId,
-      success: response.success,
-      ...(response.success ? { result: response.result } : { error: response.error })
-    };
-    const agent = this.agents.get(route.sessionId);
-    if (agent?.readyState === WebSocket.OPEN) this.send(agent, message);
+    if (response.success) route.resolve(response.result);
+    else route.reject(new ArcTunnelError(response.error?.code as ErrorCode, response.error?.message ?? 'Extension command failed', response.error?.details));
   }
 
   private handleBrowserEvent(event: { event: string; data?: Record<string, unknown> }): void {
@@ -302,7 +386,7 @@ export class BrokerServer {
       if (!matchesTab && !matchesWindow) continue;
       clearTimeout(route.timer);
       this.routes.delete(id);
-      this.replyError(route.sessionId, route.agentRequestId, ErrorCode.TAB_CLOSED);
+      route.reject(new ArcTunnelError(ErrorCode.TAB_CLOSED, ErrorCode.TAB_CLOSED));
     }
   }
 
@@ -312,6 +396,7 @@ export class BrokerServer {
       if (route.sessionId !== sessionId) continue;
       clearTimeout(route.timer);
       this.routes.delete(id);
+      route.reject(new ArcTunnelError(ErrorCode.EXTENSION_DISCONNECTED, ErrorCode.EXTENSION_DISCONNECTED));
     }
     if (this.stopping) return;
     this.registry.disconnect(sessionId, Date.now());
@@ -325,19 +410,26 @@ export class BrokerServer {
   private rejectAllRoutes(code: ErrorCode): void {
     for (const route of this.routes.values()) {
       clearTimeout(route.timer);
-      this.replyError(route.sessionId, route.agentRequestId, code);
+      route.reject(new ArcTunnelError(code, code));
     }
     this.routes.clear();
   }
 
-  private replyError(sessionId: string, requestId: string, code: ErrorCode): void {
+  private replySuccess(sessionId: string, requestId: string, result: unknown): void {
+    const ws = this.agents.get(sessionId);
+    if (ws?.readyState === WebSocket.OPEN) this.send(ws, {
+      type: 'agent_response', requestId, success: true, result
+    } satisfies AgentResponse);
+  }
+
+  private replyError(sessionId: string, requestId: string, code: ErrorCode, message: string = code): void {
     const ws = this.agents.get(sessionId);
     if (ws?.readyState !== WebSocket.OPEN) return;
     this.send(ws, {
       type: 'agent_response',
       requestId,
       success: false,
-      error: { code, message: code }
+      error: { code, message }
     } satisfies AgentResponse);
   }
 
