@@ -45,6 +45,7 @@ export class BrokerServer {
   private readonly routes = new Map<string, PendingRoute>();
   private readonly ownershipTimers = new Map<string, NodeJS.Timeout>();
   private readonly tabCreationTails = new Map<string, Promise<unknown>>();
+  private readonly closedTabIds = new Set<number>();
   private httpServer: http.Server | null = null;
   private extension: WebSocket | null = null;
   private listeningPort: number | null = null;
@@ -252,7 +253,7 @@ export class BrokerServer {
   }
 
   private executeRequest(sessionId: string, request: AgentRequest): Promise<unknown> {
-    if (request.command === 'claim_tab') return Promise.resolve(this.claimTab(sessionId, request.params));
+    if (request.command === 'claim_tab') return this.claimTab(sessionId, request);
     if (request.command === 'release_tab') return Promise.resolve(this.releaseTab(sessionId, request.params));
     if (request.command === 'create_tab') return this.queueOwnedTabCreation(sessionId, request);
     if (request.command === 'list_tabs') return this.listVisibleTabs(sessionId, request);
@@ -260,16 +261,31 @@ export class BrokerServer {
     const tabId = request.params.tabId;
     if (typeof tabId === 'number') {
       this.registry.assertOwnsTab(sessionId, tabId);
-      return this.scheduler.run(tabId, () => this.sendExtensionCommand(sessionId, request));
+      return this.scheduler.run(tabId, () => {
+        if (this.closedTabIds.has(tabId)) {
+          throw new ArcTunnelError(ErrorCode.TAB_CLOSED, ErrorCode.TAB_CLOSED);
+        }
+        this.registry.assertOwnsTab(sessionId, tabId);
+        return this.sendExtensionCommand(sessionId, request);
+      });
     }
     return this.sendExtensionCommand(sessionId, request);
   }
 
-  private claimTab(sessionId: string, params: Record<string, unknown>): { tabId: number; ownership: 'owned' } {
-    const tabId = params.tabId;
+  private async claimTab(sessionId: string, request: AgentRequest): Promise<{ tabId: number; ownership: 'owned' }> {
+    const tabId = request.params.tabId;
     if (typeof tabId !== 'number') throw new ArcTunnelError(ErrorCode.TAB_NOT_OWNED, ErrorCode.TAB_NOT_OWNED);
+    const inventory = await this.sendExtensionCommand(sessionId, {
+      ...request,
+      command: 'list_tabs',
+      params: {}
+    }) as any;
+    const exists = Array.isArray(inventory?.tabs)
+      && inventory.tabs.some((tab: any) => tab?.tabId === tabId);
+    if (!exists) throw new ArcTunnelError(ErrorCode.TAB_NOT_FOUND, ErrorCode.TAB_NOT_FOUND);
     const result = this.registry.claimTab(sessionId, tabId);
     if (!result.ok) throw new ArcTunnelError(result.code, result.code);
+    this.closedTabIds.delete(tabId);
     return { tabId, ownership: 'owned' };
   }
 
@@ -289,6 +305,7 @@ export class BrokerServer {
       const tabIds = tabs.flatMap((tab: any) => typeof tab.tabId === 'number' ? [tab.tabId] : []);
       if (typeof result?.tabId === 'number') tabIds.push(result.tabId);
       this.registry.assignWindow(sessionId, result.windowId, tabIds);
+      for (const tabId of tabIds) this.closedTabIds.delete(tabId);
       return result;
     }
     const result = await this.sendExtensionCommand(sessionId, {
@@ -296,6 +313,7 @@ export class BrokerServer {
       params: { ...request.params, windowId }
     }) as any;
     if (typeof result?.tabId === 'number') this.registry.claimTab(sessionId, result.tabId);
+    if (typeof result?.tabId === 'number') this.closedTabIds.delete(result.tabId);
     return result;
   }
 
@@ -369,16 +387,24 @@ export class BrokerServer {
   }
 
   private handleBrowserEvent(event: { event: string; data?: Record<string, unknown> }): void {
+    if (event.event === 'tab_created') {
+      if (typeof event.data?.tabId === 'number') this.closedTabIds.delete(event.data.tabId);
+      return;
+    }
     if (event.event !== 'tab_removed' && event.event !== 'window_removed') return;
     const tabId = event.data?.tabId;
     const windowId = event.data?.windowId;
     const removedTabIds = new Set<number>();
     if (typeof tabId === 'number') {
       this.registry.releaseTab(tabId);
+      this.closedTabIds.add(tabId);
       removedTabIds.add(tabId);
     }
     if (event.event === 'window_removed' && typeof windowId === 'number') {
-      for (const id of this.registry.releaseWindow(windowId)) removedTabIds.add(id);
+      for (const id of this.registry.releaseWindow(windowId)) {
+        this.closedTabIds.add(id);
+        removedTabIds.add(id);
+      }
     }
     for (const [id, route] of this.routes) {
       const matchesTab = typeof route.params.tabId === 'number' && removedTabIds.has(route.params.tabId);

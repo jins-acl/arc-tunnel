@@ -60,13 +60,18 @@ describe('Broker ownership', () => {
   let alpha: Agent;
   let beta: Agent;
   const commands: Message[] = [];
-  const tabs = [{ tabId: 300, windowId: 30, url: 'https://manual.example' }];
+  const initialTabs = [
+    { tabId: 101, windowId: 10, url: 'https://one.example' },
+    { tabId: 202, windowId: 20, url: 'https://two.example' },
+    { tabId: 300, windowId: 30, url: 'https://manual.example' }
+  ];
+  const tabs = [...initialTabs];
   let nextWindow = 40;
   let nextTab = 400;
 
   beforeEach(async () => {
     commands.splice(0);
-    tabs.splice(0, tabs.length, { tabId: 300, windowId: 30, url: 'https://manual.example' });
+    tabs.splice(0, tabs.length, ...initialTabs);
     broker = new BrokerServer({ host: '127.0.0.1', port: 0 });
     await broker.start();
     const port = broker.address().port;
@@ -79,7 +84,7 @@ describe('Broker ownership', () => {
       const command = JSON.parse(data.toString());
       if (command.type !== 'command') return;
       commands.push(command);
-      if ((extension as any).manualResponses) return;
+      if ((extension as any).manualResponses && command.command !== 'list_tabs') return;
       let result: any;
       if (command.command === 'create_window') {
         const windowId = nextWindow++;
@@ -133,12 +138,61 @@ describe('Broker ownership', () => {
     await expect(alpha.call('navigate', { tabId: 300, action: 'goto', url: 'https://x.example' }))
       .rejects.toMatchObject({ code: ErrorCode.TAB_NOT_OWNED });
     await alpha.call('claim_tab', { tabId: 300 });
+    await expect(beta.call('claim_tab', { tabId: 300 }))
+      .rejects.toMatchObject({ code: ErrorCode.TAB_NOT_OWNED });
     await expect(beta.call('navigate', { tabId: 300, action: 'goto', url: 'https://x.example' }))
       .rejects.toMatchObject({ code: ErrorCode.TAB_NOT_OWNED });
     await expect(alpha.call('navigate', { tabId: 300, action: 'goto', url: 'https://x.example' }))
       .resolves.toEqual({ ok: true });
     await alpha.call('release_tab', { tabId: 300 });
     await expect(beta.call('claim_tab', { tabId: 300 })).resolves.toEqual(expect.objectContaining({ tabId: 300 }));
+  });
+
+  it('rejects a claim for a tab absent from the extension inventory', async () => {
+    await expect(alpha.call('claim_tab', { tabId: 999 }))
+      .rejects.toMatchObject({ code: ErrorCode.TAB_NOT_FOUND });
+    await expect(alpha.call('navigate', { tabId: 999, action: 'reload' }))
+      .rejects.toMatchObject({ code: ErrorCode.TAB_NOT_OWNED });
+  });
+
+  it('claims a real unclaimed tab from the extension inventory', async () => {
+    await expect(alpha.call('claim_tab', { tabId: 300 }))
+      .resolves.toEqual({ tabId: 300, ownership: 'owned' });
+    await expect(alpha.call('list_tabs')).resolves.toEqual(expect.objectContaining({
+      tabs: expect.arrayContaining([expect.objectContaining({ tabId: 300, ownership: 'owned' })])
+    }));
+  });
+
+  it('does not forward queued work after ownership is released and transferred', async () => {
+    await alpha.call('claim_tab', { tabId: 101 });
+    (extension as any).manualResponses = true;
+    const offset = commands.length;
+    const first = alpha.call('navigate', { tabId: 101, action: 'reload' });
+    const queued = alpha.call('snapshot', { tabId: 101 });
+    await waitUntil(() => commands.length >= offset + 1);
+
+    await alpha.call('release_tab', { tabId: 101 });
+    await beta.call('claim_tab', { tabId: 101 });
+    const firstCommand = commands.slice(offset).find(command => command.command === 'navigate')!;
+    extension.send(JSON.stringify({ id: firstCommand.id, type: 'response', success: true, result: { ok: true } }));
+
+    await expect(first).resolves.toEqual({ ok: true });
+    await expect(queued).rejects.toMatchObject({ code: ErrorCode.TAB_NOT_OWNED });
+    expect(commands.slice(offset).filter(command => command.command === 'snapshot')).toHaveLength(0);
+  });
+
+  it('rejects queued work with TAB_CLOSED after its tab is removed', async () => {
+    await alpha.call('claim_tab', { tabId: 202 });
+    (extension as any).manualResponses = true;
+    const offset = commands.length;
+    const first = alpha.call('navigate', { tabId: 202, action: 'reload' });
+    const queued = alpha.call('snapshot', { tabId: 202 });
+    await waitUntil(() => commands.length >= offset + 1);
+
+    extension.send(JSON.stringify({ type: 'event', event: 'tab_removed', data: { tabId: 202 }, timestamp: Date.now() }));
+    await expect(first).rejects.toMatchObject({ code: ErrorCode.TAB_CLOSED });
+    await expect(queued).rejects.toMatchObject({ code: ErrorCode.TAB_CLOSED });
+    expect(commands.slice(offset).filter(command => command.command === 'snapshot')).toHaveLength(0);
   });
 
   it('serializes commands on one tab while allowing different tabs to overlap', async () => {
