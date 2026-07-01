@@ -25,7 +25,7 @@ async function connect(port: number, path: '/agent' | '/extension', role: 'agent
   });
   const welcome = nextMessage(ws);
   ws.send(JSON.stringify({ type: 'hello', role, protocolVersion: PROTOCOL_VERSION }));
-  await welcome;
+  (ws as any).welcome = await welcome;
   return ws;
 }
 
@@ -193,6 +193,39 @@ describe('Broker ownership', () => {
     await expect(first).rejects.toMatchObject({ code: ErrorCode.TAB_CLOSED });
     await expect(queued).rejects.toMatchObject({ code: ErrorCode.TAB_CLOSED });
     expect(commands.slice(offset).filter(command => command.command === 'snapshot')).toHaveLength(0);
+  });
+
+  it('does not run old queued work against a new tab that reuses the same ID', async () => {
+    await alpha.call('claim_tab', { tabId: 202 });
+    (extension as any).manualResponses = true;
+    const offset = commands.length;
+    const first = alpha.call('navigate', { tabId: 202, action: 'reload' });
+    const stale = alpha.call('execute_script', { tabId: 202, script: 'old incarnation' });
+    const staleRejection = expect(stale).rejects.toMatchObject({ code: ErrorCode.TAB_CLOSED });
+    await waitUntil(() => commands.length >= offset + 1);
+
+    // Run both lifecycle transitions and establish new-incarnation ownership in one
+    // synchronous turn so the stale scheduler callback cannot drain in between.
+    (broker as any).handleBrowserEvent({ event: 'tab_removed', data: { tabId: 202 } });
+    tabs.splice(tabs.findIndex(tab => tab.tabId === 202), 1,
+      { tabId: 202, windowId: 21, url: 'https://reused.example' });
+    (broker as any).handleBrowserEvent({ event: 'tab_created', data: { tabId: 202, windowId: 21 } });
+    (broker as any).registry.claimTab((alphaSocket as any).welcome.sessionId, 202);
+    const fresh = alpha.call('snapshot', { tabId: 202 });
+
+    await expect(first).rejects.toMatchObject({ code: ErrorCode.TAB_CLOSED });
+    await waitUntil(() => commands.some(command => command.command === 'execute_script'));
+    const wronglyForwarded = commands.find(command => command.command === 'execute_script');
+    if (wronglyForwarded) {
+      extension.send(JSON.stringify({ id: wronglyForwarded.id, type: 'response', success: true, result: { stale: true } }));
+    }
+    await staleRejection;
+    expect(wronglyForwarded).toBeUndefined();
+
+    await waitUntil(() => commands.some(command => command.command === 'snapshot'));
+    const freshCommand = commands.find(command => command.command === 'snapshot')!;
+    extension.send(JSON.stringify({ id: freshCommand.id, type: 'response', success: true, result: { fresh: true } }));
+    await expect(fresh).resolves.toEqual({ fresh: true });
   });
 
   it('serializes commands on one tab while allowing different tabs to overlap', async () => {

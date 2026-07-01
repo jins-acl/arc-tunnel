@@ -3846,6 +3846,7 @@ var BrokerServer = class {
     this.ownershipTimers = /* @__PURE__ */ new Map();
     this.tabCreationTails = /* @__PURE__ */ new Map();
     this.closedTabIds = /* @__PURE__ */ new Set();
+    this.tabGenerations = /* @__PURE__ */ new Map();
     this.httpServer = null;
     this.extension = null;
     this.listeningPort = null;
@@ -4032,7 +4033,11 @@ var BrokerServer = class {
     const tabId = request.params.tabId;
     if (typeof tabId === "number") {
       this.registry.assertOwnsTab(sessionId, tabId);
+      const generation = this.tabGeneration(tabId);
       return this.scheduler.run(tabId, () => {
+        if (this.tabGeneration(tabId) !== generation) {
+          throw new ArcTunnelError("TAB_CLOSED" /* TAB_CLOSED */, "TAB_CLOSED" /* TAB_CLOSED */);
+        }
         if (this.closedTabIds.has(tabId)) {
           throw new ArcTunnelError("TAB_CLOSED" /* TAB_CLOSED */, "TAB_CLOSED" /* TAB_CLOSED */);
         }
@@ -4159,11 +4164,13 @@ var BrokerServer = class {
     if (typeof tabId === "number") {
       this.registry.releaseTab(tabId);
       this.closedTabIds.add(tabId);
+      this.advanceTabGeneration(tabId);
       removedTabIds.add(tabId);
     }
     if (event.event === "window_removed" && typeof windowId === "number") {
       for (const id of this.registry.releaseWindow(windowId)) {
         this.closedTabIds.add(id);
+        this.advanceTabGeneration(id);
         removedTabIds.add(id);
       }
     }
@@ -4175,6 +4182,12 @@ var BrokerServer = class {
       this.routes.delete(id);
       route.reject(new ArcTunnelError("TAB_CLOSED" /* TAB_CLOSED */, "TAB_CLOSED" /* TAB_CLOSED */));
     }
+  }
+  tabGeneration(tabId) {
+    return this.tabGenerations.get(tabId) ?? 0;
+  }
+  advanceTabGeneration(tabId) {
+    this.tabGenerations.set(tabId, this.tabGeneration(tabId) + 1);
   }
   handleAgentDisconnect(sessionId) {
     this.agents.delete(sessionId);
