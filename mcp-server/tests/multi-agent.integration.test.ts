@@ -30,6 +30,15 @@ async function waitForHealth(port: number): Promise<{ pid: number }> {
   throw new Error('Broker health timeout');
 }
 
+async function waitForTransportPid(transport: StdioClientTransport): Promise<number> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if (transport.pid) return transport.pid;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  throw new Error('stdio MCP child PID was not published');
+}
+
 async function call(client: Client, name: string, args: Record<string, unknown> = {}): Promise<any> {
   const result = await client.callTool({ name, arguments: args });
   const content = ('content' in result && Array.isArray(result.content)) ? result.content : [];
@@ -86,15 +95,19 @@ describe('built multi-process broker', () => {
         if (transport.pid) clientPids.push(transport.pid);
       }
       const failedTransport = new StdioClientTransport({ command: process.execPath,
-        args: ['-e', 'setInterval(()=>{},1000)'], cwd: root, env: { ...process.env } as Record<string, string>, stderr: 'pipe' });
+        args: [path.join(root, 'tests/fixtures/invalid-mcp-server.js')], cwd: root,
+        env: { ...process.env } as Record<string, string>, stderr: 'pipe' });
+      const failedClient = new Client({ name: 'incompatible-peer', version: '1.0.0' });
       transports.push(failedTransport);
-      await failedTransport.start();
-      expect(failedTransport.pid).not.toBeNull();
-      if (failedTransport.pid) {
-        clientPids.push(failedTransport.pid);
-        expect(isProcessRunning(failedTransport.pid)).toBe(true);
-      }
-      await expect(Promise.reject(new Error('injected MCP handshake failure'))).rejects.toThrow('injected MCP handshake failure');
+      clients.push(failedClient);
+      // Keep the SDK's fire-and-forget rejection cleanup from hiding whether our
+      // outer lifecycle tracker closes the transport after a failed handshake.
+      failedClient.close = async () => undefined;
+      const failedConnect = failedClient.connect(failedTransport);
+      const failedPid = await waitForTransportPid(failedTransport);
+      clientPids.push(failedPid);
+      expect(isProcessRunning(failedPid)).toBe(true);
+      await expect(failedConnect).rejects.toThrow(/protocol version is not supported/);
       const [alpha, beta] = clients;
       expect((await alpha.listTools()).tools).toContainEqual(expect.objectContaining({ name: 'claim_tab' }));
       expect((await beta.listTools()).tools).toContainEqual(expect.objectContaining({ name: 'release_tab' }));
