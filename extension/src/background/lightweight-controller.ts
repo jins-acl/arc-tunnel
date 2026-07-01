@@ -25,7 +25,10 @@ export class LightweightController {
       args: [script]
     });
 
-    return results[0]?.result;
+    const injection = results[0] as (chrome.scripting.InjectionResult & { error?: string }) | undefined;
+    if (!injection) throw new Error('Lightweight script injection returned no result entry');
+    if (injection.error) throw new Error(`Lightweight script injection failed: ${injection.error}`);
+    return injection.result;
   }
 
   async getContent(tabId: number, mode: string): Promise<any> {
