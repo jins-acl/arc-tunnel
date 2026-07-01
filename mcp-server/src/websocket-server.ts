@@ -85,22 +85,27 @@ export class WebSocketServer extends EventEmitter {
   }
 
   async stop(): Promise<void> {
-    return new Promise((resolve) => {
-      if (this.extensionConnection) {
-        this.extensionConnection.close();
-        this.extensionConnection = null;
-      }
+    const connection = this.extensionConnection;
+    const connectionClosed = connection && connection.readyState !== WebSocket.CLOSED
+      ? new Promise<void>((resolve) => connection.once('close', resolve))
+      : Promise.resolve();
 
-      if (this.wss) {
-        this.wss.close(() => {
-          console.log('WebSocket server stopped');
-          this.wss = null;
-          resolve();
-        });
-      } else {
-        resolve();
-      }
-    });
+    if (connection) {
+      connection.close();
+    }
+
+    const server = this.wss;
+    const serverClosed = server
+      ? new Promise<void>((resolve) => {
+          server.close(() => {
+            console.log('WebSocket server stopped');
+            this.wss = null;
+            resolve();
+          });
+        })
+      : Promise.resolve();
+
+    await Promise.all([connectionClosed, serverClosed]);
   }
 
   isRunning(): boolean {

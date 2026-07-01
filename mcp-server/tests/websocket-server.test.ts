@@ -34,4 +34,22 @@ describe('WebSocketServer', () => {
       });
     });
   });
+
+  it('should finish active connection teardown before stop resolves', async () => {
+    server = new WebSocketServer(8770);
+    await server.start();
+
+    const client = new WebSocket('ws://localhost:8770');
+    await new Promise<void>((resolve) => client.once('open', resolve));
+
+    let disconnected = false;
+    server.once('disconnect', () => {
+      disconnected = true;
+    });
+
+    await server.stop();
+
+    expect(disconnected).toBe(true);
+    expect(server.isConnected()).toBe(false);
+  });
 });
