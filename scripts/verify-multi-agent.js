@@ -19,7 +19,7 @@ function textResult(result) {
   return value;
 }
 
-async function connect(name) {
+async function connect(name, peers) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [path.join(root, 'mcp-server/dist/mcp-server.js')],
@@ -29,8 +29,10 @@ async function connect(name) {
   });
   transport.stderr.on('data', chunk => process.stderr.write(`[${name}] ${chunk}`));
   const client = new Client({ name: `arc-tunnel-verify-${name}`, version: '1.0.0' });
+  const peer = { client, transport };
+  peers.push(peer);
   await client.connect(transport);
-  return { client, transport };
+  return peer;
 }
 
 async function call(peer, name, arguments_ = {}) {
@@ -43,9 +45,11 @@ async function main() {
   const peers = [];
   let alpha;
   let beta;
+  let failure;
+  const cleanupErrors = [];
   try {
-    alpha = await connect('alpha'); peers.push(alpha);
-    beta = await connect('beta'); peers.push(beta);
+    alpha = await connect('alpha', peers);
+    beta = await connect('beta', peers);
     let created;
     try {
       created = await Promise.all([
@@ -62,17 +66,23 @@ async function main() {
     if (alphaTab.tabId === betaTab.tabId || alphaTab.windowId === betaTab.windowId) throw new Error('Agents did not receive distinct tabs/windows');
     console.log(`PASS distinct workspaces: alpha window=${alphaTab.windowId} tab=${alphaTab.tabId}; beta window=${betaTab.windowId} tab=${betaTab.tabId}`);
 
-    await Promise.all([
-      call(alpha, 'navigate', { tabId: alphaTab.tabId, url: 'https://example.com/?arc-agent=alpha' }),
-      call(beta, 'navigate', { tabId: betaTab.tabId, url: 'https://example.org/?arc-agent=beta' })
+    const alphaTarget = 'https://example.com/?arc-agent=alpha';
+    const betaTarget = 'https://example.org/?arc-agent=beta';
+    const navigations = await Promise.all([
+      call(alpha, 'navigate', { tabId: alphaTab.tabId, action: 'goto', url: alphaTarget }),
+      call(beta, 'navigate', { tabId: betaTab.tabId, action: 'goto', url: betaTarget })
     ]);
-    console.log('PASS concurrent navigation completed without response crossover');
-    const [alphaVisible, betaVisible] = await Promise.all([call(alpha, 'list_tabs'), call(beta, 'list_tabs')]);
-    if (alphaVisible.tabs.some(tab => tab.tabId === betaTab.tabId)
-      || betaVisible.tabs.some(tab => tab.tabId === alphaTab.tabId)) {
-      throw new Error('Visibility leaked a foreign-owned tab');
+    if (navigations[0]?.status !== 'navigated' || navigations[1]?.status !== 'navigated') {
+      throw new Error(`Unexpected navigation results: ${JSON.stringify(navigations)}`);
     }
-    console.log(`PASS visibility alpha=${alphaVisible.tabs.length} beta=${betaVisible.tabs.length} (owned + unclaimed only)`);
+    const locations = await Promise.all([
+      call(alpha, 'execute_script', { tabId: alphaTab.tabId, script: 'location.href' }),
+      call(beta, 'execute_script', { tabId: betaTab.tabId, script: 'location.href' })
+    ]);
+    if (locations[0]?.result !== alphaTarget || locations[1]?.result !== betaTarget) {
+      throw new Error(`Navigation crossover or wrong URL: ${JSON.stringify(locations)}`);
+    }
+    console.log(`PASS concurrent navigation verified alpha=${locations[0].result} beta=${locations[1].result}`);
 
     let manualTab = Number(valueAfter('--manual-tab'));
     if (!Number.isSafeInteger(manualTab)) {
@@ -81,7 +91,23 @@ async function main() {
       input.close(); manualTab = Number(answer.trim());
     }
     if (!Number.isSafeInteger(manualTab)) throw new Error('Manual step incomplete: rerun with --manual-tab <tabId> or enter a numeric tab ID.');
-    await call(alpha, 'claim_tab', { tabId: manualTab });
+    const [alphaVisible, betaVisible] = await Promise.all([call(alpha, 'list_tabs'), call(beta, 'list_tabs')]);
+    if (alphaVisible.tabs.some(tab => tab.tabId === betaTab.tabId)
+      || betaVisible.tabs.some(tab => tab.tabId === alphaTab.tabId)) {
+      throw new Error('Visibility leaked a foreign-owned tab');
+    }
+    if (alphaVisible.tabs.find(tab => tab.tabId === alphaTab.tabId)?.ownership !== 'owned'
+      || betaVisible.tabs.find(tab => tab.tabId === betaTab.tabId)?.ownership !== 'owned'
+      || alphaVisible.tabs.find(tab => tab.tabId === manualTab)?.ownership !== 'unclaimed'
+      || betaVisible.tabs.find(tab => tab.tabId === manualTab)?.ownership !== 'unclaimed') {
+      throw new Error('Owned/unclaimed visibility did not match the expected pre-claim state');
+    }
+    console.log(`PASS visibility alpha=${alphaVisible.tabs.length} beta=${betaVisible.tabs.length} (owned + unclaimed only)`);
+    const alphaClaim = await call(alpha, 'claim_tab', { tabId: manualTab });
+    if (alphaClaim?.tabId !== manualTab || alphaClaim?.ownership !== 'owned') throw new Error('Agent A claim result was invalid');
+    const [alphaAfterClaim, betaAfterClaim] = await Promise.all([call(alpha, 'list_tabs'), call(beta, 'list_tabs')]);
+    if (alphaAfterClaim.tabs.find(tab => tab.tabId === manualTab)?.ownership !== 'owned'
+      || betaAfterClaim.tabs.some(tab => tab.tabId === manualTab)) throw new Error('Post-claim ownership visibility is invalid');
     console.log(`PASS Agent A claimed manual tab ${manualTab}`);
     try {
       await call(beta, 'snapshot', { tabId: manualTab });
@@ -91,17 +117,41 @@ async function main() {
     }
     console.log('PASS Agent B received TAB_NOT_OWNED');
 
+    const alphaRelease = await call(alpha, 'release_tab', { tabId: alphaTab.tabId });
+    if (alphaRelease?.tabId !== alphaTab.tabId || alphaRelease?.ownership !== 'unclaimed') throw new Error('Release result was invalid');
+    const releasedAlphaTab = await call(beta, 'list_tabs');
+    if (releasedAlphaTab.tabs.find(tab => tab.tabId === alphaTab.tabId)?.ownership !== 'unclaimed') {
+      throw new Error('Released tab was not visible as unclaimed');
+    }
+    const alphaReclaim = await call(alpha, 'claim_tab', { tabId: alphaTab.tabId });
+    if (alphaReclaim?.tabId !== alphaTab.tabId || alphaReclaim?.ownership !== 'owned') throw new Error('Reclaim result was invalid');
+    const reclaimedAlphaTab = await call(alpha, 'list_tabs');
+    if (reclaimedAlphaTab.tabs.find(tab => tab.tabId === alphaTab.tabId)?.ownership !== 'owned') {
+      throw new Error('Reclaimed tab was not visible as owned');
+    }
+    console.log(`PASS release/reclaim result and ownership for tab ${alphaTab.tabId}`);
+
     await alpha.client.close(); await alpha.transport.close(); peers.splice(peers.indexOf(alpha), 1);
     console.log(`Agent A disconnected; waiting ${Math.ceil(waitMs / 1000)} seconds for ownership release...`);
     await new Promise(resolve => setTimeout(resolve, waitMs));
-    await call(beta, 'claim_tab', { tabId: manualTab });
+    const released = await call(beta, 'list_tabs');
+    if (released.tabs.find(tab => tab.tabId === manualTab)?.ownership !== 'unclaimed') throw new Error('Disconnected ownership was not released');
+    const betaClaim = await call(beta, 'claim_tab', { tabId: manualTab });
+    if (betaClaim?.tabId !== manualTab || betaClaim?.ownership !== 'owned') throw new Error('Agent B reclaim result was invalid');
+    const betaOwned = await call(beta, 'list_tabs');
+    if (betaOwned.tabs.find(tab => tab.tabId === manualTab)?.ownership !== 'owned') throw new Error('Agent B ownership was not visible after reclaim');
     console.log(`PASS Agent B claimed released tab ${manualTab}; browser pages remain open`);
+  } catch (error) {
+    failure = error;
   } finally {
     await Promise.all(peers.map(async peer => {
-      await peer.client.close().catch(() => undefined);
-      await peer.transport.close().catch(() => undefined);
+      await peer.client.close().catch(error => cleanupErrors.push(error));
+      await peer.transport.close().catch(error => cleanupErrors.push(error));
     }));
   }
+  if (failure && cleanupErrors.length) throw Object.assign(new Error(`${failure.message}; cleanup also failed`), { cause: failure, cleanupErrors });
+  if (failure) throw failure;
+  if (cleanupErrors.length) throw Object.assign(new Error('Client cleanup failed'), { cleanupErrors });
 }
 
 main().catch(error => { console.error(`FAIL: ${error.message}`); process.exitCode = 1; });

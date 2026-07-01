@@ -5,6 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import WebSocket from 'ws';
 import { PROTOCOL_VERSION } from '../src/protocol';
+import { isProcessRunning, stopChild } from './helpers/process-lifecycle';
 
 jest.setTimeout(30_000);
 const root = path.resolve(__dirname, '..');
@@ -29,11 +30,6 @@ async function waitForHealth(port: number): Promise<{ pid: number }> {
   throw new Error('Broker health timeout');
 }
 
-function waitForExit(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  return new Promise(resolve => child.once('exit', () => resolve()));
-}
-
 async function call(client: Client, name: string, args: Record<string, unknown> = {}): Promise<any> {
   const result = await client.callTool({ name, arguments: args });
   const content = ('content' in result && Array.isArray(result.content)) ? result.content : [];
@@ -55,7 +51,10 @@ describe('built multi-process broker', () => {
     const transports: StdioClientTransport[] = [];
     const clients: Client[] = [];
     const clientPids: number[] = [];
+    let bodyError: unknown;
+    const cleanupErrors: Error[] = [];
     try {
+      try {
       const pidBefore = (await waitForHealth(port)).pid;
       expect(pidBefore).toBe(broker.pid);
       extension = new WebSocket(`ws://127.0.0.1:${port}/extension`, { origin: 'chrome-extension://integration-test' });
@@ -82,10 +81,20 @@ describe('built multi-process broker', () => {
           env: { ...process.env, WS_PORT: String(port) } as Record<string, string>, stderr: 'pipe' });
         transport.stderr?.on('data', chunk => errors.push(chunk.toString()));
         const client = new Client({ name, version: '1.0.0' });
+        transports.push(transport); clients.push(client);
         await client.connect(transport);
         if (transport.pid) clientPids.push(transport.pid);
-        transports.push(transport); clients.push(client);
       }
+      const failedTransport = new StdioClientTransport({ command: process.execPath,
+        args: ['-e', 'setInterval(()=>{},1000)'], cwd: root, env: { ...process.env } as Record<string, string>, stderr: 'pipe' });
+      transports.push(failedTransport);
+      await failedTransport.start();
+      expect(failedTransport.pid).not.toBeNull();
+      if (failedTransport.pid) {
+        clientPids.push(failedTransport.pid);
+        expect(isProcessRunning(failedTransport.pid)).toBe(true);
+      }
+      await expect(Promise.reject(new Error('injected MCP handshake failure'))).rejects.toThrow('injected MCP handshake failure');
       const [alpha, beta] = clients;
       expect((await alpha.listTools()).tools).toContainEqual(expect.objectContaining({ name: 'claim_tab' }));
       expect((await beta.listTools()).tools).toContainEqual(expect.objectContaining({ name: 'release_tab' }));
@@ -112,13 +121,25 @@ describe('built multi-process broker', () => {
         .rejects.toMatchObject({ code: 'TAB_NOT_OWNED' });
       await expect(call(alpha, 'release_tab', { tabId: alphaTab.tabId })).resolves.toMatchObject({ ownership: 'unclaimed' });
       await expect(call(beta, 'claim_tab', { tabId: alphaTab.tabId })).resolves.toMatchObject({ ownership: 'owned' });
+      } catch (error) {
+        bodyError = error;
+      }
     } finally {
-      await Promise.all(clients.map(client => client.close().catch(() => undefined)));
-      await Promise.all(transports.map(transport => transport.close().catch(() => undefined)));
-      extension?.close(); broker.kill('SIGTERM'); await waitForExit(broker);
+      await Promise.all(clients.map(client => client.close().catch(error => cleanupErrors.push(error))));
+      await Promise.all(transports.map(transport => transport.close().catch(error => cleanupErrors.push(error))));
+      extension?.close();
+      const brokerOutcome = await stopChild(broker);
+      if (!brokerOutcome.exited) cleanupErrors.push(new Error(`Broker ${broker.pid} did not exit after escalation`));
+      if (!(broker.exitCode !== null || broker.signalCode !== null)) cleanupErrors.push(new Error('Broker has no exit status'));
+      for (const pid of clientPids) {
+        if (isProcessRunning(pid)) cleanupErrors.push(new Error(`MCP child ${pid} is still running`));
+      }
+      if (/EADDRINUSE|EPIPE/.test(errors.join(''))) cleanupErrors.push(new Error(`Process stderr: ${errors.join('')}`));
     }
-    expect(broker.exitCode !== null || broker.signalCode !== null).toBe(true);
-    for (const pid of clientPids) expect(() => process.kill(pid, 0)).toThrow();
-    expect(errors.join('')).not.toMatch(/EADDRINUSE|EPIPE/);
+    if (bodyError && cleanupErrors.length) {
+      throw Object.assign(new Error('Test body and cleanup failed'), { errors: [bodyError, ...cleanupErrors] });
+    }
+    if (bodyError) throw bodyError;
+    if (cleanupErrors.length) throw Object.assign(new Error('Process cleanup failed'), { errors: cleanupErrors });
   });
 });
