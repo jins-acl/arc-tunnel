@@ -6,7 +6,8 @@
   "scripts": {
     "build": "node esbuild.config.js",
     "dev": "node esbuild.config.js && node dist/mcp-server.js",
-    "test": "jest"
+    "test": "jest",
+    "test:integration": "jest --runInBand tests/multi-agent.integration.test.ts"
   },
   "keywords": [],
   "author": "",
