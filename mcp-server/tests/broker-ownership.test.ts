@@ -447,4 +447,82 @@ describe('Broker ownership', () => {
     await expect(alpha.call('replay_recording', { recordingId: 'leaked', tabId: 101 }))
       .rejects.toMatchObject({ code: ErrorCode.RECORDING_NOT_FOUND });
   });
+
+  it('rejects malformed successful recording results and releases the reservation', async () => {
+    await alpha.call('claim_tab', { tabId: 101 });
+    await beta.call('claim_tab', { tabId: 202 });
+    (extension as any).manualResponses = true;
+    const malformed = alpha.call('start_recording', { tabId: 101 });
+    await waitUntil(() => commands.some(command => command.command === 'start_recording'));
+    let starts = commands.filter(command => command.command === 'start_recording');
+    extension.send(JSON.stringify({ id: starts[starts.length - 1].id, type: 'response', success: true, result: {} }));
+    await expect(malformed).rejects.toBeDefined();
+    await expect(alpha.call('replay_recording', { recordingId: 'missing', tabId: 101 }))
+      .rejects.toMatchObject({ code: ErrorCode.RECORDING_NOT_FOUND });
+
+    const valid = beta.call('start_recording', { tabId: 202 });
+    await waitUntil(() => commands.filter(command => command.command === 'start_recording').length === 2);
+    starts = commands.filter(command => command.command === 'start_recording');
+    extension.send(JSON.stringify({ id: starts[1].id, type: 'response', success: true,
+      result: { recordingId: 'valid-later' } }));
+    await expect(valid).resolves.toEqual({ recordingId: 'valid-later' });
+  });
+
+  it('rejects malformed successful save results without registering a session', async () => {
+    (extension as any).manualResponses = true;
+    const malformed = alpha.call('save_session', { name: 'bad' });
+    await waitUntil(() => commands.some(command => command.command === 'save_session'));
+    const save = commands.find(command => command.command === 'save_session')!;
+    extension.send(JSON.stringify({ id: save.id, type: 'response', success: true, result: { sessionId: 42 } }));
+    await expect(malformed).rejects.toBeDefined();
+    await expect(alpha.call('restore_session', { sessionId: '42' }))
+      .rejects.toMatchObject({ code: ErrorCode.SESSION_NOT_FOUND });
+  });
+
+  it('keeps recording ownership after failed stop until the owner successfully retries', async () => {
+    await alpha.call('claim_tab', { tabId: 101 });
+    await beta.call('claim_tab', { tabId: 202 });
+    await alpha.call('start_recording', { tabId: 101 });
+    (extension as any).manualResponses = true;
+    const failedStop = alpha.call('stop_recording');
+    await waitUntil(() => commands.some(command => command.command === 'stop_recording'));
+    let stops = commands.filter(command => command.command === 'stop_recording');
+    extension.send(JSON.stringify({ id: stops[stops.length - 1].id, type: 'response', success: false,
+      error: { code: 'EXECUTION_ERROR', message: 'failed stop' } }));
+    await expect(failedStop).rejects.toMatchObject({ code: 'EXECUTION_ERROR' });
+    await expect(beta.call('start_recording', { tabId: 202 }))
+      .rejects.toMatchObject({ code: ErrorCode.RECORDING_BUSY });
+
+    const successfulStop = alpha.call('stop_recording');
+    await waitUntil(() => commands.filter(command => command.command === 'stop_recording').length === 2);
+    stops = commands.filter(command => command.command === 'stop_recording');
+    extension.send(JSON.stringify({ id: stops[1].id, type: 'response', success: true, result: { recording: {} } }));
+    await successfulStop;
+    const next = beta.call('start_recording', { tabId: 202 });
+    await waitUntil(() => commands.filter(command => command.command === 'start_recording').length === 2);
+    const starts = commands.filter(command => command.command === 'start_recording');
+    extension.send(JSON.stringify({ id: starts[1].id, type: 'response', success: true,
+      result: { recordingId: 'after-stop' } }));
+    await expect(next).resolves.toEqual({ recordingId: 'after-stop' });
+  });
+
+  it('preserves create_tab intent when it races a restore-first lazy window', async () => {
+    const { sessionId } = await alpha.call('save_session', { name: 'alpha' });
+    (extension as any).manualResponses = true;
+    const restore = alpha.call('restore_session', { sessionId });
+    await waitUntil(() => commands.some(command => command.command === 'create_window'));
+    const createdWindow = commands.find(command => command.command === 'create_window')!;
+    const create = alpha.call('create_tab', { url: 'https://must-create.example' });
+    extension.send(JSON.stringify({ id: createdWindow.id, type: 'response', success: true,
+      result: { windowId: 88, tabId: 880 } }));
+    await waitUntil(() => commands.some(command => command.command === 'restore_session'));
+    const restoreCommand = commands.find(command => command.command === 'restore_session')!;
+    extension.send(JSON.stringify({ id: restoreCommand.id, type: 'response', success: true, result: { tabIds: [] } }));
+    await restore;
+    await waitUntil(() => commands.some(command => command.command === 'create_tab'));
+    const createCommand = commands.find(command => command.command === 'create_tab');
+    expect(createCommand?.params).toMatchObject({ windowId: 88, url: 'https://must-create.example' });
+    extension.send(JSON.stringify({ id: createCommand!.id, type: 'response', success: true, result: { tabId: 881 } }));
+    await expect(create).resolves.toEqual({ tabId: 881 });
+  });
 });

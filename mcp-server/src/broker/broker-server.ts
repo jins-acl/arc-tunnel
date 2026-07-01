@@ -37,6 +37,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isBrowserId(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
 function tabIdsFromResult(value: unknown, field: 'tabs' | 'tabIds' = 'tabs'): number[] {
   if (!isRecord(value) || !Array.isArray(value[field])) return [];
   return value[field].flatMap(item => {
@@ -46,7 +50,9 @@ function tabIdsFromResult(value: unknown, field: 'tabs' | 'tabIds' = 'tabs'): nu
 }
 
 function stringResultField(value: unknown, field: 'recordingId' | 'sessionId'): string | null {
-  return isRecord(value) && typeof value[field] === 'string' ? value[field] as string : null;
+  return isRecord(value) && typeof value[field] === 'string' && value[field].length > 0
+    ? value[field] as string
+    : null;
 }
 
 function isExtensionResponse(value: unknown): value is ResponseMessage {
@@ -61,9 +67,25 @@ function isExtensionResponse(value: unknown): value is ResponseMessage {
 
 function restoredTabIds(value: unknown): number[] | null {
   if (!isRecord(value) || !Array.isArray(value.tabIds)) return null;
-  return value.tabIds.every(id => typeof id === 'number' && Number.isSafeInteger(id) && id >= 0)
+  return value.tabIds.every(isBrowserId)
     ? value.tabIds as number[]
     : null;
+}
+
+function createdWindowTabIds(value: Record<string, unknown>): number[] | null {
+  const ids: number[] = [];
+  if (value.tabId !== undefined) {
+    if (!isBrowserId(value.tabId)) return null;
+    ids.push(value.tabId);
+  }
+  if (value.tabs !== undefined) {
+    if (!Array.isArray(value.tabs)) return null;
+    for (const tab of value.tabs) {
+      if (!isRecord(tab) || !isBrowserId(tab.tabId)) return null;
+      ids.push(tab.tabId);
+    }
+  }
+  return ids;
 }
 
 export interface BrokerAddress {
@@ -402,16 +424,22 @@ export class BrokerServer {
   }
 
   private async createOwnedTab(sessionId: string, request: AgentRequest): Promise<unknown> {
-    const windowId = this.registry.windowId(sessionId);
+    let windowId = this.registry.windowId(sessionId);
     if (windowId == null) {
-      return (await this.ensureOwnedWindow(sessionId, request, request.params)).result;
+      const joinedExistingInitialization = this.windowInitializations.has(sessionId);
+      const initialized = await this.ensureOwnedWindow(sessionId, request, request.params);
+      if (!joinedExistingInitialization) return initialized.result;
+      windowId = initialized.windowId;
     }
     const result = await this.sendExtensionCommand(sessionId, {
       ...request,
       params: { ...request.params, windowId }
-    }) as any;
-    if (typeof result?.tabId === 'number') this.registry.claimTab(sessionId, result.tabId);
-    if (typeof result?.tabId === 'number') this.closedTabIds.delete(result.tabId);
+    });
+    if (!isRecord(result) || !isBrowserId(result.tabId)) {
+      throw new ArcTunnelError(ErrorCode.TAB_NOT_FOUND, ErrorCode.TAB_NOT_FOUND);
+    }
+    this.registry.claimTab(sessionId, result.tabId);
+    this.closedTabIds.delete(result.tabId);
     return result;
   }
 
@@ -426,11 +454,11 @@ export class BrokerServer {
     if (pending) return pending;
     const initialization = this.sendExtensionCommand(sessionId, { ...request, command: 'create_window', params })
       .then(result => {
-        if (!isRecord(result) || typeof result.windowId !== 'number') {
+        if (!isRecord(result) || !isBrowserId(result.windowId)) {
           throw new ArcTunnelError(ErrorCode.SESSION_RESTORE_FAILED, ErrorCode.SESSION_RESTORE_FAILED);
         }
-        const tabIds = tabIdsFromResult(result);
-        if (typeof result.tabId === 'number') tabIds.push(result.tabId);
+        const tabIds = createdWindowTabIds(result);
+        if (tabIds === null) throw new ArcTunnelError(ErrorCode.SESSION_RESTORE_FAILED, ErrorCode.SESSION_RESTORE_FAILED);
         this.registry.assignWindow(sessionId, result.windowId, tabIds);
         for (const tabId of tabIds) this.closedTabIds.delete(tabId);
         return { windowId: result.windowId, result };
@@ -513,6 +541,14 @@ export class BrokerServer {
       const result = response.result;
       const recordingId = stringResultField(result, 'recordingId');
       const savedSessionId = stringResultField(result, 'sessionId');
+      if (route.command === 'start_recording' && recordingId === null) {
+        route.reject(new ArcTunnelError(ErrorCode.RECORDING_NOT_FOUND, ErrorCode.RECORDING_NOT_FOUND));
+        return;
+      }
+      if (route.command === 'save_session' && savedSessionId === null) {
+        route.reject(new ArcTunnelError(ErrorCode.SESSION_NOT_FOUND, ErrorCode.SESSION_NOT_FOUND));
+        return;
+      }
       if (route.command === 'start_recording' && recordingId) {
         this.registry.addRecording(route.sessionId, recordingId);
       }
