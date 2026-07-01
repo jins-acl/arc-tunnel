@@ -39,6 +39,32 @@ async function call(peer, name, arguments_ = {}) {
   return textResult(await peer.client.callTool({ name, arguments: arguments_ }));
 }
 
+function isTransientNavigationError(error) {
+  if (['TAB_NOT_OWNED', 'TAB_CLOSED', 'EXTENSION_DISCONNECTED', 'CONNECTION_LOST'].includes(error?.code)) return false;
+  return ['EXECUTION_ERROR', 'INTERNAL_ERROR'].includes(error?.code)
+    && /execution context|context.*destroy|navigation|frame.*detach|cannot access contents/i.test(error?.message || '');
+}
+
+async function waitForExpectedLocation(peer, tabId, expectedUrl, deadline = Date.now() + 15_000, pollInterval = 100) {
+  let observed = null;
+  let transientError = null;
+  while (Date.now() < deadline) {
+    try {
+      const response = await call(peer, 'execute_script', { tabId, script: 'location.href' });
+      observed = response?.result ?? null;
+      transientError = null;
+      if (observed === expectedUrl) return observed;
+    } catch (error) {
+      if (!isTransientNavigationError(error)) throw error;
+      transientError = error;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining > 0) await new Promise(resolve => setTimeout(resolve, Math.min(pollInterval, remaining)));
+  }
+  const last = transientError ? `${transientError.code}: ${transientError.message}` : JSON.stringify(observed);
+  throw new Error(`Timed out waiting for tab ${tabId} to reach ${expectedUrl}; last observed ${last}`);
+}
+
 async function main() {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`Invalid port: ${port}`);
   console.log(`Arc Tunnel multi-agent verification on ws://localhost:${port}`);
@@ -75,14 +101,15 @@ async function main() {
     if (navigations[0]?.status !== 'navigated' || navigations[1]?.status !== 'navigated') {
       throw new Error(`Unexpected navigation results: ${JSON.stringify(navigations)}`);
     }
+    const navigationDeadline = Date.now() + 15_000;
     const locations = await Promise.all([
-      call(alpha, 'execute_script', { tabId: alphaTab.tabId, script: 'location.href' }),
-      call(beta, 'execute_script', { tabId: betaTab.tabId, script: 'location.href' })
+      waitForExpectedLocation(alpha, alphaTab.tabId, alphaTarget, navigationDeadline),
+      waitForExpectedLocation(beta, betaTab.tabId, betaTarget, navigationDeadline)
     ]);
-    if (locations[0]?.result !== alphaTarget || locations[1]?.result !== betaTarget) {
+    if (locations[0] !== alphaTarget || locations[1] !== betaTarget) {
       throw new Error(`Navigation crossover or wrong URL: ${JSON.stringify(locations)}`);
     }
-    console.log(`PASS concurrent navigation verified alpha=${locations[0].result} beta=${locations[1].result}`);
+    console.log(`PASS concurrent navigation verified alpha=${locations[0]} beta=${locations[1]}`);
 
     let manualTab = Number(valueAfter('--manual-tab'));
     if (!Number.isSafeInteger(manualTab)) {
@@ -154,4 +181,8 @@ async function main() {
   if (cleanupErrors.length) throw Object.assign(new Error('Client cleanup failed'), { cleanupErrors });
 }
 
-main().catch(error => { console.error(`FAIL: ${error.message}`); process.exitCode = 1; });
+module.exports = { waitForExpectedLocation };
+
+if (require.main === module) {
+  main().catch(error => { console.error(`FAIL: ${error.message}`); process.exitCode = 1; });
+}
