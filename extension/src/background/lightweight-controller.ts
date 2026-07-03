@@ -61,7 +61,7 @@ export class LightweightController {
     }
     const keys = Reflect.ownKeys(envelope);
     const okDescriptor = Object.getOwnPropertyDescriptor(envelope, 'ok');
-    if (!okDescriptor || !('value' in okDescriptor) || typeof okDescriptor.value !== 'boolean') {
+    if (!okDescriptor || !Object.prototype.hasOwnProperty.call(okDescriptor, 'value') || typeof okDescriptor.value !== 'boolean') {
       throw new Error('Lightweight script injection returned a malformed result envelope');
     }
     if (okDescriptor.value) {
@@ -69,7 +69,7 @@ export class LightweightController {
         throw new Error('Lightweight script injection returned a malformed result envelope');
       }
       const valueDescriptor = Object.getOwnPropertyDescriptor(envelope, 'value');
-      if (keys.includes('value') && (!valueDescriptor || !('value' in valueDescriptor))) {
+      if (keys.includes('value') && (!valueDescriptor || !Object.prototype.hasOwnProperty.call(valueDescriptor, 'value'))) {
         throw new Error('Lightweight script injection returned a malformed result envelope');
       }
       return valueDescriptor?.value;
@@ -78,7 +78,7 @@ export class LightweightController {
       throw new Error('Lightweight script injection returned a malformed error envelope');
     }
     const errorDescriptor = Object.getOwnPropertyDescriptor(envelope, 'error');
-    if (!errorDescriptor || !('value' in errorDescriptor) || typeof errorDescriptor.value !== 'string') {
+    if (!errorDescriptor || !Object.prototype.hasOwnProperty.call(errorDescriptor, 'value') || typeof errorDescriptor.value !== 'string') {
       throw new Error('Lightweight script injection returned a malformed error envelope');
     }
     throw new Error(`Lightweight script evaluation failed: ${errorDescriptor.value || 'Script evaluation failed'}`);

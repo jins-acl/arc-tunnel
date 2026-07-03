@@ -153,3 +153,39 @@ test('executeScript accepts serialized undefined and null-prototype envelopes', 
     assert.equal(await new LightweightController().executeScript(7, 'null'), null);
   });
 });
+
+test('executeScript rejects accessor descriptors despite Object prototype value pollution', async () => {
+  const original = Object.getOwnPropertyDescriptor(Object.prototype, 'value');
+  try {
+    Object.defineProperty(Object.prototype, 'value', {
+      configurable: true,
+      writable: true,
+      value: true
+    });
+    const okAccessorDescriptor = Object.assign(Object.create(null), { enumerable: true, get: () => true });
+    const valueAccessorDescriptor = Object.assign(Object.create(null), { enumerable: true, get: () => 2 });
+    const accessorOk = Object.defineProperty({}, 'ok', okAccessorDescriptor);
+    const accessorValue = { ok: true };
+    Object.defineProperty(accessorValue, 'value', valueAccessorDescriptor);
+
+    for (const result of [accessorOk, accessorValue]) {
+      await withScriptingResult([{ frameId: 0, result }], async () => {
+        await assert.rejects(new LightweightController().executeScript(7, '1+1'), /malformed/i);
+      });
+    }
+
+    Object.prototype.value = 'failure';
+    const accessorError = { ok: false };
+    const errorAccessorDescriptor = Object.assign(Object.create(null), {
+      enumerable: true,
+      get: () => 'failure'
+    });
+    Object.defineProperty(accessorError, 'error', errorAccessorDescriptor);
+    await withScriptingResult([{ frameId: 0, result: accessorError }], async () => {
+      await assert.rejects(new LightweightController().executeScript(7, '1+1'), /malformed/i);
+    });
+  } finally {
+    if (original) Object.defineProperty(Object.prototype, 'value', original);
+    else delete Object.prototype.value;
+  }
+});
