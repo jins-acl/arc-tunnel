@@ -18,6 +18,7 @@ export class CommandHandler {
   private actionabilityChecker: ActionabilityChecker;
   private recordingDebuggerTabId: number | null = null;
   private recordingStartReserved = false;
+  private recordingLifecycle: Promise<void> = Promise.resolve();
 
   constructor(
     private tabManager: TabManager,
@@ -35,6 +36,15 @@ export class CommandHandler {
   }
 
   async handleCommand(command: CommandMessage): Promise<ResponseMessage> {
+    if (command.command === 'start_recording' || command.command === 'stop_recording') {
+      const response = this.recordingLifecycle.then(() => this.handleCommandNow(command));
+      this.recordingLifecycle = response.then(() => undefined, () => undefined);
+      return response;
+    }
+    return this.handleCommandNow(command);
+  }
+
+  private async handleCommandNow(command: CommandMessage): Promise<ResponseMessage> {
     try {
       const result = await this.executeCommand(command);
       return {

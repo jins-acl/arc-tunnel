@@ -91,3 +91,68 @@ test('CommandHandler synchronously reserves recording while start awaits', async
     assert.equal((await first).success, true);
   });
 });
+
+test('CommandHandler waits for an in-flight recording start before stopping', async () => {
+  let releaseStart;
+  let stopSettled = false;
+  const events = [];
+  const startGate = new Promise(resolve => { releaseStart = resolve; });
+  const recordingEngine = {
+    isCurrentlyRecording: () => false,
+    startRecording: async () => {
+      events.push('start-begin');
+      await startGate;
+      events.push('start-end');
+      return 'recording';
+    },
+    injectListeners: async () => { events.push('inject'); },
+    removeListeners: async () => { events.push('remove'); },
+    stopRecording: async () => { events.push('stop'); return { id: 'recording' }; }
+  };
+  const tabManager = {
+    holdDebuggerAttached() {},
+    ensureDebuggerAttached: async () => {},
+    releaseDebuggerAttached() {}
+  };
+
+  await withTestEnvironment({ chrome: { tabs: { query: async () => [{ id: 1 }] } } }, async () => {
+    const handler = new CommandHandler(tabManager, {}, recordingEngine, {}, {}, {}, {}, {});
+    const start = handler.handleCommand({ id: 'start', type: 'command', command: 'start_recording', params: { tabId: 1 } });
+    await new Promise(resolve => setImmediate(resolve));
+    const stop = handler.handleCommand({ id: 'stop', type: 'command', command: 'stop_recording', params: {} })
+      .finally(() => { stopSettled = true; });
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.equal(stopSettled, false);
+    assert.deepEqual(events, ['start-begin']);
+    releaseStart();
+    assert.equal((await start).success, true);
+    assert.equal((await stop).success, true);
+    assert.deepEqual(events, ['start-begin', 'start-end', 'inject', 'remove', 'stop']);
+  });
+});
+
+test('CommandHandler recording lifecycle queue continues after start rejection', async () => {
+  const events = [];
+  const recordingEngine = {
+    isCurrentlyRecording: () => false,
+    startRecording: async () => { events.push('start'); throw new Error('start failed'); },
+    removeListeners: async () => { events.push('remove'); },
+    stopRecording: async () => { events.push('stop'); return null; }
+  };
+  const tabManager = {
+    holdDebuggerAttached() {},
+    ensureDebuggerAttached: async () => {},
+    releaseDebuggerAttached() {}
+  };
+
+  await withTestEnvironment({ chrome: { tabs: { query: async () => [{ id: 1 }] } } }, async () => {
+    const handler = new CommandHandler(tabManager, {}, recordingEngine, {}, {}, {}, {}, {});
+    const start = handler.handleCommand({ id: 'start', type: 'command', command: 'start_recording', params: { tabId: 1 } });
+    const stop = handler.handleCommand({ id: 'stop', type: 'command', command: 'stop_recording', params: {} });
+
+    assert.equal((await start).success, false);
+    assert.equal((await stop).success, true);
+    assert.deepEqual(events, ['start', 'remove', 'stop']);
+  });
+});

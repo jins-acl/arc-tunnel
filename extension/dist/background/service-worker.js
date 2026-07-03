@@ -1453,11 +1453,20 @@ var init_command_handler = __esm({
         this.lightweightController = lightweightController;
         this.recordingDebuggerTabId = null;
         this.recordingStartReserved = false;
+        this.recordingLifecycle = Promise.resolve();
         this.snapshotEngine = new SnapshotEngine(debuggerController);
         this.inputSimulator = new InputSimulator(debuggerController);
         this.actionabilityChecker = new ActionabilityChecker(debuggerController);
       }
       async handleCommand(command) {
+        if (command.command === "start_recording" || command.command === "stop_recording") {
+          const response = this.recordingLifecycle.then(() => this.handleCommandNow(command));
+          this.recordingLifecycle = response.then(() => void 0, () => void 0);
+          return response;
+        }
+        return this.handleCommandNow(command);
+      }
+      async handleCommandNow(command) {
         try {
           const result = await this.executeCommand(command);
           return {
