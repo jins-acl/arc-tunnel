@@ -260,6 +260,38 @@ describe('BrokerServer', () => {
     expect(sync.command).toBe('list_tabs');
   });
 
+  it('cleans up an uncertain in-flight start before replacement inventory sync', async () => {
+    const registry = new SessionRegistry();
+    await broker.stop();
+    broker = new BrokerServer({ host: '127.0.0.1', port: 0 }, { registry });
+    await broker.start();
+    const port = broker.address().port;
+    const first = await connectRole(port, '/extension', 'extension');
+    const alpha = await connectRole(port, '/agent', 'agent');
+    sockets.push(first.ws, alpha.ws);
+    registry.claimTab(alpha.welcome.sessionId, 77);
+
+    const start = nextMessage(first.ws);
+    alpha.ws.send(JSON.stringify({ type: 'agent_request', requestId: 'start',
+      command: 'start_recording', params: { tabId: 77 }, timeout: 1_000 }));
+    await start;
+    await closeWs(alpha.ws);
+    await closeWs(first.ws);
+
+    const replacement = await openWs(port, '/extension', 'chrome-extension://test');
+    sockets.push(replacement);
+    const received: JsonMessage[] = [];
+    replacement.on('message', data => received.push(JSON.parse(data.toString())));
+    replacement.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    await waitUntil(() => received.length >= 2);
+
+    expect(received[1].command).toBe('stop_recording');
+    replacement.send(JSON.stringify({ id: received[1].id, type: 'response', success: false,
+      error: { code: 'EXECUTION_ERROR', message: 'No active recording' } }));
+    await waitUntil(() => received.length >= 3);
+    expect(received[2].command).toBe('list_tabs');
+  });
+
   it('returns COMMAND_TIMEOUT and ignores a response after its Agent disconnects', async () => {
     const port = broker.address().port;
     const extension = await connectRole(port, '/extension', 'extension');

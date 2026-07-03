@@ -4185,11 +4185,7 @@ var BrokerServer = class {
     } catch (error) {
       if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
       if (this.recordingCleanupSessionId === sessionId) {
-        if (toErrorInfo(error).code === "COMMAND_TIMEOUT" /* COMMAND_TIMEOUT */) {
-          void this.cleanupDisconnectedRecording(this.extension);
-        } else {
-          this.recordingCleanupSessionId = null;
-        }
+        void this.cleanupDisconnectedRecording(this.extension);
       }
       throw error;
     }
@@ -4377,6 +4373,9 @@ var BrokerServer = class {
     } else if (route.recordingCleanup && response.error?.message === "No active recording") {
       route.resolve(void 0);
     } else {
+      if (route.command === "start_recording" && this.recordingCleanupSessionId === route.sessionId) {
+        this.recordingCleanupSessionId = null;
+      }
       route.reject(new ArcTunnelError(response.error?.code, response.error?.message ?? "Extension command failed", response.error?.details));
     }
   }

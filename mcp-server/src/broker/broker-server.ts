@@ -374,11 +374,7 @@ export class BrokerServer {
     } catch (error) {
       if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
       if (this.recordingCleanupSessionId === sessionId) {
-        if (toErrorInfo(error).code === ErrorCode.COMMAND_TIMEOUT) {
-          void this.cleanupDisconnectedRecording(this.extension);
-        } else {
-          this.recordingCleanupSessionId = null;
-        }
+        void this.cleanupDisconnectedRecording(this.extension);
       }
       throw error;
     }
@@ -587,6 +583,9 @@ export class BrokerServer {
     else if (route.recordingCleanup && response.error?.message === 'No active recording') {
       route.resolve(undefined);
     } else {
+      if (route.command === 'start_recording' && this.recordingCleanupSessionId === route.sessionId) {
+        this.recordingCleanupSessionId = null;
+      }
       route.reject(new ArcTunnelError(response.error?.code as ErrorCode, response.error?.message ?? 'Extension command failed', response.error?.details));
     }
   }
