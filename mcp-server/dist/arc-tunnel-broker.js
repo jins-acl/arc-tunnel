@@ -3839,6 +3839,14 @@ var SessionRegistry = class {
     session.connected = false;
     session.disconnectedAt = now;
   }
+  assertConnected(sessionId) {
+    if (!this.requireSession(sessionId).connected) {
+      throw new ArcTunnelError("EXTENSION_DISCONNECTED" /* EXTENSION_DISCONNECTED */, "EXTENSION_DISCONNECTED" /* EXTENSION_DISCONNECTED */);
+    }
+  }
+  activeRecordingId(sessionId) {
+    return this.requireSession(sessionId).activeRecordingId;
+  }
   expireDisconnected(now) {
     const expired = [];
     for (const session of this.sessions.values()) {
@@ -3950,6 +3958,7 @@ var BrokerServer = class {
     this.extensionSync = Promise.resolve();
     this.hasActivatedExtension = false;
     this.recordingReservationSessionId = null;
+    this.recordingCleanupSessionId = null;
     this.handleAgentConnection = (ws) => {
       this.awaitHello(ws, "agent", (hello) => {
         if (hello.role !== "agent") return false;
@@ -4094,9 +4103,9 @@ var BrokerServer = class {
     }
     this.extension = ws;
     if (sendWelcome) this.send(ws, { type: "welcome", protocolVersion: PROTOCOL_VERSION });
-    ws.on("message", (data) => this.handleExtensionMessage(data));
+    ws.on("message", (data) => this.handleExtensionMessage(ws, data));
     if (this.hasActivatedExtension) {
-      this.extensionSync = new Promise((resolve) => setImmediate(resolve)).then(() => this.syncExtensionInventory(ws)).catch((error) => {
+      this.extensionSync = new Promise((resolve) => setImmediate(resolve)).then(() => this.cleanupDisconnectedRecording(ws)).then(() => this.syncExtensionInventory(ws)).catch((error) => {
         if (this.extension === ws) throw error;
       });
     } else {
@@ -4125,6 +4134,7 @@ var BrokerServer = class {
     }
     try {
       await this.extensionSync;
+      this.registry.assertConnected(sessionId);
       const result = await this.executeRequest(sessionId, request);
       this.replySuccess(sessionId, request.requestId, result);
     } catch (error) {
@@ -4152,6 +4162,7 @@ var BrokerServer = class {
       this.registry.assertOwnsTab(sessionId, tabId);
       const generation = this.tabGeneration(tabId);
       return this.scheduler.run(tabId, () => {
+        this.registry.assertConnected(sessionId);
         if (this.tabGeneration(tabId) !== generation) {
           throw new ArcTunnelError("TAB_CLOSED" /* TAB_CLOSED */, "TAB_CLOSED" /* TAB_CLOSED */);
         }
@@ -4182,6 +4193,7 @@ var BrokerServer = class {
     this.registry.assertOwnsTab(sessionId, tabId);
     const generation = this.tabGeneration(tabId);
     return this.scheduler.run(tabId, () => {
+      this.registry.assertConnected(sessionId);
       if (this.tabGeneration(tabId) !== generation || this.closedTabIds.has(tabId)) {
         throw new ArcTunnelError("TAB_CLOSED" /* TAB_CLOSED */, "TAB_CLOSED" /* TAB_CLOSED */);
       }
@@ -4224,6 +4236,7 @@ var BrokerServer = class {
     return { tabId, ownership: "unclaimed" };
   }
   async createOwnedTab(sessionId, request) {
+    this.registry.assertConnected(sessionId);
     let windowId = this.registry.windowId(sessionId);
     if (windowId == null) {
       const joinedExistingInitialization = this.windowInitializations.has(sessionId);
@@ -4308,7 +4321,8 @@ var BrokerServer = class {
       });
     });
   }
-  handleExtensionMessage(data) {
+  handleExtensionMessage(ws, data) {
+    if (this.extension !== ws) return;
     let message;
     try {
       message = JSON.parse(data.toString());
@@ -4402,12 +4416,18 @@ var BrokerServer = class {
   }
   handleAgentDisconnect(sessionId) {
     this.agents.delete(sessionId);
-    if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
+    const hasActiveRecording = this.registry.activeRecordingId(sessionId) !== null;
     for (const [id, route] of this.routes) {
       if (route.sessionId !== sessionId) continue;
       clearTimeout(route.timer);
       this.routes.delete(id);
       route.reject(new ArcTunnelError("EXTENSION_DISCONNECTED" /* EXTENSION_DISCONNECTED */, "EXTENSION_DISCONNECTED" /* EXTENSION_DISCONNECTED */));
+    }
+    if (hasActiveRecording) {
+      this.recordingCleanupSessionId = sessionId;
+      void this.cleanupDisconnectedRecording(this.extension);
+    } else if (this.recordingReservationSessionId === sessionId) {
+      this.recordingReservationSessionId = null;
     }
     if (this.stopping) return;
     this.registry.disconnect(sessionId, Date.now());
@@ -4416,6 +4436,25 @@ var BrokerServer = class {
       this.registry.expireDisconnected(Date.now());
     }, 3e4);
     this.ownershipTimers.set(sessionId, timer);
+  }
+  async cleanupDisconnectedRecording(ws) {
+    const sessionId = this.recordingCleanupSessionId;
+    if (!sessionId || !ws || this.extension !== ws || ws.readyState !== wrapper_default.OPEN) return;
+    try {
+      await this.sendExtensionCommand(sessionId, {
+        type: "agent_request",
+        requestId: "disconnect-recording-cleanup",
+        command: "stop_recording",
+        params: {},
+        timeout: 1e3
+      });
+      if (this.recordingCleanupSessionId === sessionId) this.recordingCleanupSessionId = null;
+    } catch {
+      if (this.extension === ws) ws.close(1012, "recording cleanup failed");
+    } finally {
+      this.registry.clearRecordings(sessionId);
+      if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
+    }
   }
   rejectAllRoutes(code) {
     for (const route of this.routes.values()) {

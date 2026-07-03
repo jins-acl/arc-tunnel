@@ -172,6 +172,28 @@ describe('BrokerServer', () => {
     });
   });
 
+  it('ignores events and responses from a replaced extension socket', async () => {
+    const registry = new SessionRegistry();
+    await broker.stop();
+    broker = new BrokerServer({ host: '127.0.0.1', port: 0 }, { registry });
+    await broker.start();
+    const port = broker.address().port;
+    const first = await connectRole(port, '/extension', 'extension');
+    const firstServerSocket = (broker as any).extension as WebSocket;
+    const alpha = await connectRole(port, '/agent', 'agent');
+    sockets.push(first.ws, alpha.ws);
+    registry.claimTab(alpha.welcome.sessionId, 77);
+
+    const replacement = await connectRole(port, '/extension', 'extension');
+    sockets.push(replacement.ws);
+    const staleMessageHandler = firstServerSocket.listeners('message')[0] as (data: Buffer) => void;
+    staleMessageHandler(Buffer.from(JSON.stringify({
+      type: 'event', event: 'tab_removed', data: { tabId: 77 }, timestamp: Date.now()
+    })));
+
+    expect(() => registry.assertOwnsTab(alpha.welcome.sessionId, 77)).not.toThrow();
+  });
+
   it('returns COMMAND_TIMEOUT and ignores a response after its Agent disconnects', async () => {
     const port = broker.address().port;
     const extension = await connectRole(port, '/extension', 'extension');

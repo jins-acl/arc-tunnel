@@ -187,6 +187,25 @@ describe('Broker ownership', () => {
     expect(commands.slice(offset).filter(command => command.command === 'snapshot')).toHaveLength(0);
   });
 
+  it('does not forward queued work after its Agent disconnects', async () => {
+    await alpha.call('claim_tab', { tabId: 101 });
+    (extension as any).manualResponses = true;
+    const offset = commands.length;
+    void alpha.call('navigate', { tabId: 101, action: 'reload' });
+    void alpha.call('snapshot', { tabId: 101 });
+    await waitUntil(() => commands.length >= offset + 1);
+
+    await new Promise<void>(resolve => {
+      alphaSocket.once('close', () => resolve());
+      alphaSocket.close();
+    });
+    const first = commands.slice(offset).find(command => command.command === 'navigate')!;
+    extension.send(JSON.stringify({ id: first.id, type: 'response', success: true, result: { ok: true } }));
+    await new Promise(resolve => setImmediate(resolve));
+
+    expect(commands.slice(offset).filter(command => command.command === 'snapshot')).toHaveLength(0);
+  });
+
   it('rejects queued work with TAB_CLOSED after its tab is removed', async () => {
     await alpha.call('claim_tab', { tabId: 202 });
     (extension as any).manualResponses = true;
@@ -274,6 +293,23 @@ describe('Broker ownership', () => {
     const { sessionId } = await alpha.call('save_session', { name: 'alpha' });
     await expect(beta.call('restore_session', { sessionId }))
       .rejects.toMatchObject({ code: ErrorCode.SESSION_NOT_FOUND });
+  });
+
+  it('stops an active extension recording when its Agent disconnects', async () => {
+    await alpha.call('claim_tab', { tabId: 101 });
+    await beta.call('claim_tab', { tabId: 202 });
+    await alpha.call('start_recording', { tabId: 101 });
+    const offset = commands.length;
+
+    await new Promise<void>(resolve => {
+      alphaSocket.once('close', () => resolve());
+      alphaSocket.close();
+    });
+    await waitUntil(() => commands.slice(offset).some(command => command.command === 'stop_recording'));
+
+    expect(commands.slice(offset).filter(command => command.command === 'stop_recording')).toHaveLength(1);
+    await expect(beta.call('start_recording', { tabId: 202 }))
+      .resolves.toEqual({ recordingId: 'recording-alpha' });
   });
 
   it('scopes save and restore commands to the owning workspace', async () => {

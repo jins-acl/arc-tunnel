@@ -172,6 +172,16 @@ export class SessionRegistry {
     session.disconnectedAt = now;
   }
 
+  assertConnected(sessionId: string): void {
+    if (!this.requireSession(sessionId).connected) {
+      throw new ArcTunnelError(ErrorCode.EXTENSION_DISCONNECTED, ErrorCode.EXTENSION_DISCONNECTED);
+    }
+  }
+
+  activeRecordingId(sessionId: string): string | null {
+    return this.requireSession(sessionId).activeRecordingId;
+  }
+
   expireDisconnected(now: number): number[] {
     const expired: number[] = [];
     for (const session of this.sessions.values()) {

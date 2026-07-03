@@ -113,6 +113,7 @@ export class BrokerServer {
   private extensionSync: Promise<void> = Promise.resolve();
   private hasActivatedExtension = false;
   private recordingReservationSessionId: string | null = null;
+  private recordingCleanupSessionId: string | null = null;
 
   constructor(private readonly config: BrokerConfig, dependencies: BrokerDependencies = {}) {
     this.registry = dependencies.registry ?? new SessionRegistry();
@@ -282,9 +283,10 @@ export class BrokerServer {
     }
     this.extension = ws;
     if (sendWelcome) this.send(ws, { type: 'welcome', protocolVersion: PROTOCOL_VERSION } satisfies WelcomeMessage);
-    ws.on('message', (data) => this.handleExtensionMessage(data));
+    ws.on('message', (data) => this.handleExtensionMessage(ws, data));
     if (this.hasActivatedExtension) {
       this.extensionSync = new Promise(resolve => setImmediate(resolve))
+        .then(() => this.cleanupDisconnectedRecording(ws))
         .then(() => this.syncExtensionInventory(ws))
         .catch(error => {
           if (this.extension === ws) throw error;
@@ -317,6 +319,7 @@ export class BrokerServer {
     }
     try {
       await this.extensionSync;
+      this.registry.assertConnected(sessionId);
       const result = await this.executeRequest(sessionId, request);
       this.replySuccess(sessionId, request.requestId, result);
     } catch (error) {
@@ -346,6 +349,7 @@ export class BrokerServer {
       this.registry.assertOwnsTab(sessionId, tabId);
       const generation = this.tabGeneration(tabId);
       return this.scheduler.run(tabId, () => {
+        this.registry.assertConnected(sessionId);
         if (this.tabGeneration(tabId) !== generation) {
           throw new ArcTunnelError(ErrorCode.TAB_CLOSED, ErrorCode.TAB_CLOSED);
         }
@@ -378,6 +382,7 @@ export class BrokerServer {
     this.registry.assertOwnsTab(sessionId, tabId);
     const generation = this.tabGeneration(tabId);
     return this.scheduler.run(tabId, () => {
+      this.registry.assertConnected(sessionId);
       if (this.tabGeneration(tabId) !== generation || this.closedTabIds.has(tabId)) {
         throw new ArcTunnelError(ErrorCode.TAB_CLOSED, ErrorCode.TAB_CLOSED);
       }
@@ -424,6 +429,7 @@ export class BrokerServer {
   }
 
   private async createOwnedTab(sessionId: string, request: AgentRequest): Promise<unknown> {
+    this.registry.assertConnected(sessionId);
     let windowId = this.registry.windowId(sessionId);
     if (windowId == null) {
       const joinedExistingInitialization = this.windowInitializations.has(sessionId);
@@ -518,7 +524,8 @@ export class BrokerServer {
     });
   }
 
-  private handleExtensionMessage(data: RawData): void {
+  private handleExtensionMessage(ws: WebSocket, data: RawData): void {
+    if (this.extension !== ws) return;
     let message: unknown;
     try {
       message = JSON.parse(data.toString());
@@ -615,12 +622,18 @@ export class BrokerServer {
 
   private handleAgentDisconnect(sessionId: string): void {
     this.agents.delete(sessionId);
-    if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
+    const hasActiveRecording = this.registry.activeRecordingId(sessionId) !== null;
     for (const [id, route] of this.routes) {
       if (route.sessionId !== sessionId) continue;
       clearTimeout(route.timer);
       this.routes.delete(id);
       route.reject(new ArcTunnelError(ErrorCode.EXTENSION_DISCONNECTED, ErrorCode.EXTENSION_DISCONNECTED));
+    }
+    if (hasActiveRecording) {
+      this.recordingCleanupSessionId = sessionId;
+      void this.cleanupDisconnectedRecording(this.extension);
+    } else if (this.recordingReservationSessionId === sessionId) {
+      this.recordingReservationSessionId = null;
     }
     if (this.stopping) return;
     this.registry.disconnect(sessionId, Date.now());
@@ -629,6 +642,23 @@ export class BrokerServer {
       this.registry.expireDisconnected(Date.now());
     }, 30_000);
     this.ownershipTimers.set(sessionId, timer);
+  }
+
+  private async cleanupDisconnectedRecording(ws: WebSocket | null): Promise<void> {
+    const sessionId = this.recordingCleanupSessionId;
+    if (!sessionId || !ws || this.extension !== ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      await this.sendExtensionCommand(sessionId, {
+        type: 'agent_request', requestId: 'disconnect-recording-cleanup',
+        command: 'stop_recording', params: {}, timeout: 1_000
+      });
+      if (this.recordingCleanupSessionId === sessionId) this.recordingCleanupSessionId = null;
+    } catch {
+      if (this.extension === ws) ws.close(1012, 'recording cleanup failed');
+    } finally {
+      this.registry.clearRecordings(sessionId);
+      if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
+    }
   }
 
   private rejectAllRoutes(code: ErrorCode): void {
