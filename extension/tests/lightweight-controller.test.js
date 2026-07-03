@@ -46,6 +46,45 @@ test('executeScript catches injected eval failures before Edge erases them to nu
   });
 });
 
+test('executeScript safely reports hostile thrown values before Edge erases them', async () => {
+  await withEdgeScripting(async () => {
+    await assert.rejects(
+      new LightweightController().executeScript(7, `
+        throw Object.defineProperties({}, {
+          message: { get: function() { throw new Error('message trap'); } },
+          toString: { get: function() { throw new Error('toString trap'); } }
+        })
+      `),
+      /script evaluation failed/i
+    );
+    await assert.rejects(
+      new LightweightController().executeScript(7, `
+        throw Object.defineProperty({}, 'toString', {
+          get: function() { throw new Error('toString trap'); }
+        })
+      `),
+      /script evaluation failed/i
+    );
+  });
+});
+
+test('executeScript uses pristine formatting after evaluated code mutates globals', async () => {
+  const originalString = global.String;
+  try {
+    await withEdgeScripting(async () => {
+      await assert.rejects(
+        new LightweightController().executeScript(7, `
+          String = function() { throw new Error('mutated String'); };
+          throw null
+        `),
+        /script evaluation failed/i
+      );
+    });
+  } finally {
+    global.String = originalString;
+  }
+});
+
 test('executeScript rejects Chrome InjectionResult errors instead of returning false success', async () => {
   await withScriptingResult([{ frameId: 0, error: 'EvalError: Refused to evaluate a string as JavaScript because CSP forbids unsafe-eval' }], async () => {
     await assert.rejects(new LightweightController().executeScript(7, '1+1'), /CSP forbids unsafe-eval/);
@@ -69,5 +108,48 @@ test('executeScript preserves scalar, null, and undefined values', async () => {
 test('executeScript rejects a malformed injected result envelope', async () => {
   await withScriptingResult([{ frameId: 0, result: { value: 2 } }], async () => {
     await assert.rejects(new LightweightController().executeScript(7, '1+1'), /malformed/i);
+  });
+});
+
+test('executeScript requires an exact plain own-property envelope', async () => {
+  const inheritedOk = Object.create({ ok: true });
+  inheritedOk.value = 2;
+  const arrayEnvelope = [];
+  arrayEnvelope.ok = true;
+  arrayEnvelope.value = 2;
+  class CustomEnvelope { constructor() { this.ok = true; this.value = 2; } }
+  const accessorOk = Object.defineProperty({}, 'ok', { get: () => true });
+  const accessorValue = { ok: true };
+  Object.defineProperty(accessorValue, 'value', { get: () => 2 });
+  const accessorError = { ok: false };
+  Object.defineProperty(accessorError, 'error', { get: () => 'failure' });
+  const malformed = [
+    arrayEnvelope,
+    new CustomEnvelope(),
+    inheritedOk,
+    accessorOk,
+    accessorValue,
+    accessorError,
+    { ok: 'true', value: 2 },
+    { ok: true, value: 2, extra: true },
+    { ok: true, value: 2, error: 'conflict' },
+    { ok: false, error: 'failure', value: 2 },
+    { ok: false, error: 7 }
+  ];
+
+  for (const result of malformed) {
+    await withScriptingResult([{ frameId: 0, result }], async () => {
+      await assert.rejects(new LightweightController().executeScript(7, '1+1'), /malformed/i);
+    });
+  }
+});
+
+test('executeScript accepts serialized undefined and null-prototype envelopes', async () => {
+  await withScriptingResult([{ frameId: 0, result: { ok: true } }], async () => {
+    assert.equal(await new LightweightController().executeScript(7, 'undefined'), undefined);
+  });
+  const envelope = Object.assign(Object.create(null), { ok: true, value: null });
+  await withScriptingResult([{ frameId: 0, result: envelope }], async () => {
+    assert.equal(await new LightweightController().executeScript(7, 'null'), null);
   });
 });

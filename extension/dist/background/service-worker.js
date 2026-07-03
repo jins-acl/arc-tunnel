@@ -1867,13 +1867,29 @@ var init_lightweight_controller = __esm({
         const results = await chrome.scripting.executeScript({
           target: { tabId },
           func: (source) => {
+            const safeString = String;
+            const fallbackError = "Script evaluation failed";
             try {
               return { ok: true, value: (0, eval)(source) };
             } catch (error) {
-              return {
-                ok: false,
-                error: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-              };
+              let formattedError = fallbackError;
+              try {
+                if (error !== null && (typeof error === "object" || typeof error === "function")) {
+                  const name = error.name;
+                  const message = error.message;
+                  if (typeof name === "string" && typeof message === "string") {
+                    formattedError = `${name}: ${message}`;
+                  } else {
+                    formattedError = safeString(error);
+                  }
+                } else {
+                  formattedError = safeString(error);
+                }
+                if (!formattedError) formattedError = fallbackError;
+              } catch {
+                formattedError = fallbackError;
+              }
+              return { ok: false, error: formattedError };
             }
           },
           args: [script]
@@ -1882,16 +1898,36 @@ var init_lightweight_controller = __esm({
         if (!injection) throw new Error("Lightweight script injection returned no result entry");
         if (injection.error) throw new Error(`Lightweight script injection failed: ${injection.error}`);
         const envelope = injection.result;
-        if (!envelope || typeof envelope !== "object" || typeof envelope.ok !== "boolean") {
+        if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) {
           throw new Error("Lightweight script injection returned a malformed result envelope");
         }
-        if (!envelope.ok) {
-          if (typeof envelope.error !== "string") {
-            throw new Error("Lightweight script injection returned a malformed error envelope");
-          }
-          throw new Error(`Lightweight script evaluation failed: ${envelope.error}`);
+        const prototype = Object.getPrototypeOf(envelope);
+        if (prototype !== Object.prototype && prototype !== null) {
+          throw new Error("Lightweight script injection returned a malformed result envelope");
         }
-        return envelope.value;
+        const keys = Reflect.ownKeys(envelope);
+        const okDescriptor = Object.getOwnPropertyDescriptor(envelope, "ok");
+        if (!okDescriptor || !("value" in okDescriptor) || typeof okDescriptor.value !== "boolean") {
+          throw new Error("Lightweight script injection returned a malformed result envelope");
+        }
+        if (okDescriptor.value) {
+          if (keys.some((key) => key !== "ok" && key !== "value") || keys.length > 2) {
+            throw new Error("Lightweight script injection returned a malformed result envelope");
+          }
+          const valueDescriptor = Object.getOwnPropertyDescriptor(envelope, "value");
+          if (keys.includes("value") && (!valueDescriptor || !("value" in valueDescriptor))) {
+            throw new Error("Lightweight script injection returned a malformed result envelope");
+          }
+          return valueDescriptor?.value;
+        }
+        if (keys.length !== 2 || !keys.includes("ok") || !keys.includes("error")) {
+          throw new Error("Lightweight script injection returned a malformed error envelope");
+        }
+        const errorDescriptor = Object.getOwnPropertyDescriptor(envelope, "error");
+        if (!errorDescriptor || !("value" in errorDescriptor) || typeof errorDescriptor.value !== "string") {
+          throw new Error("Lightweight script injection returned a malformed error envelope");
+        }
+        throw new Error(`Lightweight script evaluation failed: ${errorDescriptor.value || "Script evaluation failed"}`);
       }
       async getContent(tabId, mode) {
         switch (mode) {
