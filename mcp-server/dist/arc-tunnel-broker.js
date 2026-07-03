@@ -4184,6 +4184,13 @@ var BrokerServer = class {
       return await this.sendOwnedTabCommand(sessionId, request);
     } catch (error) {
       if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
+      if (this.recordingCleanupSessionId === sessionId) {
+        if (toErrorInfo(error).code === "COMMAND_TIMEOUT" /* COMMAND_TIMEOUT */) {
+          void this.cleanupDisconnectedRecording(this.extension);
+        } else {
+          this.recordingCleanupSessionId = null;
+        }
+      }
       throw error;
     }
   }
@@ -4292,7 +4299,7 @@ var BrokerServer = class {
     const tabs = Array.isArray(result?.tabs) ? result.tabs : [];
     return { ...result, tabs: this.registry.visibleTabs(sessionId, tabs) };
   }
-  sendExtensionCommand(sessionId, request) {
+  sendExtensionCommand(sessionId, request, recordingCleanup = false) {
     if (!this.extension || this.extension.readyState !== wrapper_default.OPEN) {
       return Promise.reject(new ArcTunnelError("EXTENSION_DISCONNECTED" /* EXTENSION_DISCONNECTED */, "EXTENSION_DISCONNECTED" /* EXTENSION_DISCONNECTED */));
     }
@@ -4310,7 +4317,8 @@ var BrokerServer = class {
         command: request.command,
         timer,
         resolve,
-        reject
+        reject,
+        recordingCleanup
       });
       this.send(this.extension, {
         id: extensionCommandId,
@@ -4354,6 +4362,9 @@ var BrokerServer = class {
       }
       if (route.command === "start_recording" && recordingId) {
         this.registry.addRecording(route.sessionId, recordingId);
+        if (this.recordingCleanupSessionId === route.sessionId) {
+          void this.cleanupDisconnectedRecording(this.extension);
+        }
       }
       if (route.command === "stop_recording") this.registry.clearRecordings(route.sessionId);
       if (route.command === "stop_recording" && this.recordingReservationSessionId === route.sessionId) {
@@ -4363,7 +4374,11 @@ var BrokerServer = class {
         this.registry.addSavedSession(route.sessionId, savedSessionId);
       }
       route.resolve(result);
-    } else route.reject(new ArcTunnelError(response.error?.code, response.error?.message ?? "Extension command failed", response.error?.details));
+    } else if (route.recordingCleanup && response.error?.message === "No active recording") {
+      route.resolve(void 0);
+    } else {
+      route.reject(new ArcTunnelError(response.error?.code, response.error?.message ?? "Extension command failed", response.error?.details));
+    }
   }
   async syncExtensionInventory(ws) {
     if (this.extension !== ws || ws.readyState !== wrapper_default.OPEN) return;
@@ -4417,15 +4432,17 @@ var BrokerServer = class {
   handleAgentDisconnect(sessionId) {
     this.agents.delete(sessionId);
     const hasActiveRecording = this.registry.activeRecordingId(sessionId) !== null;
+    const hasStartingRecording = this.recordingReservationSessionId === sessionId;
     for (const [id, route] of this.routes) {
       if (route.sessionId !== sessionId) continue;
+      if (hasStartingRecording && route.command === "start_recording") continue;
       clearTimeout(route.timer);
       this.routes.delete(id);
       route.reject(new ArcTunnelError("EXTENSION_DISCONNECTED" /* EXTENSION_DISCONNECTED */, "EXTENSION_DISCONNECTED" /* EXTENSION_DISCONNECTED */));
     }
-    if (hasActiveRecording) {
+    if (hasActiveRecording || hasStartingRecording) {
       this.recordingCleanupSessionId = sessionId;
-      void this.cleanupDisconnectedRecording(this.extension);
+      if (hasActiveRecording) void this.cleanupDisconnectedRecording(this.extension);
     } else if (this.recordingReservationSessionId === sessionId) {
       this.recordingReservationSessionId = null;
     }
@@ -4447,7 +4464,7 @@ var BrokerServer = class {
         command: "stop_recording",
         params: {},
         timeout: 1e3
-      });
+      }, true);
       if (this.recordingCleanupSessionId === sessionId) this.recordingCleanupSessionId = null;
     } catch {
       if (this.extension === ws) ws.close(1012, "recording cleanup failed");

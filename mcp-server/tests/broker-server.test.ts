@@ -46,6 +46,12 @@ async function closeWs(ws: WebSocket): Promise<void> {
   });
 }
 
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100 && !predicate(); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}
+
 describe('BrokerServer', () => {
   let broker: BrokerServer;
   const sockets: WebSocket[] = [];
@@ -192,6 +198,66 @@ describe('BrokerServer', () => {
     })));
 
     expect(() => registry.assertOwnsTab(alpha.welcome.sessionId, 77)).not.toThrow();
+  });
+
+  it('treats No active recording as idempotent disconnect cleanup success', async () => {
+    const registry = new SessionRegistry();
+    await broker.stop();
+    broker = new BrokerServer({ host: '127.0.0.1', port: 0 }, { registry });
+    await broker.start();
+    const port = broker.address().port;
+    const extension = await connectRole(port, '/extension', 'extension');
+    const alpha = await connectRole(port, '/agent', 'agent');
+    const beta = await connectRole(port, '/agent', 'agent');
+    sockets.push(extension.ws, alpha.ws, beta.ws);
+    registry.addRecording(alpha.welcome.sessionId, 'recording-alpha');
+
+    const cleanup = nextMessage(extension.ws);
+    await closeWs(alpha.ws);
+    const stop = await cleanup;
+    extension.ws.send(JSON.stringify({ id: stop.id, type: 'response', success: false,
+      error: { code: 'INTERNAL_ERROR', message: 'No active recording' } }));
+    await new Promise(resolve => setImmediate(resolve));
+
+    const forwarded = nextMessage(extension.ws);
+    beta.ws.send(JSON.stringify({ type: 'agent_request', requestId: 'still-live', command: 'list_tabs', params: {}, timeout: 1_000 }));
+    await expect(forwarded).resolves.toMatchObject({ command: 'list_tabs' });
+    expect(extension.ws.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it('retries genuine recording cleanup failure before reconnect inventory sync', async () => {
+    const registry = new SessionRegistry();
+    await broker.stop();
+    broker = new BrokerServer({ host: '127.0.0.1', port: 0 }, { registry });
+    await broker.start();
+    const port = broker.address().port;
+    const first = await connectRole(port, '/extension', 'extension');
+    const alpha = await connectRole(port, '/agent', 'agent');
+    sockets.push(first.ws, alpha.ws);
+    registry.addRecording(alpha.welcome.sessionId, 'recording-alpha');
+
+    const cleanup = nextMessage(first.ws);
+    await closeWs(alpha.ws);
+    const stop = await cleanup;
+    const firstClosed = new Promise<void>(resolve => first.ws.once('close', () => resolve()));
+    first.ws.send(JSON.stringify({ id: stop.id, type: 'response', success: false,
+      error: { code: 'INTERNAL_ERROR', message: 'temporary failure' } }));
+    await firstClosed;
+
+    const replacement = await openWs(port, '/extension', 'chrome-extension://test');
+    sockets.push(replacement);
+    const received: JsonMessage[] = [];
+    replacement.on('message', data => received.push(JSON.parse(data.toString())));
+    replacement.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    await waitUntil(() => received.length >= 2);
+    expect(received[0]).toEqual({ type: 'welcome', protocolVersion: PROTOCOL_VERSION });
+    const retry = received[1];
+    expect(retry.command).toBe('stop_recording');
+    replacement.send(JSON.stringify({ id: retry.id, type: 'response', success: false,
+      error: { code: 'INTERNAL_ERROR', message: 'No active recording' } }));
+    await waitUntil(() => received.length >= 3);
+    const sync = received[2];
+    expect(sync.command).toBe('list_tabs');
   });
 
   it('returns COMMAND_TIMEOUT and ignores a response after its Agent disconnects', async () => {

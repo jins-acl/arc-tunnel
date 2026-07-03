@@ -312,6 +312,28 @@ describe('Broker ownership', () => {
       .resolves.toEqual({ recordingId: 'recording-alpha' });
   });
 
+  it('waits for an in-flight start response before stopping after Agent disconnect', async () => {
+    await alpha.call('claim_tab', { tabId: 101 });
+    (extension as any).manualResponses = true;
+    const offset = commands.length;
+    void alpha.call('start_recording', { tabId: 101 }).catch(() => undefined);
+    await waitUntil(() => commands.slice(offset).some(command => command.command === 'start_recording'));
+    const start = commands.slice(offset).find(command => command.command === 'start_recording')!;
+
+    await new Promise<void>(resolve => {
+      alphaSocket.once('close', () => resolve());
+      alphaSocket.close();
+    });
+    expect(commands.slice(offset).filter(command => command.command === 'stop_recording')).toHaveLength(0);
+
+    extension.send(JSON.stringify({
+      id: start.id, type: 'response', success: true, result: { recordingId: 'late-recording' }
+    }));
+    await waitUntil(() => commands.slice(offset).some(command => command.command === 'stop_recording'));
+    expect(commands.slice(offset).map(command => command.command))
+      .toEqual(['start_recording', 'stop_recording']);
+  });
+
   it('scopes save and restore commands to the owning workspace', async () => {
     const created = await alpha.call('create_tab', { url: 'https://owned.example' });
     const { sessionId } = await alpha.call('save_session', { name: 'alpha' });

@@ -27,6 +27,7 @@ interface PendingRoute {
   timer: NodeJS.Timeout;
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
+  recordingCleanup: boolean;
 }
 
 interface BrokerDependencies {
@@ -372,6 +373,13 @@ export class BrokerServer {
       return await this.sendOwnedTabCommand(sessionId, request);
     } catch (error) {
       if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
+      if (this.recordingCleanupSessionId === sessionId) {
+        if (toErrorInfo(error).code === ErrorCode.COMMAND_TIMEOUT) {
+          void this.cleanupDisconnectedRecording(this.extension);
+        } else {
+          this.recordingCleanupSessionId = null;
+        }
+      }
       throw error;
     }
   }
@@ -494,7 +502,11 @@ export class BrokerServer {
     return { ...result, tabs: this.registry.visibleTabs(sessionId, tabs) };
   }
 
-  private sendExtensionCommand(sessionId: string, request: AgentRequest): Promise<unknown> {
+  private sendExtensionCommand(
+    sessionId: string,
+    request: AgentRequest,
+    recordingCleanup = false
+  ): Promise<unknown> {
     if (!this.extension || this.extension.readyState !== WebSocket.OPEN) {
       return Promise.reject(new ArcTunnelError(ErrorCode.EXTENSION_DISCONNECTED, ErrorCode.EXTENSION_DISCONNECTED));
     }
@@ -512,7 +524,8 @@ export class BrokerServer {
         command: request.command,
         timer,
         resolve,
-        reject
+        reject,
+        recordingCleanup
       });
       this.send(this.extension!, {
         id: extensionCommandId,
@@ -558,6 +571,9 @@ export class BrokerServer {
       }
       if (route.command === 'start_recording' && recordingId) {
         this.registry.addRecording(route.sessionId, recordingId);
+        if (this.recordingCleanupSessionId === route.sessionId) {
+          void this.cleanupDisconnectedRecording(this.extension);
+        }
       }
       if (route.command === 'stop_recording') this.registry.clearRecordings(route.sessionId);
       if (route.command === 'stop_recording' && this.recordingReservationSessionId === route.sessionId) {
@@ -568,7 +584,11 @@ export class BrokerServer {
       }
       route.resolve(result);
     }
-    else route.reject(new ArcTunnelError(response.error?.code as ErrorCode, response.error?.message ?? 'Extension command failed', response.error?.details));
+    else if (route.recordingCleanup && response.error?.message === 'No active recording') {
+      route.resolve(undefined);
+    } else {
+      route.reject(new ArcTunnelError(response.error?.code as ErrorCode, response.error?.message ?? 'Extension command failed', response.error?.details));
+    }
   }
 
   private async syncExtensionInventory(ws: WebSocket): Promise<void> {
@@ -623,15 +643,17 @@ export class BrokerServer {
   private handleAgentDisconnect(sessionId: string): void {
     this.agents.delete(sessionId);
     const hasActiveRecording = this.registry.activeRecordingId(sessionId) !== null;
+    const hasStartingRecording = this.recordingReservationSessionId === sessionId;
     for (const [id, route] of this.routes) {
       if (route.sessionId !== sessionId) continue;
+      if (hasStartingRecording && route.command === 'start_recording') continue;
       clearTimeout(route.timer);
       this.routes.delete(id);
       route.reject(new ArcTunnelError(ErrorCode.EXTENSION_DISCONNECTED, ErrorCode.EXTENSION_DISCONNECTED));
     }
-    if (hasActiveRecording) {
+    if (hasActiveRecording || hasStartingRecording) {
       this.recordingCleanupSessionId = sessionId;
-      void this.cleanupDisconnectedRecording(this.extension);
+      if (hasActiveRecording) void this.cleanupDisconnectedRecording(this.extension);
     } else if (this.recordingReservationSessionId === sessionId) {
       this.recordingReservationSessionId = null;
     }
@@ -651,7 +673,7 @@ export class BrokerServer {
       await this.sendExtensionCommand(sessionId, {
         type: 'agent_request', requestId: 'disconnect-recording-cleanup',
         command: 'stop_recording', params: {}, timeout: 1_000
-      });
+      }, true);
       if (this.recordingCleanupSessionId === sessionId) this.recordingCleanupSessionId = null;
     } catch {
       if (this.extension === ws) ws.close(1012, 'recording cleanup failed');
