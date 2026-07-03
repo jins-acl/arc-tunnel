@@ -20,7 +20,14 @@ export class LightweightController {
     const results = await chrome.scripting.executeScript({
       target: { tabId },
       func: (source: string) => {
-        return (0, eval)(source);
+        try {
+          return { ok: true, value: (0, eval)(source) };
+        } catch (error) {
+          return {
+            ok: false,
+            error: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+          };
+        }
       },
       args: [script]
     });
@@ -28,7 +35,17 @@ export class LightweightController {
     const injection = results[0] as (chrome.scripting.InjectionResult & { error?: string }) | undefined;
     if (!injection) throw new Error('Lightweight script injection returned no result entry');
     if (injection.error) throw new Error(`Lightweight script injection failed: ${injection.error}`);
-    return injection.result;
+    const envelope = injection.result;
+    if (!envelope || typeof envelope !== 'object' || typeof envelope.ok !== 'boolean') {
+      throw new Error('Lightweight script injection returned a malformed result envelope');
+    }
+    if (!envelope.ok) {
+      if (typeof envelope.error !== 'string') {
+        throw new Error('Lightweight script injection returned a malformed error envelope');
+      }
+      throw new Error(`Lightweight script evaluation failed: ${envelope.error}`);
+    }
+    return envelope.value;
   }
 
   async getContent(tabId: number, mode: string): Promise<any> {
