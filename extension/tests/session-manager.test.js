@@ -156,3 +156,34 @@ test('CommandHandler recording lifecycle queue continues after start rejection',
     assert.deepEqual(events, ['start', 'remove', 'stop']);
   });
 });
+
+test('CommandHandler rolls back a recording when listener injection fails', async () => {
+  let active = false;
+  let injectionAttempts = 0;
+  const events = [];
+  const recordingEngine = {
+    isCurrentlyRecording: () => active,
+    startRecording: async () => { active = true; events.push('start'); return 'recording'; },
+    injectListeners: async () => {
+      events.push('inject');
+      if (injectionAttempts++ === 0) throw new Error('listener injection failed');
+    },
+    removeListeners: async () => { events.push('remove'); },
+    abortRecording: () => { active = false; events.push('abort'); }
+  };
+  const tabManager = {
+    holdDebuggerAttached() {},
+    ensureDebuggerAttached: async () => {},
+    releaseDebuggerAttached() { events.push('release'); }
+  };
+
+  await withTestEnvironment({ chrome: { tabs: { query: async () => [{ id: 1 }] } } }, async () => {
+    const handler = new CommandHandler(tabManager, {}, recordingEngine, {}, {}, {}, {}, {});
+    const failed = await handler.handleCommand({ id: 'failed', type: 'command', command: 'start_recording', params: { tabId: 1 } });
+    assert.equal(failed.success, false);
+    assert.deepEqual(events, ['start', 'inject', 'remove', 'abort', 'release']);
+
+    const retried = await handler.handleCommand({ id: 'retried', type: 'command', command: 'start_recording', params: { tabId: 1 } });
+    assert.equal(retried.success, true);
+  });
+});

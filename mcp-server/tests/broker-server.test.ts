@@ -292,6 +292,24 @@ describe('BrokerServer', () => {
     expect(received[2].command).toBe('list_tabs');
   });
 
+  it('closes a reconnected extension when inventory synchronization times out', async () => {
+    const port = broker.address().port;
+    const first = await connectRole(port, '/extension', 'extension');
+    sockets.push(first.ws);
+    await closeWs(first.ws);
+
+    const replacement = await openWs(port, '/extension', 'chrome-extension://test');
+    sockets.push(replacement);
+    const received: JsonMessage[] = [];
+    replacement.on('message', data => received.push(JSON.parse(data.toString())));
+    replacement.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    await waitUntil(() => received.some(message => message.command === 'list_tabs'));
+    expect(received.some(message => message.command === 'list_tabs')).toBe(true);
+
+    await new Promise(resolve => setTimeout(resolve, 1_100));
+    expect(replacement.readyState).toBe(WebSocket.CLOSED);
+  });
+
   it('returns COMMAND_TIMEOUT and ignores a response after its Agent disconnects', async () => {
     const port = broker.address().port;
     const extension = await connectRole(port, '/extension', 'extension');

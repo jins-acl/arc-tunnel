@@ -289,8 +289,11 @@ export class BrokerServer {
       this.extensionSync = new Promise(resolve => setImmediate(resolve))
         .then(() => this.cleanupDisconnectedRecording(ws))
         .then(() => this.syncExtensionInventory(ws))
-        .catch(error => {
-          if (this.extension === ws) throw error;
+        .catch(() => {
+          if (this.extension !== ws) return;
+          this.extension = null;
+          this.rejectAllRoutes(ErrorCode.EXTENSION_DISCONNECTED);
+          ws.close(1012, 'inventory synchronization failed');
         });
     } else {
       this.hasActivatedExtension = true;
@@ -336,7 +339,12 @@ export class BrokerServer {
     if (request.command === 'list_tabs') return this.listVisibleTabs(sessionId, request);
     if (request.command === 'start_recording') return this.startRecording(sessionId, request);
     if (request.command === 'stop_recording') this.registry.assertOwnsRecording(sessionId);
-    if (request.command === 'replay_recording') this.registry.assertOwnsRecording(sessionId, request.params.recordingId);
+    if (request.command === 'replay_recording') {
+      this.registry.assertOwnsRecording(sessionId, request.params.recordingId);
+      if (typeof request.params.tabId !== 'number') {
+        throw new ArcTunnelError(ErrorCode.TAB_NOT_OWNED, ErrorCode.TAB_NOT_OWNED);
+      }
+    }
     if (request.command === 'save_session') {
       return this.sendExtensionCommand(sessionId, {
         ...request,

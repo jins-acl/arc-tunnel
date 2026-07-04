@@ -368,6 +368,10 @@ export class CommandHandler {
           this.recordingDebuggerTabId = params.tabId;
           return { recordingId };
         } catch (error) {
+          if (this.recordingEngine.isCurrentlyRecording()) {
+            await this.recordingEngine.removeListeners().catch(() => undefined);
+            this.recordingEngine.abortRecording();
+          }
           this.recordingStartReserved = false;
           this.tabManager.releaseDebuggerAttached(params.tabId, 'recording-start-failed');
           throw error;

@@ -836,6 +836,11 @@ var init_recording_engine = __esm({
         console.log(`Stopped recording: ${recording.id} (${recording.metadata.actionCount} actions)`);
         return recording;
       }
+      abortRecording() {
+        this.isRecording = false;
+        this.currentRecording = null;
+        this.startTime = 0;
+      }
       recordAction(action) {
         if (this.isRecording && this.currentRecording) {
           action.timestamp = Date.now() - this.startTime;
@@ -1780,6 +1785,10 @@ var init_command_handler = __esm({
               this.recordingDebuggerTabId = params.tabId;
               return { recordingId };
             } catch (error) {
+              if (this.recordingEngine.isCurrentlyRecording()) {
+                await this.recordingEngine.removeListeners().catch(() => void 0);
+                this.recordingEngine.abortRecording();
+              }
               this.recordingStartReserved = false;
               this.tabManager.releaseDebuggerAttached(params.tabId, "recording-start-failed");
               throw error;

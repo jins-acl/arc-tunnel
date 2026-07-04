@@ -4105,8 +4105,11 @@ var BrokerServer = class {
     if (sendWelcome) this.send(ws, { type: "welcome", protocolVersion: PROTOCOL_VERSION });
     ws.on("message", (data) => this.handleExtensionMessage(ws, data));
     if (this.hasActivatedExtension) {
-      this.extensionSync = new Promise((resolve) => setImmediate(resolve)).then(() => this.cleanupDisconnectedRecording(ws)).then(() => this.syncExtensionInventory(ws)).catch((error) => {
-        if (this.extension === ws) throw error;
+      this.extensionSync = new Promise((resolve) => setImmediate(resolve)).then(() => this.cleanupDisconnectedRecording(ws)).then(() => this.syncExtensionInventory(ws)).catch(() => {
+        if (this.extension !== ws) return;
+        this.extension = null;
+        this.rejectAllRoutes("EXTENSION_DISCONNECTED" /* EXTENSION_DISCONNECTED */);
+        ws.close(1012, "inventory synchronization failed");
       });
     } else {
       this.hasActivatedExtension = true;
@@ -4149,7 +4152,12 @@ var BrokerServer = class {
     if (request.command === "list_tabs") return this.listVisibleTabs(sessionId, request);
     if (request.command === "start_recording") return this.startRecording(sessionId, request);
     if (request.command === "stop_recording") this.registry.assertOwnsRecording(sessionId);
-    if (request.command === "replay_recording") this.registry.assertOwnsRecording(sessionId, request.params.recordingId);
+    if (request.command === "replay_recording") {
+      this.registry.assertOwnsRecording(sessionId, request.params.recordingId);
+      if (typeof request.params.tabId !== "number") {
+        throw new ArcTunnelError("TAB_NOT_OWNED" /* TAB_NOT_OWNED */, "TAB_NOT_OWNED" /* TAB_NOT_OWNED */);
+      }
+    }
     if (request.command === "save_session") {
       return this.sendExtensionCommand(sessionId, {
         ...request,

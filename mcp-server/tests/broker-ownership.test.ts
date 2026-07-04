@@ -295,6 +295,17 @@ describe('Broker ownership', () => {
       .rejects.toMatchObject({ code: ErrorCode.SESSION_NOT_FOUND });
   });
 
+  it('rejects replay without an explicitly owned target tab', async () => {
+    await alpha.call('claim_tab', { tabId: 101 });
+    const { recordingId } = await alpha.call('start_recording', { tabId: 101 });
+    await alpha.call('stop_recording');
+    const offset = commands.length;
+
+    await expect(alpha.call('replay_recording', { recordingId }))
+      .rejects.toMatchObject({ code: ErrorCode.TAB_NOT_OWNED });
+    expect(commands.slice(offset).some(command => command.command === 'replay_recording')).toBe(false);
+  });
+
   it('stops an active extension recording when its Agent disconnects', async () => {
     await alpha.call('claim_tab', { tabId: 101 });
     await beta.call('claim_tab', { tabId: 202 });

@@ -188,6 +188,12 @@ export class RecordingEngine {
     return recording;
   }
 
+  abortRecording(): void {
+    this.isRecording = false;
+    this.currentRecording = null;
+    this.startTime = 0;
+  }
+
   recordAction(action: Action): void {
     if (this.isRecording && this.currentRecording) {
       action.timestamp = Date.now() - this.startTime;

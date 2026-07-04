@@ -246,9 +246,9 @@ export function getToolDefinitions(): ToolDefinition[] {
         type: 'object',
         properties: {
           recordingId: { type: 'string', description: 'Recording ID' },
-          tabId: { type: 'number', description: 'Tab to replay in (auto-selects if omitted)' }
+          tabId: { type: 'number', description: 'Owned tab to replay in' }
         },
-        required: ['recordingId']
+        required: ['recordingId', 'tabId']
       }
     },
 
