@@ -12,6 +12,11 @@ export class TabScheduler {
     return current;
   }
 
+  whenIdle(tabId: number): Promise<void> {
+    const tail = this.tails.get(tabId);
+    return tail ? tail.then(() => undefined, () => undefined) : Promise.resolve();
+  }
+
   private clearTail(tabId: number, current: Promise<unknown>): void {
     if (this.tails.get(tabId) === current) {
       this.tails.delete(tabId);

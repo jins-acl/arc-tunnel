@@ -373,6 +373,24 @@ describe('BrokerServer', () => {
     await expect(response).resolves.toMatchObject({ requestId: 'tab-work', error: { code: ErrorCode.TAB_CLOSED } });
   });
 
+  it('retires closed-tab metadata only after its scheduler queue drains', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const pending = (broker as any).scheduler.run(77, () => gate);
+
+    (broker as any).handleBrowserEvent({
+      event: 'tab_removed', data: { tabId: 77 }, timestamp: Date.now()
+    });
+    expect((broker as any).closedTabIds.has(77)).toBe(true);
+    expect((broker as any).tabGenerations.has(77)).toBe(true);
+
+    release();
+    await pending;
+    await new Promise(resolve => setImmediate(resolve));
+    expect((broker as any).closedTabIds.has(77)).toBe(false);
+    expect((broker as any).tabGenerations.has(77)).toBe(false);
+  });
+
   it('rejects matching work with TAB_CLOSED when a window is removed', async () => {
     const registry = new SessionRegistry();
     await broker.stop();

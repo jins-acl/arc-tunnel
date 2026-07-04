@@ -3863,6 +3863,16 @@ var SessionRegistry = class {
     }
     return expired;
   }
+  pruneDisconnected(now, retainedSessionIds = /* @__PURE__ */ new Set()) {
+    const removed = [];
+    for (const [sessionId, session] of this.sessions) {
+      if (session.connected || session.disconnectedAt == null || now - session.disconnectedAt < 3e4) continue;
+      if (retainedSessionIds.has(sessionId) || session.tabIds.size > 0 || session.windowId !== null) continue;
+      this.sessions.delete(sessionId);
+      removed.push(sessionId);
+    }
+    return removed;
+  }
   requireSession(sessionId) {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -3886,6 +3896,10 @@ var TabScheduler = class {
       () => this.clearTail(tabId, current)
     );
     return current;
+  }
+  whenIdle(tabId) {
+    const tail = this.tails.get(tabId);
+    return tail ? tail.then(() => void 0, () => void 0) : Promise.resolve();
   }
   clearTail(tabId, current) {
     if (this.tails.get(tabId) === current) {
@@ -4383,6 +4397,7 @@ var BrokerServer = class {
     } else {
       if (route.command === "start_recording" && this.recordingCleanupSessionId === route.sessionId) {
         this.recordingCleanupSessionId = null;
+        this.pruneExpiredSessions();
       }
       route.reject(new ArcTunnelError(response.error?.code, response.error?.message ?? "Extension command failed", response.error?.details));
     }
@@ -4429,6 +4444,7 @@ var BrokerServer = class {
       this.routes.delete(id);
       route.reject(new ArcTunnelError("TAB_CLOSED" /* TAB_CLOSED */, "TAB_CLOSED" /* TAB_CLOSED */));
     }
+    for (const id of removedTabIds) this.retireClosedTabMetadata(id, this.tabGeneration(id));
   }
   tabGeneration(tabId) {
     return this.tabGenerations.get(tabId) ?? 0;
@@ -4457,7 +4473,9 @@ var BrokerServer = class {
     this.registry.disconnect(sessionId, Date.now());
     const timer = setTimeout(() => {
       this.ownershipTimers.delete(sessionId);
-      this.registry.expireDisconnected(Date.now());
+      const now = Date.now();
+      this.registry.expireDisconnected(now);
+      this.pruneExpiredSessions(now);
     }, 3e4);
     this.ownershipTimers.set(sessionId, timer);
   }
@@ -4478,7 +4496,21 @@ var BrokerServer = class {
     } finally {
       this.registry.clearRecordings(sessionId);
       if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
+      this.pruneExpiredSessions();
     }
+  }
+  retireClosedTabMetadata(tabId, generation) {
+    void this.scheduler.whenIdle(tabId).then(() => {
+      if (!this.closedTabIds.has(tabId) || this.tabGeneration(tabId) !== generation) return;
+      this.closedTabIds.delete(tabId);
+      this.tabGenerations.delete(tabId);
+    });
+  }
+  pruneExpiredSessions(now = Date.now()) {
+    const retained = /* @__PURE__ */ new Set();
+    if (this.recordingCleanupSessionId) retained.add(this.recordingCleanupSessionId);
+    if (this.recordingReservationSessionId) retained.add(this.recordingReservationSessionId);
+    this.registry.pruneDisconnected(now, retained);
   }
   rejectAllRoutes(code) {
     for (const route of this.routes.values()) {

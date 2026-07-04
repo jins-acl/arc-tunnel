@@ -593,6 +593,7 @@ export class BrokerServer {
     } else {
       if (route.command === 'start_recording' && this.recordingCleanupSessionId === route.sessionId) {
         this.recordingCleanupSessionId = null;
+        this.pruneExpiredSessions();
       }
       route.reject(new ArcTunnelError(response.error?.code as ErrorCode, response.error?.message ?? 'Extension command failed', response.error?.details));
     }
@@ -637,6 +638,7 @@ export class BrokerServer {
       this.routes.delete(id);
       route.reject(new ArcTunnelError(ErrorCode.TAB_CLOSED, ErrorCode.TAB_CLOSED));
     }
+    for (const id of removedTabIds) this.retireClosedTabMetadata(id, this.tabGeneration(id));
   }
 
   private tabGeneration(tabId: number): number {
@@ -668,7 +670,9 @@ export class BrokerServer {
     this.registry.disconnect(sessionId, Date.now());
     const timer = setTimeout(() => {
       this.ownershipTimers.delete(sessionId);
-      this.registry.expireDisconnected(Date.now());
+      const now = Date.now();
+      this.registry.expireDisconnected(now);
+      this.pruneExpiredSessions(now);
     }, 30_000);
     this.ownershipTimers.set(sessionId, timer);
   }
@@ -687,7 +691,23 @@ export class BrokerServer {
     } finally {
       this.registry.clearRecordings(sessionId);
       if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
+      this.pruneExpiredSessions();
     }
+  }
+
+  private retireClosedTabMetadata(tabId: number, generation: number): void {
+    void this.scheduler.whenIdle(tabId).then(() => {
+      if (!this.closedTabIds.has(tabId) || this.tabGeneration(tabId) !== generation) return;
+      this.closedTabIds.delete(tabId);
+      this.tabGenerations.delete(tabId);
+    });
+  }
+
+  private pruneExpiredSessions(now = Date.now()): void {
+    const retained = new Set<string>();
+    if (this.recordingCleanupSessionId) retained.add(this.recordingCleanupSessionId);
+    if (this.recordingReservationSessionId) retained.add(this.recordingReservationSessionId);
+    this.registry.pruneDisconnected(now, retained);
   }
 
   private rejectAllRoutes(code: ErrorCode): void {

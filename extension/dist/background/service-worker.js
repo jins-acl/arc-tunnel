@@ -24,6 +24,7 @@ var init_websocket_client = __esm({
         this.maxReconnectAttempts = 10;
         this.reconnectDelay = 1e3;
         this.maxReconnectDelay = 3e4;
+        this.persistentReconnectDelay = 6e4;
         this.messageHandlers = /* @__PURE__ */ new Map();
         this.intentionalClose = false;
         this.connectionGeneration = 0;
@@ -157,16 +158,13 @@ var init_websocket_client = __esm({
       }
       handleReconnect(generation) {
         if (generation !== this.connectionGeneration || this.intentionalClose || this.reconnectTimer) return;
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-          console.error(`Reconnect failed after ${this.maxReconnectAttempts} attempts - giving up. Reload the extension to retry.`);
-          return;
-        }
-        const delay = Math.min(
+        const fastRetriesExhausted = this.reconnectAttempts >= this.maxReconnectAttempts;
+        const delay = fastRetriesExhausted ? this.persistentReconnectDelay : Math.min(
           this.reconnectDelay * Math.pow(2, this.reconnectAttempts) + Math.random() * 1e3,
           this.maxReconnectDelay
         );
-        this.reconnectAttempts++;
-        console.log(`Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+        if (!fastRetriesExhausted) this.reconnectAttempts++;
+        console.log(fastRetriesExhausted ? `Fast reconnect attempts exhausted; retrying in ${Math.round(delay)}ms` : `Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
         this.reconnectTimer = setTimeout(async () => {
           this.reconnectTimer = null;
           if (generation !== this.connectionGeneration || this.intentionalClose) return;

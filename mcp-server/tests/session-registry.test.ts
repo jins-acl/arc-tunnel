@@ -110,6 +110,18 @@ describe('SessionRegistry', () => {
     ]);
   });
 
+  it('deletes expired sessions unless lifecycle cleanup still retains them', () => {
+    const registry = new SessionRegistry();
+    registry.createSession('alpha');
+    registry.disconnect('alpha', 1_000);
+    registry.expireDisconnected(31_000);
+
+    expect(registry.pruneDisconnected(31_000, new Set(['alpha']))).toEqual([]);
+    expect(() => registry.assertConnected('alpha')).toThrow(ErrorCode.EXTENSION_DISCONNECTED);
+    expect(registry.pruneDisconnected(31_000)).toEqual(['alpha']);
+    expect(() => registry.assertConnected('alpha')).toThrow(ErrorCode.SESSION_NOT_FOUND);
+  });
+
   it('throws ArcTunnelError for unknown sessions', () => {
     const registry = new SessionRegistry();
 

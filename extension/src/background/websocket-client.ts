@@ -14,6 +14,7 @@ export class WebSocketClient {
   private maxReconnectAttempts = 10;
   private reconnectDelay = 1000;
   private maxReconnectDelay = 30000;
+  private persistentReconnectDelay = 60000;
   private messageHandlers: Map<string, (message: any) => void> = new Map();
   private intentionalClose = false;
   private connectionGeneration = 0;
@@ -169,18 +170,18 @@ export class WebSocketClient {
   private handleReconnect(generation: number): void {
     if (generation !== this.connectionGeneration || this.intentionalClose || this.reconnectTimer) return;
 
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error(`Reconnect failed after ${this.maxReconnectAttempts} attempts - giving up. Reload the extension to retry.`);
-      return;
-    }
+    const fastRetriesExhausted = this.reconnectAttempts >= this.maxReconnectAttempts;
+    const delay = fastRetriesExhausted
+      ? this.persistentReconnectDelay
+      : Math.min(
+        this.reconnectDelay * Math.pow(2, this.reconnectAttempts) + Math.random() * 1000,
+        this.maxReconnectDelay
+      );
+    if (!fastRetriesExhausted) this.reconnectAttempts++;
 
-    const delay = Math.min(
-      this.reconnectDelay * Math.pow(2, this.reconnectAttempts) + Math.random() * 1000,
-      this.maxReconnectDelay
-    );
-    this.reconnectAttempts++;
-
-    console.log(`Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+    console.log(fastRetriesExhausted
+      ? `Fast reconnect attempts exhausted; retrying in ${Math.round(delay)}ms`
+      : `Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
       if (generation !== this.connectionGeneration || this.intentionalClose) return;

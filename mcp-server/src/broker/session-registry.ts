@@ -199,6 +199,17 @@ export class SessionRegistry {
     return expired;
   }
 
+  pruneDisconnected(now: number, retainedSessionIds: ReadonlySet<string> = new Set()): string[] {
+    const removed: string[] = [];
+    for (const [sessionId, session] of this.sessions) {
+      if (session.connected || session.disconnectedAt == null || now - session.disconnectedAt < 30_000) continue;
+      if (retainedSessionIds.has(sessionId) || session.tabIds.size > 0 || session.windowId !== null) continue;
+      this.sessions.delete(sessionId);
+      removed.push(sessionId);
+    }
+    return removed;
+  }
+
   private requireSession(sessionId: string): AgentSession {
     const session = this.sessions.get(sessionId);
     if (!session) {

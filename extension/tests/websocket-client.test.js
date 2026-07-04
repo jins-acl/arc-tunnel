@@ -269,3 +269,22 @@ environmentTest('timer and alarm reconnect overlap cannot create parallel socket
   replacement.message({ type: 'welcome', protocolVersion: 2 });
   await alarmAttempt;
 });
+
+environmentTest('switches to a persistent low-frequency retry after fast retries are exhausted', async (env) => {
+  const client = new WebSocketClient();
+  const connection = client.connect();
+  const socket = latestSocket();
+  socket.open();
+  socket.message({ type: 'welcome', protocolVersion: 2 });
+  await connection;
+
+  client.reconnectAttempts = client.maxReconnectAttempts;
+  socket.emitClose();
+
+  const retry = env.timers.find(timer => !timer.cleared);
+  assert.ok(retry);
+  assert.equal(retry.delay, 60_000);
+  assert.deepEqual(env.alarms.created.at(-1), {
+    name: 'ws-reconnect', options: { delayInMinutes: 1 }
+  });
+});
