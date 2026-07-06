@@ -424,6 +424,9 @@ describe('BrokerServer', () => {
     expect(expire).not.toHaveBeenCalled();
     jest.advanceTimersByTime(1);
     expect(expire).toHaveBeenCalledWith(expect.any(Number));
+    expect((broker as any).diagnostics.eventsAfter(0).events).toContainEqual(expect.objectContaining({
+      category: 'ownership', code: 'TAB_OWNERSHIP_EXPIRED', summary: '宽限期结束，标签页所有权已释放'
+    }));
   });
 
   it('rejects matching work with TAB_CLOSED when a tab is removed', async () => {

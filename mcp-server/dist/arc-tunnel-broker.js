@@ -4546,6 +4546,7 @@ data: ${JSON.stringify(this.diagnosticsSnapshot())}
     const result = this.registry.claimTab(sessionId, tabId);
     if (!result.ok) throw new ArcTunnelError(result.code, result.code);
     this.closedTabIds.delete(tabId);
+    this.recordDiagnostic("info", "ownership", "TAB_CLAIMED", "\u6807\u7B7E\u9875\u6240\u6709\u6743\u5DF2\u8BA4\u9886");
     return { tabId, ownership: "owned" };
   }
   releaseTab(sessionId, params) {
@@ -4553,6 +4554,7 @@ data: ${JSON.stringify(this.diagnosticsSnapshot())}
     if (typeof tabId !== "number") throw new ArcTunnelError("TAB_NOT_OWNED" /* TAB_NOT_OWNED */, "TAB_NOT_OWNED" /* TAB_NOT_OWNED */);
     this.registry.assertOwnsTab(sessionId, tabId);
     this.registry.releaseTab(tabId);
+    this.recordDiagnostic("info", "ownership", "TAB_RELEASED", "\u6807\u7B7E\u9875\u6240\u6709\u6743\u5DF2\u91CA\u653E");
     return { tabId, ownership: "unclaimed" };
   }
   async createOwnedTab(sessionId, request) {
@@ -4784,8 +4786,11 @@ data: ${JSON.stringify(this.diagnosticsSnapshot())}
     const timer = setTimeout(() => {
       this.ownershipTimers.delete(sessionId);
       const now = Date.now();
-      this.registry.expireDisconnected(now);
+      const released = this.registry.expireDisconnected(now);
       this.pruneExpiredSessions(now);
+      if (released.length > 0) {
+        this.recordDiagnostic("info", "ownership", "TAB_OWNERSHIP_EXPIRED", "\u5BBD\u9650\u671F\u7ED3\u675F\uFF0C\u6807\u7B7E\u9875\u6240\u6709\u6743\u5DF2\u91CA\u653E");
+      }
       this.recordDiagnostic("info", "connection", "AGENT_GRACE_EXPIRED", "Agent \u5BBD\u9650\u671F\u5DF2\u7ED3\u675F");
     }, 3e4);
     this.ownershipTimers.set(sessionId, timer);

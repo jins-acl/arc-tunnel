@@ -51,6 +51,61 @@ describe('Chinese operations dashboard', () => {
     expect(script).toContain("addEventListener('RESET'");
     expect(script).toContain('document.createElement');
     expect(script).toContain('textContent');
+    expect(markup).toContain('node scripts/start.js start [--port N]');
+  });
+
+  it('refreshes status after diagnostic events without overlapping requests and recovers after failure', async () => {
+    const script = fs.readFileSync(path.join(__dirname, '..', 'src', 'dashboard', 'dashboard.js'), 'utf8');
+    const elements = new Map<string, any>();
+    const element = () => ({ className: '', textContent: '', hidden: false, firstChild: null,
+      appendChild: jest.fn(), removeChild: jest.fn(), addEventListener: jest.fn(),
+      querySelector: jest.fn(() => ({ textContent: '' })) });
+    for (const id of ['event-list', 'event-filter', 'copy-diagnostics', 'offline-banner', 'overall-status',
+      'broker-card', 'extension-card', 'recovery-card', 'agent-count', 'grace-count',
+      'claimed-tab-count', 'pending-count', 'connection-detail']) elements.set(id, element());
+    const handlers: Record<string, (message: any) => void> = {};
+    let resolveRequest: ((value: any) => void) | undefined;
+    const fetch = jest.fn(() => new Promise(resolve => { resolveRequest = resolve; }));
+    const context = { document: { getElementById: (id: string) => elements.get(id), createElement: element },
+      navigator: { clipboard: { writeText: jest.fn() } }, fetch, setTimeout: jest.fn(), console,
+      EventSource: class { onopen = null; onerror = null; addEventListener(name: string, handler: any) { handlers[name] = handler; } } };
+    vm.runInNewContext(script, context);
+    resolveRequest!({ ok: false });
+    await new Promise(resolve => setImmediate(resolve));
+
+    handlers.diagnostic({ data: JSON.stringify({ sequence: 1, timestamp: 1, level: 'info', category: 'connection', code: 'ONE', summary: 'one' }) });
+    handlers.diagnostic({ data: JSON.stringify({ sequence: 2, timestamp: 2, level: 'info', category: 'connection', code: 'TWO', summary: 'two' }) });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    resolveRequest!({ ok: false });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(fetch).toHaveBeenCalledTimes(3);
+    resolveRequest!({ ok: false });
+    await new Promise(resolve => setImmediate(resolve));
+    handlers.diagnostic({ data: JSON.stringify({ sequence: 3, timestamp: 3, level: 'info', category: 'connection', code: 'THREE', summary: 'three' }) });
+    expect(fetch).toHaveBeenCalledTimes(4);
+  });
+
+  it('renders the Broker port and a friendly extension synchronization time', async () => {
+    const script = fs.readFileSync(path.join(__dirname, '..', 'src', 'dashboard', 'dashboard.js'), 'utf8');
+    const elements = new Map<string, any>();
+    const element = () => ({ className: '', textContent: '', hidden: false, firstChild: null,
+      appendChild: jest.fn(), removeChild: jest.fn(), addEventListener: jest.fn(),
+      querySelector: jest.fn(() => ({ textContent: '' })) });
+    for (const id of ['event-list', 'event-filter', 'copy-diagnostics', 'offline-banner', 'overall-status',
+      'broker-card', 'extension-card', 'recovery-card', 'agent-count', 'grace-count',
+      'claimed-tab-count', 'pending-count', 'connection-detail']) elements.set(id, element());
+    const context = { document: { getElementById: (id: string) => elements.get(id), createElement: element },
+      navigator: { clipboard: { writeText: jest.fn() } }, fetch: jest.fn(() => new Promise(() => {})),
+      setTimeout: jest.fn(), console, EventSource: class { onopen = null; onerror = null; addEventListener() {} } };
+    vm.runInNewContext(script, context);
+    const renderStatus = vm.runInNewContext('renderStatus', context);
+    const snapshot = { broker: { port: 9123, protocolVersion: 2, uptimeMs: 1000 },
+      extension: { connected: true, generation: 1, reconnectPhase: 'idle', lastSyncAt: null },
+      agents: { connected: 0, grace: 0 }, workload: { claimedTabs: 0, pendingCommands: 0 },
+      recovery: { inventorySync: 'idle', recordingCleanup: 'idle' }, recentError: null };
+    renderStatus(snapshot);
+    expect(elements.get('broker-card').querySelector.mock.results[1].value.textContent).toContain('9123');
+    expect(elements.get('extension-card').querySelector.mock.results[1].value.textContent).toContain('尚未同步');
   });
 
   it('keeps the dashboard script read-only and excludes sensitive browser fields', async () => {

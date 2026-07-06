@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/dashboard/dashboard.css">
 </head>
 <body>
-  <div id="offline-banner" role="status" hidden>实时连接已中断，正在等待恢复。</div>
+  <div id="offline-banner" role="status" hidden>Broker 当前不可达。请运行 <code>node scripts/start.js start [--port N]</code> 启动，并确认页面端口一致。</div>
   <header class="page-header">
     <div><p class="eyebrow">只读运行视图</p><h1>Arc Tunnel 运维控制中心</h1></div>
     <div class="header-actions"><span id="overall-status" class="status-pill">正在连接</span><button id="copy-diagnostics" type="button">复制诊断信息</button></div>

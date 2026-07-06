@@ -3,6 +3,8 @@
 let currentStatus = null;
 let currentCategory = 'all';
 const diagnosticEvents = [];
+let statusRefresh = null;
+let statusRefreshQueued = false;
 
 const byId = (id) => document.getElementById(id);
 const phaseLabels = { idle: '空闲', running: '进行中', failed: '失败' };
@@ -29,8 +31,8 @@ function renderStatus(snapshot) {
   overall.textContent = connected ? (recovering ? '恢复处理中' : '运行正常') : '扩展未连接';
   overall.className = `status-pill ${connected && !recovering ? 'ok' : 'warn'}`;
 
-  setCard('broker-card', '运行中', `协议 v${snapshot.broker.protocolVersion} · 已运行 ${formatDuration(snapshot.broker.uptimeMs)}`);
-  setCard('extension-card', connected ? '已连接' : '未连接', `连接代次 ${snapshot.extension.generation}`);
+  setCard('broker-card', '运行中', `端口 ${snapshot.broker.port} · 协议 v${snapshot.broker.protocolVersion} · 已运行 ${formatDuration(snapshot.broker.uptimeMs)}`);
+  setCard('extension-card', connected ? '已连接' : '未连接', `连接代次 ${snapshot.extension.generation} · 最近同步 ${formatSyncTime(snapshot.extension.lastSyncAt)}`);
   setCard('recovery-card', recoveryLabel(snapshot), snapshot.recentError ? snapshot.recentError.summary : '最近无错误');
   setText('agent-count', snapshot.agents.connected);
   setText('grace-count', snapshot.agents.grace);
@@ -52,6 +54,11 @@ function formatDuration(milliseconds) {
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes} 分钟`;
   return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`;
+}
+
+function formatSyncTime(timestamp) {
+  if (timestamp == null) return '尚未同步';
+  return new Date(timestamp).toLocaleString('zh-CN', { hour12: false });
 }
 
 function appendEvent(event) {
@@ -107,20 +114,36 @@ async function copyDiagnostics() {
   setTimeout(() => { button.textContent = original; }, 1600);
 }
 
-async function fetchStatus() {
-  try {
-    const response = await fetch('/api/status');
-    if (!response.ok) throw new Error('status unavailable');
-    renderStatus(await response.json());
-  } catch {
-    showOffline(true);
+function fetchStatus() {
+  if (statusRefresh) {
+    statusRefreshQueued = true;
+    return statusRefresh;
   }
+  statusRefresh = (async () => {
+    try {
+      const response = await fetch('/api/status');
+      if (!response.ok) throw new Error('status unavailable');
+      renderStatus(await response.json());
+    } catch {
+      showOffline(true);
+    }
+  })().finally(() => {
+    statusRefresh = null;
+    if (statusRefreshQueued) {
+      statusRefreshQueued = false;
+      void fetchStatus();
+    }
+  });
+  return statusRefresh;
 }
 
 function connectEvents() {
   const source = new EventSource('/api/events');
   source.addEventListener('diagnostic', (message) => {
-    try { appendEvent(JSON.parse(message.data)); } catch { showOffline(true); }
+    try {
+      appendEvent(JSON.parse(message.data));
+      void fetchStatus();
+    } catch { showOffline(true); }
   });
   source.addEventListener('RESET', () => {
     diagnosticEvents.splice(0, diagnosticEvents.length);

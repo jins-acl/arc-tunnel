@@ -641,6 +641,7 @@ export class BrokerServer {
     const result = this.registry.claimTab(sessionId, tabId);
     if (!result.ok) throw new ArcTunnelError(result.code, result.code);
     this.closedTabIds.delete(tabId);
+    this.recordDiagnostic('info', 'ownership', 'TAB_CLAIMED', '标签页所有权已认领');
     return { tabId, ownership: 'owned' };
   }
 
@@ -649,6 +650,7 @@ export class BrokerServer {
     if (typeof tabId !== 'number') throw new ArcTunnelError(ErrorCode.TAB_NOT_OWNED, ErrorCode.TAB_NOT_OWNED);
     this.registry.assertOwnsTab(sessionId, tabId);
     this.registry.releaseTab(tabId);
+    this.recordDiagnostic('info', 'ownership', 'TAB_RELEASED', '标签页所有权已释放');
     return { tabId, ownership: 'unclaimed' };
   }
 
@@ -898,8 +900,11 @@ export class BrokerServer {
     const timer = setTimeout(() => {
       this.ownershipTimers.delete(sessionId);
       const now = Date.now();
-      this.registry.expireDisconnected(now);
+      const released = this.registry.expireDisconnected(now);
       this.pruneExpiredSessions(now);
+      if (released.length > 0) {
+        this.recordDiagnostic('info', 'ownership', 'TAB_OWNERSHIP_EXPIRED', '宽限期结束，标签页所有权已释放');
+      }
       this.recordDiagnostic('info', 'connection', 'AGENT_GRACE_EXPIRED', 'Agent 宽限期已结束');
     }, 30_000);
     this.ownershipTimers.set(sessionId, timer);

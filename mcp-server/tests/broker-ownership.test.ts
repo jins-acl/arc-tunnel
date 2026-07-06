@@ -154,6 +154,18 @@ describe('Broker ownership', () => {
     await expect(beta.call('claim_tab', { tabId: 300 })).resolves.toEqual(expect.objectContaining({ tabId: 300 }));
   });
 
+  it('records redacted ownership lifecycle events for claim and release', async () => {
+    await alpha.call('claim_tab', { tabId: 300 });
+    await alpha.call('release_tab', { tabId: 300 });
+    const events = (broker as any).diagnostics.eventsAfter(0).events
+      .filter((event: any) => event.category === 'ownership');
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'TAB_CLAIMED', summary: '标签页所有权已认领' }),
+      expect.objectContaining({ code: 'TAB_RELEASED', summary: '标签页所有权已释放' })
+    ]));
+    expect(JSON.stringify(events)).not.toMatch(/300|sessionId|tabId/);
+  });
+
   it('rejects a claim for a tab absent from the extension inventory', async () => {
     await expect(alpha.call('claim_tab', { tabId: 999 }))
       .rejects.toMatchObject({ code: ErrorCode.TAB_NOT_FOUND });
