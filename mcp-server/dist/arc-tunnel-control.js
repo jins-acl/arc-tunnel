@@ -53,6 +53,7 @@ var ArcTunnelError = class extends Error {
 };
 
 // src/broker-launcher.ts
+var MAX_RESPONSE_BYTES = 64 * 1024;
 function createBrokerLauncher(options = {}) {
   const homeDir = options.homeDir ?? import_os.default.homedir();
   const arcDir = import_path.default.join(homeDir, ".arc-tunnel");
@@ -248,17 +249,19 @@ function createBrokerLauncher(options = {}) {
       };
       const request = import_http.default.get({ hostname: "127.0.0.1", port: config.port, path: requestPath }, (incoming) => {
         response = incoming;
-        let body = "";
-        incoming.setEncoding("utf8");
+        const chunks = [];
+        let bytes = 0;
         incoming.on("data", (chunk) => {
-          body += chunk;
+          bytes += Buffer.byteLength(chunk);
+          if (bytes > MAX_RESPONSE_BYTES) return finish({ kind: "too-large" });
+          chunks.push(chunk);
         });
         incoming.once("aborted", () => finish({ kind: "failed" }));
         incoming.once("error", () => finish({ kind: "failed" }));
         incoming.on("end", () => {
           if (incoming.statusCode !== 200) return finish({ kind: "failed" });
           try {
-            finish({ kind: "ok", value: JSON.parse(body) });
+            finish({ kind: "ok", value: JSON.parse(Buffer.concat(chunks, bytes).toString("utf8")) });
           } catch {
             finish({ kind: "failed" });
           }
@@ -270,14 +273,32 @@ function createBrokerLauncher(options = {}) {
       const timer = setTimeout(() => finish({ kind: "failed" }), Math.min(250, startupTimeout));
     });
   }
+  function isRecord(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function isNonNegativeInteger(value) {
+    return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
+  }
+  function isPositiveInteger(value) {
+    return isNonNegativeInteger(value) && value > 0;
+  }
+  function isRecoveryPhase(value) {
+    return value === "idle" || value === "running" || value === "failed";
+  }
+  function isDiagnosticsSnapshot(value) {
+    if (!isRecord(value) || !isRecord(value.broker) || !isRecord(value.extension) || !isRecord(value.agents) || !isRecord(value.workload) || !isRecord(value.recovery)) return false;
+    const recentError = value.recentError;
+    const validRecentError = recentError === null || isRecord(recentError) && isNonNegativeInteger(recentError.timestamp) && typeof recentError.code === "string" && typeof recentError.summary === "string";
+    return isPositiveInteger(value.broker.pid) && isPositiveInteger(value.broker.port) && isPositiveInteger(value.broker.protocolVersion) && isNonNegativeInteger(value.broker.uptimeMs) && typeof value.extension.connected === "boolean" && isNonNegativeInteger(value.extension.generation) && isRecoveryPhase(value.extension.reconnectPhase) && (value.extension.lastSyncAt === null || isNonNegativeInteger(value.extension.lastSyncAt)) && isNonNegativeInteger(value.agents.connected) && isNonNegativeInteger(value.agents.grace) && isNonNegativeInteger(value.workload.claimedTabs) && isNonNegativeInteger(value.workload.pendingCommands) && isRecoveryPhase(value.recovery.inventorySync) && isRecoveryPhase(value.recovery.recordingCleanup) && validRecentError;
+  }
   async function inspectBroker2(config) {
     const healthResult = await requestJson(config, "/health");
     if (healthResult.kind === "absent") return { kind: "absent", port: config.port };
-    if (healthResult.kind !== "ok" || !healthResult.value || typeof healthResult.value !== "object") {
+    if (healthResult.kind !== "ok" || !isRecord(healthResult.value)) {
       return { kind: "foreign", port: config.port };
     }
     const health = healthResult.value;
-    if (health.name !== "arc-tunnel" || typeof health.protocolVersion !== "number" || typeof health.pid !== "number" || health.port !== config.port) {
+    if (health.name !== "arc-tunnel" || !isPositiveInteger(health.protocolVersion) || !isPositiveInteger(health.pid) || health.port !== config.port) {
       return { kind: "foreign", port: config.port };
     }
     if (health.protocolVersion !== PROTOCOL_VERSION) {
@@ -290,7 +311,7 @@ function createBrokerLauncher(options = {}) {
       };
     }
     const status = await requestJson(config, "/api/status");
-    if (status.kind !== "ok" || !status.value || typeof status.value !== "object") {
+    if (status.kind !== "ok" || !isDiagnosticsSnapshot(status.value)) {
       return {
         kind: "diagnostics-unavailable",
         port: config.port,

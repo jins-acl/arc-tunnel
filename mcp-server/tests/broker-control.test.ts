@@ -52,6 +52,16 @@ describe('broker control diagnose', () => {
     expect(codes).toEqual([2, 3, 4, 5]);
   });
 
+  it('renders diagnostics-unavailable safely in human mode with exit 5', async () => {
+    const capture = output();
+    const code = await runControl(['diagnose', '--port', '19090'], {}, capture.write, {
+      inspectBroker: async () => ({ kind: 'diagnostics-unavailable', port: 19090, pid: 42, protocolVersion: 2 })
+    });
+    expect(code).toBe(5);
+    expect(capture.read().stdout).toContain('诊断接口不可用');
+    expect(capture.read().stderr).toBe('');
+  });
+
   it('keeps status JSON byte-compatible', async () => {
     const capture = output();
     const status = { running: true, port: 19090, protocolVersion: 2, pid: 42 };

@@ -11,6 +11,9 @@ interface Health { name: 'arc-tunnel'; protocolVersion: number; pid: number; por
 interface LockFile { pid: number; port: number; protocolVersion: number; }
 interface LockSnapshot { raw: string; lock: LockFile | null; }
 type Probe = { kind: 'absent' } | { kind: 'foreign'; transient?: boolean } | { kind: 'arc'; health: Health };
+type JsonResult = { kind: 'ok'; value: unknown } | { kind: 'absent' } | { kind: 'failed' } | { kind: 'too-large' };
+
+export const MAX_RESPONSE_BYTES = 64 * 1024;
 
 export interface BrokerStatus {
   running: boolean;
@@ -210,13 +213,11 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
     return { running: true, port: config.port, protocolVersion: result.health.protocolVersion, pid: result.health.pid };
   }
 
-  function requestJson(config: BrokerConfig, requestPath: string): Promise<
-    { kind: 'ok'; value: unknown } | { kind: 'absent' } | { kind: 'failed' }
-  > {
+  function requestJson(config: BrokerConfig, requestPath: string): Promise<JsonResult> {
     return new Promise((resolve) => {
       let settled = false;
       let response: http.IncomingMessage | undefined;
-      const finish = (result: { kind: 'ok'; value: unknown } | { kind: 'absent' } | { kind: 'failed' }) => {
+      const finish = (result: JsonResult) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
@@ -226,14 +227,19 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
       };
       const request = http.get({ hostname: '127.0.0.1', port: config.port, path: requestPath }, incoming => {
         response = incoming;
-        let body = '';
-        incoming.setEncoding('utf8');
-        incoming.on('data', chunk => { body += chunk; });
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        incoming.on('data', (chunk: Buffer) => {
+          bytes += Buffer.byteLength(chunk);
+          if (bytes > MAX_RESPONSE_BYTES) return finish({ kind: 'too-large' });
+          chunks.push(chunk);
+        });
         incoming.once('aborted', () => finish({ kind: 'failed' }));
         incoming.once('error', () => finish({ kind: 'failed' }));
         incoming.on('end', () => {
           if (incoming.statusCode !== 200) return finish({ kind: 'failed' });
-          try { finish({ kind: 'ok', value: JSON.parse(body) }); } catch { finish({ kind: 'failed' }); }
+          try { finish({ kind: 'ok', value: JSON.parse(Buffer.concat(chunks, bytes).toString('utf8')) }); }
+          catch { finish({ kind: 'failed' }); }
         });
       });
       request.once('error', (error: NodeJS.ErrnoException) => {
@@ -243,15 +249,55 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
     });
   }
 
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+  }
+
+  function isNonNegativeInteger(value: unknown): value is number {
+    return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
+  }
+
+  function isPositiveInteger(value: unknown): value is number {
+    return isNonNegativeInteger(value) && value > 0;
+  }
+
+  function isRecoveryPhase(value: unknown): value is 'idle' | 'running' | 'failed' {
+    return value === 'idle' || value === 'running' || value === 'failed';
+  }
+
+  function isDiagnosticsSnapshot(value: unknown): value is DiagnosticsSnapshot {
+    if (!isRecord(value) || !isRecord(value.broker) || !isRecord(value.extension)
+      || !isRecord(value.agents) || !isRecord(value.workload) || !isRecord(value.recovery)) return false;
+    const recentError = value.recentError;
+    const validRecentError = recentError === null || (isRecord(recentError)
+      && isNonNegativeInteger(recentError.timestamp)
+      && typeof recentError.code === 'string' && typeof recentError.summary === 'string');
+    return isPositiveInteger(value.broker.pid)
+      && isPositiveInteger(value.broker.port)
+      && isPositiveInteger(value.broker.protocolVersion)
+      && isNonNegativeInteger(value.broker.uptimeMs)
+      && typeof value.extension.connected === 'boolean'
+      && isNonNegativeInteger(value.extension.generation)
+      && isRecoveryPhase(value.extension.reconnectPhase)
+      && (value.extension.lastSyncAt === null || isNonNegativeInteger(value.extension.lastSyncAt))
+      && isNonNegativeInteger(value.agents.connected)
+      && isNonNegativeInteger(value.agents.grace)
+      && isNonNegativeInteger(value.workload.claimedTabs)
+      && isNonNegativeInteger(value.workload.pendingCommands)
+      && isRecoveryPhase(value.recovery.inventorySync)
+      && isRecoveryPhase(value.recovery.recordingCleanup)
+      && validRecentError;
+  }
+
   async function inspectBroker(config: BrokerConfig): Promise<BrokerInspection> {
     const healthResult = await requestJson(config, '/health');
     if (healthResult.kind === 'absent') return { kind: 'absent', port: config.port };
-    if (healthResult.kind !== 'ok' || !healthResult.value || typeof healthResult.value !== 'object') {
+    if (healthResult.kind !== 'ok' || !isRecord(healthResult.value)) {
       return { kind: 'foreign', port: config.port };
     }
-    const health = healthResult.value as Partial<Health>;
-    if (health.name !== 'arc-tunnel' || typeof health.protocolVersion !== 'number'
-      || typeof health.pid !== 'number' || health.port !== config.port) {
+    const health = healthResult.value;
+    if (health.name !== 'arc-tunnel' || !isPositiveInteger(health.protocolVersion)
+      || !isPositiveInteger(health.pid) || health.port !== config.port) {
       return { kind: 'foreign', port: config.port };
     }
     if (health.protocolVersion !== PROTOCOL_VERSION) {
@@ -259,12 +305,12 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
         protocolVersion: health.protocolVersion, expectedProtocolVersion: PROTOCOL_VERSION };
     }
     const status = await requestJson(config, '/api/status');
-    if (status.kind !== 'ok' || !status.value || typeof status.value !== 'object') {
+    if (status.kind !== 'ok' || !isDiagnosticsSnapshot(status.value)) {
       return { kind: 'diagnostics-unavailable', port: config.port, pid: health.pid,
         protocolVersion: health.protocolVersion };
     }
     return { kind: 'healthy', port: config.port, pid: health.pid, protocolVersion: health.protocolVersion,
-      diagnostics: status.value as DiagnosticsSnapshot };
+      diagnostics: status.value };
   }
 
   async function stopBroker(config: BrokerConfig): Promise<void> {

@@ -4,7 +4,7 @@ import net from 'net';
 import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
-import { createBrokerLauncher } from '../src/broker-launcher';
+import { createBrokerLauncher, MAX_RESPONSE_BYTES } from '../src/broker-launcher';
 
 async function freePort(): Promise<number> {
   const server = http.createServer();
@@ -22,6 +22,15 @@ function connectionCleanup(server: http.Server): () => void {
   });
   return () => {
     for (const socket of sockets) socket.destroy();
+  };
+}
+
+function diagnostics(port: number): any {
+  return {
+    broker: { pid: 42, port, protocolVersion: 2, uptimeMs: 10 },
+    extension: { connected: false, generation: 0, reconnectPhase: 'idle', lastSyncAt: null },
+    agents: { connected: 0, grace: 0 }, workload: { claimedTabs: 0, pendingCommands: 0 },
+    recovery: { inventorySync: 'idle', recordingCleanup: 'idle' }, recentError: null
   };
 }
 
@@ -96,12 +105,7 @@ describe('broker launcher', () => {
   ])('classifies endpoint health %j as %s', async (health, kind) => {
     const server = http.createServer((request, response) => {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify(request.url === '/health' ? { ...health, port } : {
-        broker: { pid: 42, port, protocolVersion: 2, uptimeMs: 10 },
-        extension: { connected: false, generation: 0, reconnectPhase: 'idle', lastSyncAt: null },
-        agents: { connected: 0, grace: 0 }, workload: { claimedTabs: 0, pendingCommands: 0 },
-        recovery: { inventorySync: 'idle', recordingCleanup: 'idle' }, recentError: null
-      }));
+      response.end(JSON.stringify(request.url === '/health' ? { ...health, port } : diagnostics(port)));
     });
     await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
     await expect(launcher.inspectBroker({ host: '127.0.0.1', port })).resolves.toMatchObject({ kind });
@@ -124,6 +128,96 @@ describe('broker launcher', () => {
       kind: 'diagnostics-unavailable', port, pid: 42, protocolVersion: 2
     });
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it.each([
+    {}, [],
+    { broker: { pid: 42, port: 1, protocolVersion: 2, uptimeMs: 10 } },
+    { mutate: (value: any) => { value.broker.uptimeMs = -1; } },
+    { mutate: (value: any) => { value.extension.connected = 'yes'; } },
+    { mutate: (value: any) => { value.extension.reconnectPhase = 'unknown'; } },
+    { mutate: (value: any) => { value.agents.connected = null; } },
+    { mutate: (value: any) => { value.workload.pendingCommands = 1.5; } },
+    { mutate: (value: any) => { value.recovery.inventorySync = false; } },
+    { mutate: (value: any) => { value.recentError = {}; } },
+    { mutate: (value: any) => { value.recentError = { timestamp: null, code: 'E', summary: 'bad' }; } },
+    { mutate: (value: any) => { value.broker.pid = Number.NaN; } },
+    { mutate: (value: any) => { value.extension.generation = Number.POSITIVE_INFINITY; } }
+  ])('rejects malformed diagnostics without reporting healthy: %#', async (invalid) => {
+    let status: any = invalid;
+    if (invalid && !Array.isArray(invalid) && typeof invalid === 'object' && 'mutate' in invalid) {
+      status = diagnostics(port);
+      (invalid.mutate as (value: any) => void)(status);
+    }
+    const server = http.createServer((request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(request.url === '/health'
+        ? { name: 'arc-tunnel', protocolVersion: 2, pid: 42, port } : status));
+    });
+    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
+    await expect(launcher.inspectBroker({ host: '127.0.0.1', port })).resolves.toEqual({
+      kind: 'diagnostics-unavailable', port, pid: 42, protocolVersion: 2
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('rejects a single Unicode health write larger than the exact 64 KiB byte limit', async () => {
+    expect(MAX_RESPONSE_BYTES).toBe(64 * 1024);
+    const server = http.createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(Buffer.from('界'.repeat(Math.floor(MAX_RESPONSE_BYTES / 3) + 1), 'utf8'));
+    });
+    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
+    await expect(launcher.inspectBroker({ host: '127.0.0.1', port })).resolves.toEqual({ kind: 'foreign', port });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('bounds multi-chunk Unicode status responses by bytes and stops reading immediately', async () => {
+    expect(MAX_RESPONSE_BYTES).toBe(64 * 1024);
+    let writes = 0;
+    const server = http.createServer((request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      if (request.url === '/health') {
+        response.end(JSON.stringify({ name: 'arc-tunnel', protocolVersion: 2, pid: 42, port }));
+        return;
+      }
+      const chunk = '界'.repeat(1024); // 3072 bytes per chunk
+      const timer = setInterval(() => { writes++; response.write(chunk); }, 1);
+      response.once('close', () => clearInterval(timer));
+    });
+    const destroyConnections = connectionCleanup(server);
+    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
+    const started = Date.now();
+    await expect(launcher.inspectBroker({ host: '127.0.0.1', port })).resolves.toEqual({
+      kind: 'diagnostics-unavailable', port, pid: 42, protocolVersion: 2
+    });
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(writes).toBeLessThan(30);
+    destroyConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('preserves valid Unicode split across response chunk byte boundaries', async () => {
+    const status = diagnostics(port);
+    status.recentError = { timestamp: 1, code: 'TEST', summary: '连接失败' };
+    const payload = Buffer.from(JSON.stringify(status), 'utf8');
+    const marker = Buffer.from('连', 'utf8');
+    const split = payload.indexOf(marker) + 1;
+    const server = http.createServer((request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      if (request.url === '/health') {
+        response.end(JSON.stringify({ name: 'arc-tunnel', protocolVersion: 2, pid: 42, port }));
+      } else {
+        response.write(payload.subarray(0, split));
+        setImmediate(() => response.end(payload.subarray(split)));
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
+    const inspection = await launcher.inspectBroker({ host: '127.0.0.1', port });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    expect(inspection).toMatchObject({
+      kind: 'healthy', diagnostics: { recentError: { summary: '连接失败' } }
+    });
   });
 
   it('treats a foreign listener that never sends health headers as PORT_IN_USE', async () => {
