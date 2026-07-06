@@ -65,10 +65,14 @@ function setCategory(category) {
   renderEvents();
 }
 
+function visibleEvents() {
+  return diagnosticEvents.filter((event) => currentCategory === 'all' || event.category === currentCategory);
+}
+
 function renderEvents() {
   const list = byId('event-list');
   while (list.firstChild) list.removeChild(list.firstChild);
-  const visible = diagnosticEvents.filter((event) => currentCategory === 'all' || event.category === currentCategory);
+  const visible = visibleEvents();
   if (visible.length === 0) {
     const empty = document.createElement('li');
     empty.className = 'empty';
@@ -95,7 +99,7 @@ function renderEvents() {
 }
 
 async function copyDiagnostics() {
-  const payload = { status: currentStatus, events: diagnosticEvents.slice() };
+  const payload = { status: currentStatus, events: visibleEvents() };
   await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
   const button = byId('copy-diagnostics');
   const original = button.textContent;

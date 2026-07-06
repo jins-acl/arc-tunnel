@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import vm from 'vm';
 import { BrokerServer } from '../src/broker/broker-server';
 
 describe('Chinese operations dashboard', () => {
@@ -66,4 +67,55 @@ describe('Chinese operations dashboard', () => {
     await expect(fetch(`${base}/dashboard/index.html`)).resolves.toMatchObject({ status: 404 });
     await expect(fetch(`${base}/dashboard/not-allowed.js`)).resolves.toMatchObject({ status: 404 });
   });
+
+  it.each(['connection', 'recovery'])(
+    'copies only the currently rendered %s diagnostic events',
+    async category => {
+      const script = fs.readFileSync(path.join(__dirname, '..', 'src', 'dashboard', 'dashboard.js'), 'utf8');
+      const writes: string[] = [];
+      const elements = new Map<string, any>();
+      const element = () => ({
+        className: '', textContent: '', hidden: false, firstChild: null,
+        appendChild: jest.fn(), removeChild: jest.fn(), addEventListener: jest.fn(),
+        querySelector: jest.fn(() => ({ textContent: '' }))
+      });
+      for (const id of [
+        'event-list', 'event-filter', 'copy-diagnostics', 'offline-banner', 'overall-status',
+        'broker-card', 'extension-card', 'recovery-card', 'agent-count', 'grace-count',
+        'claimed-tab-count', 'pending-count', 'connection-detail'
+      ]) elements.set(id, element());
+
+      const context = {
+        document: {
+          getElementById: (id: string) => elements.get(id),
+          createElement: element
+        },
+        navigator: { clipboard: { writeText: async (value: string) => { writes.push(value); } } },
+        EventSource: class {
+          onopen = null;
+          onerror = null;
+          addEventListener() { /* test stub */ }
+        },
+        fetch: async () => ({ ok: false }),
+        setTimeout: jest.fn(),
+        console
+      };
+      vm.runInNewContext(script, context);
+      const appendEvent = vm.runInNewContext('appendEvent', context);
+      const setCategory = vm.runInNewContext('setCategory', context);
+      const copyDiagnostics = vm.runInNewContext('copyDiagnostics', context);
+      for (const eventCategory of ['broker', 'connection', 'ownership', 'recovery']) {
+        appendEvent({ sequence: 1, timestamp: 1, level: 'info', category: eventCategory, code: eventCategory, summary: eventCategory });
+      }
+      setCategory(category);
+      await copyDiagnostics();
+
+      const payload = JSON.parse(writes[writes.length - 1]);
+      expect(payload.events).toHaveLength(1);
+      expect(payload.events[0].category).toBe(category);
+      expect(payload.events).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ category: category === 'connection' ? 'recovery' : 'connection' })
+      ]));
+    }
+  );
 });

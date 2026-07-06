@@ -1,5 +1,5 @@
 const esbuild = require('esbuild');
-const fs = require('fs');
+const { publishDashboard } = require('./publish-dashboard');
 
 const entries = [
   ['src/index.ts', 'dist/mcp-server.js'],
@@ -16,8 +16,7 @@ async function build() {
     outfile,
     sourcemap: true
   })));
-  fs.rmSync('dist/dashboard', { recursive: true, force: true });
-  fs.cpSync('src/dashboard', 'dist/dashboard', { recursive: true });
+  publishDashboard();
   console.log('MCP server build complete');
 }
 
