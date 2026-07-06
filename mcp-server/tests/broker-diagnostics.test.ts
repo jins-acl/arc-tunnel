@@ -188,8 +188,33 @@ describe('Broker diagnostics API', () => {
     for (let index = 0; index < 201; index++) {
       diagnostics.record({ level: 'info', category: 'broker', code: 'FILL', summary: '填充事件' });
     }
-    const { events } = await readEvents(broker.address().port, '/api/events?after=0', 1);
+    const { events } = await readEvents(broker.address().port, '/api/events?after=0', 201);
     expect(events[0].event).toBe('RESET');
+    expect(events.slice(1).map(event => event.id)).toEqual(
+      Array.from({ length: 200 }, (_, index) => String(index + 3))
+    );
+  });
+
+  it('force-destroys a paused SSE response during stop even without write backpressure', async () => {
+    let incoming!: http.IncomingMessage;
+    await new Promise<void>((resolve, reject) => {
+      const request = http.get(`http://127.0.0.1:${broker.address().port}/api/events?after=1`, response => {
+        incoming = response;
+        response.pause();
+        resolve();
+      });
+      request.once('error', reject);
+    });
+    const response = [...(broker as any).sseClients][0] as http.ServerResponse;
+    const destroy = jest.spyOn(response, 'destroy');
+
+    await expect(Promise.race([
+      broker.stop(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('stop timed out')), 250))
+    ])).resolves.toBeUndefined();
+    expect(destroy).toHaveBeenCalled();
+    expect((broker as any).sseClients.size).toBe(0);
+    incoming.destroy();
   });
 
   it('closes a live SSE response without blocking broker stop', async () => {

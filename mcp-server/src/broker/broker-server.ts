@@ -230,7 +230,7 @@ export class BrokerServer {
     this.extension?.close();
     this.extension = null;
 
-    for (const response of this.sseClients) response.end();
+    for (const response of this.sseClients) response.destroy();
     this.sseClients.clear();
 
     await Promise.all([this.closeWebSocketServer(this.agentWss), this.closeWebSocketServer(this.extensionWss)]);
@@ -272,18 +272,49 @@ export class BrokerServer {
     this.sseClients.add(response);
     let closed = false;
     let unsubscribe = (): void => undefined;
+    const frames: string[] = [];
+    let draining = false;
+    let drainTimer: NodeJS.Timeout | null = null;
     const close = () => {
       if (closed) return;
       closed = true;
+      if (drainTimer) clearTimeout(drainTimer);
       unsubscribe();
       this.sseClients.delete(response);
     };
-    const writeFrame = (frame: string): boolean => {
-      if (closed) return false;
-      if (response.write(frame)) return true;
+    const failSlowClient = () => {
       close();
       response.destroy();
-      return false;
+    };
+    const pump = () => {
+      if (closed || draining) return;
+      while (frames.length > 0) {
+        if (response.write(frames.shift()!)) continue;
+        draining = true;
+        const resume = () => {
+          if (!draining) return;
+          draining = false;
+          if (drainTimer) clearTimeout(drainTimer);
+          drainTimer = null;
+          pump();
+        };
+        response.once('drain', resume);
+        drainTimer = setTimeout(() => {
+          response.off('drain', resume);
+          failSlowClient();
+        }, 100);
+        return;
+      }
+    };
+    const writeFrame = (frame: string): boolean => {
+      if (closed) return false;
+      if (frames.length >= 256) {
+        failSlowClient();
+        return false;
+      }
+      frames.push(frame);
+      pump();
+      return !closed;
     };
     let replaying = true;
     let lastSent = -1;
@@ -310,10 +341,8 @@ export class BrokerServer {
     const replay = this.diagnostics.eventsAfter(sequence);
     if (replay.reset) {
       if (!writeFrame(`event: RESET\ndata: ${JSON.stringify(this.diagnosticsSnapshot())}\n\n`)) return;
-      lastSent = replay.events[replay.events.length - 1]?.sequence ?? sequence;
-    } else {
-      for (const event of replay.events) write(event);
     }
+    for (const event of replay.events) write(event);
     replaying = false;
     for (const event of pending.sort((left, right) => left.sequence - right.sequence)) write(event);
   }
@@ -408,7 +437,7 @@ export class BrokerServer {
       this.extensionReconnectPhase = 'running';
       this.publishExtensionState();
       this.extensionSync = new Promise(resolve => setImmediate(resolve))
-        .then(() => this.cleanupDisconnectedRecording(ws))
+        .then(() => this.cleanupDisconnectedRecording(ws, generation))
         .then(() => this.syncExtensionInventory(ws, generation))
         .then(() => {
           if (!this.isCurrentExtension(ws, generation)) return;
@@ -518,7 +547,8 @@ export class BrokerServer {
     } catch (error) {
       if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
       if (this.recordingCleanupSessionId === sessionId) {
-        void this.cleanupDisconnectedRecording(this.extension);
+        const ws = this.extension;
+        if (ws) void this.cleanupDisconnectedRecording(ws, this.extensionGeneration);
       }
       throw error;
     }
@@ -712,7 +742,8 @@ export class BrokerServer {
       if (route.command === 'start_recording' && recordingId) {
         this.registry.addRecording(route.sessionId, recordingId);
         if (this.recordingCleanupSessionId === route.sessionId) {
-          void this.cleanupDisconnectedRecording(this.extension);
+          const ws = this.extension;
+          if (ws) void this.cleanupDisconnectedRecording(ws, this.extensionGeneration);
         }
       }
       if (route.command === 'stop_recording') this.registry.clearRecordings(route.sessionId);
@@ -810,7 +841,8 @@ export class BrokerServer {
     }
     if (hasActiveRecording || hasStartingRecording) {
       this.recordingCleanupSessionId = sessionId;
-      if (hasActiveRecording) void this.cleanupDisconnectedRecording(this.extension);
+      const ws = this.extension;
+      if (hasActiveRecording && ws) void this.cleanupDisconnectedRecording(ws, this.extensionGeneration);
     } else if (this.recordingReservationSessionId === sessionId) {
       this.recordingReservationSessionId = null;
     }
@@ -827,9 +859,9 @@ export class BrokerServer {
     this.ownershipTimers.set(sessionId, timer);
   }
 
-  private async cleanupDisconnectedRecording(ws: WebSocket | null): Promise<void> {
+  private async cleanupDisconnectedRecording(ws: WebSocket, generation: number): Promise<void> {
     const sessionId = this.recordingCleanupSessionId;
-    if (!sessionId || !ws || this.extension !== ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!sessionId || !this.isCurrentExtension(ws, generation) || ws.readyState !== WebSocket.OPEN) return;
     this.diagnostics.setRecordingCleanup('running');
     this.recordDiagnostic('info', 'recovery', 'RECORDING_CLEANUP_STARTED', '录制清理已开始');
     try {
@@ -837,14 +869,17 @@ export class BrokerServer {
         type: 'agent_request', requestId: 'disconnect-recording-cleanup',
         command: 'stop_recording', params: {}, timeout: 1_000
       }, true);
+      if (!this.isCurrentExtension(ws, generation)) return;
       if (this.recordingCleanupSessionId === sessionId) this.recordingCleanupSessionId = null;
       this.diagnostics.setRecordingCleanup('idle');
       this.recordDiagnostic('info', 'recovery', 'RECORDING_CLEANUP_COMPLETED', '录制清理已完成');
     } catch {
+      if (!this.isCurrentExtension(ws, generation)) return;
       this.diagnostics.setRecordingCleanup('failed');
       this.recordDiagnostic('error', 'recovery', 'RECORDING_CLEANUP_FAILED', '录制清理失败');
       if (this.extension === ws) ws.close(1012, 'recording cleanup failed');
     } finally {
+      if (!this.isCurrentExtension(ws, generation)) return;
       this.registry.clearRecordings(sessionId);
       if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
       this.pruneExpiredSessions();

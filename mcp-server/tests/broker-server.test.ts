@@ -260,6 +260,43 @@ describe('BrokerServer', () => {
     expect(sync.command).toBe('list_tabs');
   });
 
+  it('fences disconnected recording cleanup by extension generation', async () => {
+    const registry = new SessionRegistry();
+    await broker.stop();
+    broker = new BrokerServer({ host: '127.0.0.1', port: 0 }, { registry });
+    await broker.start();
+    const port = broker.address().port;
+    const first = await connectRole(port, '/extension', 'extension');
+    const alpha = await connectRole(port, '/agent', 'agent');
+    sockets.push(first.ws, alpha.ws);
+    registry.addRecording(alpha.welcome.sessionId, 'recording-alpha');
+    (broker as any).recordingReservationSessionId = alpha.welcome.sessionId;
+
+    const oldCleanup = nextMessage(first.ws);
+    await closeWs(alpha.ws);
+    expect((await oldCleanup).command).toBe('stop_recording');
+
+    const replacement = await openWs(port, '/extension', 'chrome-extension://test');
+    sockets.push(replacement);
+    const received: JsonMessage[] = [];
+    replacement.on('message', data => received.push(JSON.parse(data.toString())));
+    replacement.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    await waitUntil(() => received.some(message => message.command === 'stop_recording'));
+
+    expect(registry.activeRecordingId(alpha.welcome.sessionId)).toBe('recording-alpha');
+    expect((broker as any).recordingReservationSessionId).toBe(alpha.welcome.sessionId);
+    expect((broker as any).diagnostics.snapshot({
+      now: Date.now(), connectedAgents: 0, graceAgents: 1, claimedTabs: 0, pendingCommands: 1
+    }).recovery.recordingCleanup).toBe('running');
+
+    const cleanup = received.find(message => message.command === 'stop_recording')!;
+    replacement.send(JSON.stringify({ id: cleanup.id, type: 'response', success: false,
+      error: { code: 'INTERNAL_ERROR', message: 'No active recording' } }));
+    await waitUntil(() => received.some(message => message.command === 'list_tabs'));
+    const sync = received.find(message => message.command === 'list_tabs')!;
+    replacement.send(JSON.stringify({ id: sync.id, type: 'response', success: true, result: { tabs: [] } }));
+  });
+
   it('cleans up an uncertain in-flight start before replacement inventory sync', async () => {
     const registry = new SessionRegistry();
     await broker.stop();
