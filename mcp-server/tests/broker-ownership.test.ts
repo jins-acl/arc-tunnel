@@ -11,8 +11,8 @@ function nextMessage(ws: WebSocket): Promise<Message> {
   });
 }
 
-async function waitUntil(predicate: () => boolean): Promise<boolean> {
-  for (let attempt = 0; attempt < 50 && !predicate(); attempt++) {
+async function waitUntil(predicate: () => boolean, attempts = 50): Promise<boolean> {
+  for (let attempt = 0; attempt < attempts && !predicate(); attempt++) {
     await new Promise(resolve => setTimeout(resolve, 5));
   }
   return predicate();
@@ -348,6 +348,8 @@ describe('Broker ownership', () => {
       alphaSocket.once('close', () => resolve());
       alphaSocket.close();
     });
+    expect(await waitUntil(() => (broker as any).diagnostics.eventsAfter(0).events
+      .some((event: Message) => event.code === 'AGENT_GRACE_STARTED'), 400)).toBe(true);
     expect(commands.slice(offset).filter(command => command.command === 'stop_recording')).toHaveLength(0);
 
     extension.send(JSON.stringify({
@@ -369,6 +371,8 @@ describe('Broker ownership', () => {
       alphaSocket.once('close', () => resolve());
       alphaSocket.close();
     });
+    expect(await waitUntil(() => (broker as any).diagnostics.eventsAfter(0).events
+      .some((event: Message) => event.code === 'AGENT_GRACE_STARTED'), 400)).toBe(true);
 
     extension.send(JSON.stringify({ id: start.id, type: 'response', success: true, result: {} }));
     expect(await waitUntil(() => commands.slice(offset).some(command => command.command === 'stop_recording')))
