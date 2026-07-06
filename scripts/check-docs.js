@@ -8,6 +8,21 @@ const parsePackage = (file) => JSON.parse(read(file));
 const root = parsePackage('package.json');
 const mcp = parsePackage('mcp-server/package.json');
 const extension = parsePackage('extension/package.json');
+const mcpLock = parsePackage('mcp-server/package-lock.json');
+const extensionLock = parsePackage('extension/package-lock.json');
+
+for (const [label, pkg, lock] of [
+  ['mcp-server', mcp, mcpLock],
+  ['extension', extension, extensionLock]
+]) {
+  if (lock.name !== pkg.name) throw new Error(`${label} lock name must match package metadata`);
+  if (lock.packages?.['']?.name !== pkg.name) {
+    throw new Error(`${label} lock root package name must match package metadata`);
+  }
+  if (lock.packages?.['']?.license !== pkg.license) {
+    throw new Error(`${label} lock root package license must match package metadata`);
+  }
+}
 
 if (root.private !== true) throw new Error('Root package must be private');
 if (root.license !== 'MIT' || mcp.license !== 'MIT' || extension.license !== 'MIT') {
