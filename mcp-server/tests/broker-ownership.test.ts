@@ -11,10 +11,11 @@ function nextMessage(ws: WebSocket): Promise<Message> {
   });
 }
 
-async function waitUntil(predicate: () => boolean): Promise<void> {
+async function waitUntil(predicate: () => boolean): Promise<boolean> {
   for (let attempt = 0; attempt < 50 && !predicate(); attempt++) {
     await new Promise(resolve => setTimeout(resolve, 5));
   }
+  return predicate();
 }
 
 async function connect(port: number, path: '/agent' | '/extension', role: 'agent' | 'extension') {
@@ -370,7 +371,8 @@ describe('Broker ownership', () => {
     });
 
     extension.send(JSON.stringify({ id: start.id, type: 'response', success: true, result: {} }));
-    await waitUntil(() => commands.slice(offset).some(command => command.command === 'stop_recording'));
+    expect(await waitUntil(() => commands.slice(offset).some(command => command.command === 'stop_recording')))
+      .toBe(true);
 
     expect(commands.slice(offset).map(command => command.command))
       .toEqual(['start_recording', 'stop_recording']);

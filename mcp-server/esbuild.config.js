@@ -14,7 +14,8 @@ async function build() {
     platform: 'node',
     target: 'node18',
     outfile,
-    sourcemap: true
+    sourcemap: true,
+    sourcesContent: false
   })));
   publishDashboard();
   console.log('MCP server build complete');

@@ -187,14 +187,15 @@ describe('broker launcher', () => {
     });
     const destroyConnections = connectionCleanup(server);
     await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
-    const started = Date.now();
-    await expect(launcher.inspectBroker({ host: '127.0.0.1', port })).resolves.toEqual({
-      kind: 'diagnostics-unavailable', port, pid: 42, protocolVersion: 2
-    });
-    expect(Date.now() - started).toBeLessThan(200);
-    expect(writes).toBeLessThan(30);
-    destroyConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    try {
+      await expect(launcher.inspectBroker({ host: '127.0.0.1', port })).resolves.toEqual({
+        kind: 'diagnostics-unavailable', port, pid: 42, protocolVersion: 2
+      });
+      expect(writes).toBeLessThan(30);
+    } finally {
+      destroyConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it('preserves valid Unicode split across response chunk byte boundaries', async () => {

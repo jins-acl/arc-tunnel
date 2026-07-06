@@ -416,10 +416,19 @@ describe('BrokerServer', () => {
     sockets.push(agent.ws);
     registry.claimTab(agent.welcome.sessionId, 42);
     const expire = jest.spyOn(registry, 'expireDisconnected');
+    let markDisconnected!: () => void;
+    const disconnected = new Promise<void>((resolve) => { markDisconnected = resolve; });
+    const disconnect = jest.spyOn(registry, 'disconnect');
+    disconnect.mockImplementation((...args) => {
+      disconnect.mockRestore();
+      registry.disconnect(...args);
+      markDisconnected();
+    });
 
     jest.useFakeTimers();
     agent.ws.close();
     await new Promise<void>((resolve) => agent.ws.once('close', () => resolve()));
+    await disconnected;
     jest.advanceTimersByTime(29_999);
     expect(expire).not.toHaveBeenCalled();
     jest.advanceTimersByTime(1);

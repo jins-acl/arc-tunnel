@@ -5,6 +5,13 @@ import path from 'path';
 const { publishDashboard } = require('../publish-dashboard');
 
 describe('dashboard build publisher', () => {
+  it('keeps committed source maps independent of checkout line endings', () => {
+    for (const name of ['mcp-server.js.map', 'arc-tunnel-broker.js.map', 'arc-tunnel-control.js.map']) {
+      const sourceMap = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dist', name), 'utf8'));
+      expect(sourceMap).not.toHaveProperty('sourcesContent');
+    }
+  });
+
   it('exports a testable dashboard publisher', () => {
     let module: unknown;
     try {
