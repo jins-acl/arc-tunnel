@@ -18,6 +18,7 @@ import {
 import { ResponseMessage } from '../types';
 import { SessionRegistry } from './session-registry';
 import { TabScheduler } from './tab-scheduler';
+import { DiagnosticEvent, DiagnosticsStore, RecoveryPhase } from './diagnostics-store';
 
 interface PendingRoute {
   sessionId: string;
@@ -106,6 +107,11 @@ export class BrokerServer {
   private readonly windowInitializations = new Map<string, Promise<{ windowId: number; result: unknown }>>();
   private readonly closedTabIds = new Set<number>();
   private readonly tabGenerations = new Map<number, number>();
+  private readonly sseClients = new Set<http.ServerResponse>();
+  private diagnostics!: DiagnosticsStore;
+  private extensionGeneration = 0;
+  private extensionReconnectPhase: RecoveryPhase = 'idle';
+  private extensionLastSyncAt: number | null = null;
   private httpServer: http.Server | null = null;
   private extension: WebSocket | null = null;
   private listeningPort: number | null = null;
@@ -122,6 +128,7 @@ export class BrokerServer {
 
   async start(): Promise<void> {
     if (this.httpServer) return;
+    const startedAt = Date.now();
 
     this.httpServer = http.createServer((request, response) => {
       if (request.method === 'GET' && request.url === '/health') {
@@ -132,6 +139,16 @@ export class BrokerServer {
           pid: process.pid,
           port: this.address().port
         }));
+        return;
+      }
+      if (request.method === 'GET' && request.url === '/api/status') {
+        this.writeDiagnosticHeaders(response, 'application/json; charset=utf-8');
+        response.writeHead(200);
+        response.end(JSON.stringify(this.diagnosticsSnapshot()));
+        return;
+      }
+      if (request.method === 'GET' && new URL(request.url || '/', 'http://localhost').pathname === '/api/events') {
+        this.openEventStream(request, response);
         return;
       }
       response.writeHead(404);
@@ -175,6 +192,10 @@ export class BrokerServer {
         server.off('error', onError);
         const address = server.address() as AddressInfo;
         this.listeningPort = address.port;
+        this.diagnostics = new DiagnosticsStore({
+          pid: process.pid, port: address.port, protocolVersion: PROTOCOL_VERSION, startedAt
+        });
+        this.recordDiagnostic('info', 'broker', 'BROKER_STARTED', 'Broker 已启动');
         resolve();
       };
       server.once('error', onError);
@@ -197,6 +218,7 @@ export class BrokerServer {
   private async performStop(): Promise<void> {
     const server = this.httpServer!;
     this.stopping = true;
+    this.recordDiagnostic('info', 'broker', 'BROKER_STOPPING', 'Broker 正在停止');
 
     this.rejectAllRoutes(ErrorCode.EXTENSION_DISCONNECTED);
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -207,6 +229,9 @@ export class BrokerServer {
     this.agents.clear();
     this.extension?.close();
     this.extension = null;
+
+    for (const response of this.sseClients) response.end();
+    this.sseClients.clear();
 
     await Promise.all([this.closeWebSocketServer(this.agentWss), this.closeWebSocketServer(this.extensionWss)]);
     this.httpServer = null;
@@ -219,6 +244,67 @@ export class BrokerServer {
     return { host: '127.0.0.1', port: this.listeningPort };
   }
 
+  dashboardUrl(): string {
+    return `http://${this.address().host}:${this.address().port}/`;
+  }
+
+  private writeDiagnosticHeaders(response: http.ServerResponse, contentType: string): void {
+    response.setHeader('content-type', contentType);
+    response.setHeader('cache-control', 'no-store');
+    response.setHeader('x-content-type-options', 'nosniff');
+    response.setHeader('x-frame-options', 'DENY');
+    response.setHeader('content-security-policy', "default-src 'none'");
+  }
+
+  private diagnosticsSnapshot() {
+    const counts = this.registry.diagnosticsCounts();
+    return this.diagnostics.snapshot({
+      now: Date.now(), connectedAgents: counts.connected, graceAgents: counts.grace,
+      claimedTabs: counts.claimedTabs, pendingCommands: this.routes.size
+    });
+  }
+
+  private openEventStream(request: http.IncomingMessage, response: http.ServerResponse): void {
+    this.writeDiagnosticHeaders(response, 'text/event-stream; charset=utf-8');
+    response.setHeader('connection', 'keep-alive');
+    response.writeHead(200);
+    this.sseClients.add(response);
+    let closed = false;
+    let unsubscribe = (): void => undefined;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      unsubscribe();
+      this.sseClients.delete(response);
+    };
+    const write = (event: DiagnosticEvent) => {
+      if (!closed) response.write(`id: ${event.sequence}\nevent: diagnostic\ndata: ${JSON.stringify(event)}\n\n`);
+    };
+    unsubscribe = this.diagnostics.subscribe(write);
+    request.once('close', close);
+    response.once('close', close);
+    const url = new URL(request.url || '/', 'http://localhost');
+    const rawSequence = request.headers['last-event-id'] ?? url.searchParams.get('after') ?? '0';
+    const parsed = Number.parseInt(Array.isArray(rawSequence) ? rawSequence[0] : rawSequence, 10);
+    const replay = this.diagnostics.eventsAfter(Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0);
+    if (replay.reset) response.write(`event: RESET\ndata: ${JSON.stringify(this.diagnosticsSnapshot())}\n\n`);
+    for (const event of replay.events) write(event);
+  }
+
+  private recordDiagnostic(
+    level: 'info' | 'warning' | 'error', category: 'broker' | 'connection' | 'ownership' | 'recovery',
+    code: string, summary: string
+  ): void {
+    this.diagnostics.record({ level, category, code, summary });
+  }
+
+  private publishExtensionState(): void {
+    this.diagnostics.setExtensionState({
+      connected: this.isExtensionConnected(), generation: this.extensionGeneration,
+      reconnectPhase: this.extensionReconnectPhase, lastSyncAt: this.extensionLastSyncAt
+    });
+  }
+
   isExtensionConnected(): boolean {
     return this.extension?.readyState === WebSocket.OPEN;
   }
@@ -229,6 +315,7 @@ export class BrokerServer {
       const sessionId = randomUUID();
       this.registry.createSession(sessionId);
       this.agents.set(sessionId, ws);
+      this.recordDiagnostic('info', 'connection', 'AGENT_CONNECTED', 'Agent 已连接');
       this.send(ws, { type: 'welcome', protocolVersion: PROTOCOL_VERSION, sessionId } satisfies WelcomeMessage);
 
       ws.on('message', (data) => this.handleAgentMessage(sessionId, data));
@@ -279,18 +366,32 @@ export class BrokerServer {
 
   private activateExtension(ws: WebSocket, sendWelcome: boolean): void {
     if (this.extension && this.extension !== ws) {
+      this.recordDiagnostic('warning', 'connection', 'EXTENSION_REPLACED', '扩展连接已被替换');
       this.rejectAllRoutes(ErrorCode.EXTENSION_DISCONNECTED);
       this.extension.close(1012, 'replaced');
     }
     this.extension = ws;
+    this.extensionGeneration++;
+    this.recordDiagnostic('info', 'connection', 'EXTENSION_CONNECTED', '扩展已连接');
+    this.publishExtensionState();
     if (sendWelcome) this.send(ws, { type: 'welcome', protocolVersion: PROTOCOL_VERSION } satisfies WelcomeMessage);
     ws.on('message', (data) => this.handleExtensionMessage(ws, data));
     if (this.hasActivatedExtension) {
+      this.extensionReconnectPhase = 'running';
+      this.publishExtensionState();
       this.extensionSync = new Promise(resolve => setImmediate(resolve))
         .then(() => this.cleanupDisconnectedRecording(ws))
         .then(() => this.syncExtensionInventory(ws))
+        .then(() => {
+          if (this.extension !== ws) return;
+          this.extensionReconnectPhase = 'idle';
+          this.extensionLastSyncAt = Date.now();
+          this.publishExtensionState();
+        })
         .catch(() => {
           if (this.extension !== ws) return;
+          this.extensionReconnectPhase = 'failed';
+          this.publishExtensionState();
           this.extension = null;
           this.rejectAllRoutes(ErrorCode.EXTENSION_DISCONNECTED);
           ws.close(1012, 'inventory synchronization failed');
@@ -302,6 +403,8 @@ export class BrokerServer {
     ws.once('close', () => {
       if (this.extension !== ws) return;
       this.extension = null;
+      this.publishExtensionState();
+      this.recordDiagnostic('warning', 'connection', 'EXTENSION_DISCONNECTED', '扩展已断开');
       this.rejectAllRoutes(ErrorCode.EXTENSION_DISCONNECTED);
     });
   }
@@ -601,11 +704,21 @@ export class BrokerServer {
 
   private async syncExtensionInventory(ws: WebSocket): Promise<void> {
     if (this.extension !== ws || ws.readyState !== WebSocket.OPEN) return;
-    const result = await this.sendExtensionCommand('', {
-      type: 'agent_request', requestId: 'extension-sync', command: 'list_tabs', params: {}, timeout: 1_000
-    });
-    if (this.extension !== ws) return;
-    this.registry.reconcileTabs(new Set(tabIdsFromResult(result)));
+    this.diagnostics.setInventorySync('running');
+    this.recordDiagnostic('info', 'recovery', 'INVENTORY_SYNC_STARTED', '标签页清单同步已开始');
+    try {
+      const result = await this.sendExtensionCommand('', {
+        type: 'agent_request', requestId: 'extension-sync', command: 'list_tabs', params: {}, timeout: 1_000
+      });
+      if (this.extension !== ws) return;
+      this.registry.reconcileTabs(new Set(tabIdsFromResult(result)));
+      this.diagnostics.setInventorySync('idle');
+      this.recordDiagnostic('info', 'recovery', 'INVENTORY_SYNC_COMPLETED', '标签页清单同步已完成');
+    } catch (error) {
+      this.diagnostics.setInventorySync('failed');
+      this.recordDiagnostic('error', 'recovery', 'INVENTORY_SYNC_FAILED', '标签页清单同步失败');
+      throw error;
+    }
   }
 
   private handleBrowserEvent(event: { event: string; data?: Record<string, unknown> }): void {
@@ -668,11 +781,13 @@ export class BrokerServer {
     }
     if (this.stopping) return;
     this.registry.disconnect(sessionId, Date.now());
+    this.recordDiagnostic('warning', 'connection', 'AGENT_GRACE_STARTED', 'Agent 已进入宽限期');
     const timer = setTimeout(() => {
       this.ownershipTimers.delete(sessionId);
       const now = Date.now();
       this.registry.expireDisconnected(now);
       this.pruneExpiredSessions(now);
+      this.recordDiagnostic('info', 'connection', 'AGENT_GRACE_EXPIRED', 'Agent 宽限期已结束');
     }, 30_000);
     this.ownershipTimers.set(sessionId, timer);
   }
@@ -680,13 +795,19 @@ export class BrokerServer {
   private async cleanupDisconnectedRecording(ws: WebSocket | null): Promise<void> {
     const sessionId = this.recordingCleanupSessionId;
     if (!sessionId || !ws || this.extension !== ws || ws.readyState !== WebSocket.OPEN) return;
+    this.diagnostics.setRecordingCleanup('running');
+    this.recordDiagnostic('info', 'recovery', 'RECORDING_CLEANUP_STARTED', '录制清理已开始');
     try {
       await this.sendExtensionCommand(sessionId, {
         type: 'agent_request', requestId: 'disconnect-recording-cleanup',
         command: 'stop_recording', params: {}, timeout: 1_000
       }, true);
       if (this.recordingCleanupSessionId === sessionId) this.recordingCleanupSessionId = null;
+      this.diagnostics.setRecordingCleanup('idle');
+      this.recordDiagnostic('info', 'recovery', 'RECORDING_CLEANUP_COMPLETED', '录制清理已完成');
     } catch {
+      this.diagnostics.setRecordingCleanup('failed');
+      this.recordDiagnostic('error', 'recovery', 'RECORDING_CLEANUP_FAILED', '录制清理失败');
       if (this.extension === ws) ws.close(1012, 'recording cleanup failed');
     } finally {
       this.registry.clearRecordings(sessionId);

@@ -75,7 +75,7 @@ describe('BrokerServer', () => {
 
     await expect(openWs(port, '/agent', 'https://malicious.example')).rejects.toThrow();
     await expect(fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json()))
-      .resolves.toMatchObject({ name: 'arc-tunnel', protocolVersion: 2, pid: process.pid, port });
+      .resolves.toEqual({ name: 'arc-tunnel', protocolVersion: 2, pid: process.pid, port });
   });
 
   it('requires the extension origin on the legacy root path', async () => {

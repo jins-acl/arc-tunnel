@@ -19,6 +19,16 @@ export class SessionRegistry {
   private readonly sessions = new Map<string, AgentSession>();
   private readonly tabOwners = new Map<number, string>();
 
+  diagnosticsCounts(): { connected: number; grace: number; claimedTabs: number } {
+    let connected = 0;
+    let grace = 0;
+    for (const session of this.sessions.values()) {
+      if (session.connected) connected++;
+      else if (session.disconnectedAt !== null) grace++;
+    }
+    return { connected, grace, claimedTabs: this.tabOwners.size };
+  }
+
   createSession(id: string): AgentSession {
     if (this.sessions.has(id)) {
       throw new Error(`Session already exists: ${id}`);

@@ -2,6 +2,17 @@ import { ArcTunnelError, ErrorCode } from '../src/protocol';
 import { SessionRegistry } from '../src/broker/session-registry';
 
 describe('SessionRegistry', () => {
+  it('reports only aggregate connected, grace, and claimed-tab counts', () => {
+    const registry = new SessionRegistry();
+    registry.createSession('connected-secret');
+    registry.createSession('grace-secret');
+    registry.claimTab('connected-secret', 91);
+    registry.claimTab('grace-secret', 92);
+    registry.disconnect('grace-secret', 1_000);
+
+    expect(registry.diagnosticsCounts()).toEqual({ connected: 1, grace: 1, claimedTabs: 2 });
+  });
+
   it('enforces ownership boundaries and per-session visibility', () => {
     const registry = new SessionRegistry();
     const alpha = registry.createSession('alpha');
