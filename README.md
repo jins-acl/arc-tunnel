@@ -70,6 +70,8 @@ node scripts/start.js start
 node scripts/start.js start --port 9000
 node scripts/start.js status --port 9000
 node scripts/start.js stop --port 9000
+node scripts/start.js diagnose [--port N]
+node scripts/start.js diagnose [--port N] --json
 ```
 
 The default is port `8765`. Configuration precedence is CLI `--port` → `WS_PORT` → `~/.arc-tunnel/config.json` → `8765`.
@@ -82,6 +84,11 @@ A persisted configuration has this shape:
 All Agent client configurations must use the Broker's port. When using a custom port,
 set the extension popup to the same port as well. `status` reports the PID and port of a
 running Broker. `stop` removes its lifecycle state.
+
+The read-only Operations Control Center is available at
+`http://127.0.0.1:<port>/dashboard`. Its status cards, event filters, and copied
+diagnostics expose aggregate operational state only. The dashboard and `diagnose`
+output exclude URLs, IDs, cookies, scripts, parameters, and page content.
 
 ## Multi-Agent tab ownership
 
@@ -145,21 +152,17 @@ all committed artifacts together.
 ## Development
 
 ```bash
-cd mcp-server
-npm install
-npm test -- --runInBand
-npx tsc -p tsconfig.test.json --noEmit
-npm run build
-
-cd ../extension
-npm install
-npm test
-npx tsc --noEmit
-npm run build
+npm ci --prefix mcp-server
+npm ci --prefix extension
+npm run verify
 ```
 
 Both builds regenerate committed distribution artifacts. The MCP build creates the
-lightweight client, shared Broker, and lifecycle control bundles.
+lightweight client (`mcp-server/dist/mcp-server.js`), shared Broker
+(`mcp-server/dist/arc-tunnel-broker.js`), and lifecycle control
+(`mcp-server/dist/arc-tunnel-control.js`) bundles; the browser build creates
+`extension/dist/`. For component-specific debugging, run the child `test`, typecheck,
+or `build` commands from `mcp-server/` or `extension/`.
 
 ## Security
 

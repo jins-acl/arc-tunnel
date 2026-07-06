@@ -14,11 +14,13 @@ Broker. Use one window per Agent so each task has an independent MCP session.
 ## Build and test
 
 ```bash
-cd mcp-server && npm install && npm test -- --runInBand
-npx tsc -p tsconfig.test.json --noEmit && npm run build && cd ..
-cd extension && npm install && npm test
-npx tsc --noEmit && npm run build && cd ..
+npm ci --prefix mcp-server
+npm ci --prefix extension
+npm run verify
 ```
+
+Use child `test`, typecheck, and `build` commands inside `mcp-server/` or
+`extension/` only for component-specific debugging.
 
 The committed bundles include `mcp-server/dist/mcp-server.js`,
 `mcp-server/dist/arc-tunnel-broker.js`, the lifecycle artifact
@@ -40,10 +42,16 @@ node scripts/start.js status
 node scripts/start.js start [--port N]
 node scripts/start.js status [--port N]
 node scripts/start.js stop [--port N]
+node scripts/start.js diagnose [--port N]
+node scripts/start.js diagnose [--port N] --json
 ```
 
 While running, status prints the Broker PID and port. Always stop Brokers started by a
 test or manual validation.
+
+The read-only Operations Control Center is served at
+`http://127.0.0.1:<port>/dashboard`. It and the `diagnose` output expose only aggregate
+operational state and exclude URLs, IDs, cookies, scripts, parameters, and page content.
 
 ## Multi-Agent rules
 

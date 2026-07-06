@@ -1,0 +1,29 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - codex/**
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            mcp-server/package-lock.json
+            extension/package-lock.json
+      - run: npm ci --prefix mcp-server
+      - run: npm ci --prefix extension
+      - run: npm run verify
+      - run: git diff --exit-code -- mcp-server/dist extension/dist

@@ -1,0 +1,19 @@
+{
+  "name": "arc-tunnel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local multi-Agent browser automation through one shared Broker",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jins-acl/arc-tunnel.git"
+  },
+  "scripts": {
+    "test": "npm --prefix mcp-server test -- --runInBand && npm --prefix extension test",
+    "typecheck": "npm exec --prefix mcp-server -- tsc -p mcp-server/tsconfig.test.json --noEmit && npm exec --prefix extension -- tsc -p extension/tsconfig.json --noEmit",
+    "build": "npm --prefix mcp-server run build && npm --prefix extension run build",
+    "test:integration": "npm --prefix mcp-server run test:integration",
+    "check:docs": "node scripts/check-docs.js",
+    "verify": "npm test && npm run typecheck && npm run build && npm run test:integration && npm run check:docs"
+  }
+}

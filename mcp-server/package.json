@@ -1,7 +1,7 @@
 {
-  "name": "mcp-server",
+  "name": "@arc-tunnel/mcp-server",
   "version": "1.0.0",
-  "description": "",
+  "description": "Lightweight MCP client and shared Broker for Arc Tunnel",
   "main": "index.js",
   "scripts": {
     "build": "node esbuild.config.js",
@@ -9,9 +9,11 @@
     "test": "jest",
     "test:integration": "jest --runInBand tests/multi-agent.integration.test.ts"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jins-acl/arc-tunnel.git"
+  },
   "type": "commonjs",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
