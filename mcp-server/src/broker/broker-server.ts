@@ -1,6 +1,8 @@
 import { randomUUID } from 'crypto';
 import http from 'http';
 import { AddressInfo } from 'net';
+import fs from 'fs';
+import path from 'path';
 import WebSocket, { RawData, WebSocketServer } from 'ws';
 import { BrokerConfig } from '../config';
 import {
@@ -19,6 +21,13 @@ import { ResponseMessage } from '../types';
 import { SessionRegistry } from './session-registry';
 import { TabScheduler } from './tab-scheduler';
 import { DiagnosticEvent, DiagnosticsStore, RecoveryPhase } from './diagnostics-store';
+
+const DASHBOARD_ASSETS = new Map<string, readonly [string, string]>([
+  ['/dashboard', ['index.html', 'text/html; charset=utf-8']],
+  ['/dashboard/', ['index.html', 'text/html; charset=utf-8']],
+  ['/dashboard/dashboard.css', ['dashboard.css', 'text/css; charset=utf-8']],
+  ['/dashboard/dashboard.js', ['dashboard.js', 'text/javascript; charset=utf-8']]
+]);
 
 interface PendingRoute {
   sessionId: string;
@@ -131,6 +140,7 @@ export class BrokerServer {
     const startedAt = Date.now();
 
     this.httpServer = http.createServer((request, response) => {
+      const pathname = new URL(request.url || '/', 'http://localhost').pathname;
       if (request.method === 'GET' && request.url === '/health') {
         response.writeHead(200, { 'content-type': 'application/json' });
         response.end(JSON.stringify({
@@ -149,6 +159,11 @@ export class BrokerServer {
       }
       if (request.method === 'GET' && new URL(request.url || '/', 'http://localhost').pathname === '/api/events') {
         this.openEventStream(request, response);
+        return;
+      }
+      const dashboardAsset = request.method === 'GET' ? DASHBOARD_ASSETS.get(pathname) : undefined;
+      if (dashboardAsset) {
+        this.serveDashboardAsset(response, dashboardAsset);
         return;
       }
       response.writeHead(404);
@@ -254,6 +269,37 @@ export class BrokerServer {
     response.setHeader('x-content-type-options', 'nosniff');
     response.setHeader('x-frame-options', 'DENY');
     response.setHeader('content-security-policy', "default-src 'none'");
+  }
+
+  private serveDashboardAsset(
+    response: http.ServerResponse,
+    [filename, contentType]: readonly [string, string]
+  ): void {
+    const bundledDirectory = path.join(__dirname, 'dashboard');
+    const directory = fs.existsSync(bundledDirectory)
+      ? bundledDirectory
+      : path.join(__dirname, '..', 'dashboard');
+    this.writeDashboardHeaders(response, contentType);
+    fs.readFile(path.join(directory, filename), (error, contents) => {
+      if (error) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+      response.writeHead(200);
+      response.end(contents);
+    });
+  }
+
+  private writeDashboardHeaders(response: http.ServerResponse, contentType: string): void {
+    response.setHeader('content-type', contentType);
+    response.setHeader('cache-control', 'no-store');
+    response.setHeader('x-content-type-options', 'nosniff');
+    response.setHeader('x-frame-options', 'DENY');
+    response.setHeader(
+      'content-security-policy',
+      "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    );
   }
 
   private diagnosticsSnapshot() {

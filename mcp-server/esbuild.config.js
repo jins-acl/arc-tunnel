@@ -1,4 +1,5 @@
 const esbuild = require('esbuild');
+const fs = require('fs');
 
 const entries = [
   ['src/index.ts', 'dist/mcp-server.js'],
@@ -6,14 +7,21 @@ const entries = [
   ['src/broker-control.ts', 'dist/arc-tunnel-control.js']
 ];
 
-Promise.all(entries.map(([entryPoint, outfile]) => esbuild.build({
-  entryPoints: [entryPoint],
-  bundle: true,
-  platform: 'node',
-  target: 'node18',
-  outfile,
-  sourcemap: true
-}))).catch((err) => {
+async function build() {
+  await Promise.all(entries.map(([entryPoint, outfile]) => esbuild.build({
+    entryPoints: [entryPoint],
+    bundle: true,
+    platform: 'node',
+    target: 'node18',
+    outfile,
+    sourcemap: true
+  })));
+  fs.rmSync('dist/dashboard', { recursive: true, force: true });
+  fs.cpSync('src/dashboard', 'dist/dashboard', { recursive: true });
+  console.log('MCP server build complete');
+}
+
+build().catch((err) => {
   console.error('Build failed:', err);
-  process.exit(1);
+  process.exitCode = 1;
 });

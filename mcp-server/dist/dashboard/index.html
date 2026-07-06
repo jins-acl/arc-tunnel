@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Arc Tunnel 运维控制中心</title>
+  <link rel="stylesheet" href="/dashboard/dashboard.css">
+</head>
+<body>
+  <div id="offline-banner" role="status" hidden>实时连接已中断，正在等待恢复。</div>
+  <header class="page-header">
+    <div><p class="eyebrow">只读运行视图</p><h1>Arc Tunnel 运维控制中心</h1></div>
+    <div class="header-actions"><span id="overall-status" class="status-pill">正在连接</span><button id="copy-diagnostics" type="button">复制诊断信息</button></div>
+  </header>
+  <main>
+    <section class="status-grid" aria-label="系统状态">
+      <article id="broker-card" class="card"><p>Broker 状态</p><strong>正在读取</strong><small>本地共享服务</small></article>
+      <article id="extension-card" class="card"><p>浏览器扩展</p><strong>正在读取</strong><small>连接状态</small></article>
+      <article id="recovery-card" class="card"><p>连接恢复</p><strong>正在读取</strong><small>清单同步与录制清理</small></article>
+    </section>
+
+    <section class="panel" aria-labelledby="workload-title">
+      <div class="panel-heading"><div><p class="eyebrow">实时容量</p><h2 id="workload-title">Agent 工作负载</h2></div><p id="connection-detail">等待状态快照</p></div>
+      <div class="metrics">
+        <div><span id="agent-count">—</span><small>在线 Agent</small></div>
+        <div><span id="grace-count">—</span><small>宽限期 Agent</small></div>
+        <div><span id="claimed-tab-count">—</span><small>已认领标签页</small></div>
+        <div><span id="pending-count">—</span><small>待处理命令</small></div>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="events-title">
+      <div class="panel-heading"><div><p class="eyebrow">最多保留 200 条</p><h2 id="events-title">诊断事件</h2></div><label>筛选类别<select id="event-filter"><option value="all">全部</option><option value="broker">Broker</option><option value="connection">连接</option><option value="ownership">所有权</option><option value="recovery">恢复</option></select></label></div>
+      <ol id="event-list" aria-live="polite"></ol>
+    </section>
+  </main>
+  <script src="/dashboard/dashboard.js" defer></script>
+</body>
+</html>

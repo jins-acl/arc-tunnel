@@ -3649,6 +3649,8 @@ var require_websocket_server = __commonJS({
 // src/broker/broker-server.ts
 var import_crypto = require("crypto");
 var import_http = __toESM(require("http"));
+var import_fs = __toESM(require("fs"));
+var import_path = __toESM(require("path"));
 
 // node_modules/ws/wrapper.mjs
 var import_stream = __toESM(require_stream(), 1);
@@ -3706,6 +3708,15 @@ var SessionRegistry = class {
     this.sessions = /* @__PURE__ */ new Map();
     this.tabOwners = /* @__PURE__ */ new Map();
   }
+  diagnosticsCounts() {
+    let connected = 0;
+    let grace = 0;
+    for (const session of this.sessions.values()) {
+      if (session.connected) connected++;
+      else if (session.disconnectedAt !== null && !session.graceExpired) grace++;
+    }
+    return { connected, grace, claimedTabs: this.tabOwners.size };
+  }
   createSession(id) {
     if (this.sessions.has(id)) {
       throw new Error(`Session already exists: ${id}`);
@@ -3714,6 +3725,7 @@ var SessionRegistry = class {
       id,
       connected: true,
       disconnectedAt: null,
+      graceExpired: false,
       windowId: null,
       tabIds: /* @__PURE__ */ new Set(),
       recordingIds: /* @__PURE__ */ new Set(),
@@ -3838,6 +3850,7 @@ var SessionRegistry = class {
     const session = this.requireSession(sessionId);
     session.connected = false;
     session.disconnectedAt = now;
+    session.graceExpired = false;
   }
   assertConnected(sessionId) {
     if (!this.requireSession(sessionId).connected) {
@@ -3860,6 +3873,7 @@ var SessionRegistry = class {
       session.recordingIds.clear();
       session.activeRecordingId = null;
       session.savedSessionIds.clear();
+      session.graceExpired = true;
     }
     return expired;
   }
@@ -3908,7 +3922,91 @@ var TabScheduler = class {
   }
 };
 
+// src/broker/diagnostics-store.ts
+var DiagnosticsStore = class {
+  constructor(broker) {
+    this.events = [];
+    this.listeners = /* @__PURE__ */ new Set();
+    this.sequence = 0;
+    this.extension = {
+      connected: false,
+      generation: 0,
+      reconnectPhase: "idle",
+      lastSyncAt: null
+    };
+    this.recovery = {
+      inventorySync: "idle",
+      recordingCleanup: "idle"
+    };
+    this.recentError = null;
+    this.broker = {
+      pid: broker.pid,
+      port: broker.port,
+      protocolVersion: broker.protocolVersion,
+      startedAt: broker.startedAt
+    };
+  }
+  record(input) {
+    const event = Object.freeze({
+      sequence: ++this.sequence,
+      timestamp: input.timestamp ?? Date.now(),
+      level: input.level,
+      category: input.category,
+      code: input.code,
+      summary: input.summary
+    });
+    this.events.push(event);
+    if (this.events.length > 200) this.events.splice(0, this.events.length - 200);
+    if (event.level === "error") {
+      this.recentError = { timestamp: event.timestamp, code: event.code, summary: event.summary };
+    }
+    for (const listener of this.listeners) listener({ ...event });
+    return { ...event };
+  }
+  eventsAfter(sequence) {
+    const first = this.events[0]?.sequence ?? this.sequence + 1;
+    return {
+      reset: sequence < first - 1,
+      events: this.events.filter((event) => event.sequence > sequence).map((event) => ({ ...event }))
+    };
+  }
+  subscribe(listener) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  setExtensionState(state) {
+    this.extension = { ...state };
+  }
+  setInventorySync(state) {
+    this.recovery.inventorySync = state;
+  }
+  setRecordingCleanup(state) {
+    this.recovery.recordingCleanup = state;
+  }
+  snapshot(runtime) {
+    return {
+      broker: {
+        pid: this.broker.pid,
+        port: this.broker.port,
+        protocolVersion: this.broker.protocolVersion,
+        uptimeMs: Math.max(0, runtime.now - this.broker.startedAt)
+      },
+      extension: { ...this.extension },
+      agents: { connected: runtime.connectedAgents, grace: runtime.graceAgents },
+      workload: { claimedTabs: runtime.claimedTabs, pendingCommands: runtime.pendingCommands },
+      recovery: { ...this.recovery },
+      recentError: this.recentError && { ...this.recentError }
+    };
+  }
+};
+
 // src/broker/broker-server.ts
+var DASHBOARD_ASSETS = /* @__PURE__ */ new Map([
+  ["/dashboard", ["index.html", "text/html; charset=utf-8"]],
+  ["/dashboard/", ["index.html", "text/html; charset=utf-8"]],
+  ["/dashboard/dashboard.css", ["dashboard.css", "text/css; charset=utf-8"]],
+  ["/dashboard/dashboard.js", ["dashboard.js", "text/javascript; charset=utf-8"]]
+]);
 function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -3964,6 +4062,10 @@ var BrokerServer = class {
     this.windowInitializations = /* @__PURE__ */ new Map();
     this.closedTabIds = /* @__PURE__ */ new Set();
     this.tabGenerations = /* @__PURE__ */ new Map();
+    this.sseClients = /* @__PURE__ */ new Set();
+    this.extensionGeneration = 0;
+    this.extensionReconnectPhase = "idle";
+    this.extensionLastSyncAt = null;
     this.httpServer = null;
     this.extension = null;
     this.listeningPort = null;
@@ -3979,6 +4081,7 @@ var BrokerServer = class {
         const sessionId = (0, import_crypto.randomUUID)();
         this.registry.createSession(sessionId);
         this.agents.set(sessionId, ws);
+        this.recordDiagnostic("info", "connection", "AGENT_CONNECTED", "Agent \u5DF2\u8FDE\u63A5");
         this.send(ws, { type: "welcome", protocolVersion: PROTOCOL_VERSION, sessionId });
         ws.on("message", (data) => this.handleAgentMessage(sessionId, data));
         ws.once("close", () => this.handleAgentDisconnect(sessionId));
@@ -4000,7 +4103,9 @@ var BrokerServer = class {
   }
   async start() {
     if (this.httpServer) return;
+    const startedAt = Date.now();
     this.httpServer = import_http.default.createServer((request, response) => {
+      const pathname = new URL(request.url || "/", "http://localhost").pathname;
       if (request.method === "GET" && request.url === "/health") {
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({
@@ -4009,6 +4114,21 @@ var BrokerServer = class {
           pid: process.pid,
           port: this.address().port
         }));
+        return;
+      }
+      if (request.method === "GET" && request.url === "/api/status") {
+        this.writeDiagnosticHeaders(response, "application/json; charset=utf-8");
+        response.writeHead(200);
+        response.end(JSON.stringify(this.diagnosticsSnapshot()));
+        return;
+      }
+      if (request.method === "GET" && new URL(request.url || "/", "http://localhost").pathname === "/api/events") {
+        this.openEventStream(request, response);
+        return;
+      }
+      const dashboardAsset = request.method === "GET" ? DASHBOARD_ASSETS.get(pathname) : void 0;
+      if (dashboardAsset) {
+        this.serveDashboardAsset(response, dashboardAsset);
         return;
       }
       response.writeHead(404);
@@ -4047,6 +4167,13 @@ var BrokerServer = class {
         server.off("error", onError);
         const address = server.address();
         this.listeningPort = address.port;
+        this.diagnostics = new DiagnosticsStore({
+          pid: process.pid,
+          port: address.port,
+          protocolVersion: PROTOCOL_VERSION,
+          startedAt
+        });
+        this.recordDiagnostic("info", "broker", "BROKER_STARTED", "Broker \u5DF2\u542F\u52A8");
         resolve();
       };
       server.once("error", onError);
@@ -4067,6 +4194,7 @@ var BrokerServer = class {
   async performStop() {
     const server = this.httpServer;
     this.stopping = true;
+    this.recordDiagnostic("info", "broker", "BROKER_STOPPING", "Broker \u6B63\u5728\u505C\u6B62");
     this.rejectAllRoutes("EXTENSION_DISCONNECTED" /* EXTENSION_DISCONNECTED */);
     await new Promise((resolve) => setImmediate(resolve));
     for (const timer of this.ownershipTimers.values()) clearTimeout(timer);
@@ -4075,6 +4203,8 @@ var BrokerServer = class {
     this.agents.clear();
     this.extension?.close();
     this.extension = null;
+    for (const response of this.sseClients) response.destroy();
+    this.sseClients.clear();
     await Promise.all([this.closeWebSocketServer(this.agentWss), this.closeWebSocketServer(this.extensionWss)]);
     this.httpServer = null;
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -4083,6 +4213,150 @@ var BrokerServer = class {
   address() {
     if (this.listeningPort == null) throw new Error("Broker is not listening");
     return { host: "127.0.0.1", port: this.listeningPort };
+  }
+  dashboardUrl() {
+    return `http://${this.address().host}:${this.address().port}/`;
+  }
+  writeDiagnosticHeaders(response, contentType) {
+    response.setHeader("content-type", contentType);
+    response.setHeader("cache-control", "no-store");
+    response.setHeader("x-content-type-options", "nosniff");
+    response.setHeader("x-frame-options", "DENY");
+    response.setHeader("content-security-policy", "default-src 'none'");
+  }
+  serveDashboardAsset(response, [filename, contentType]) {
+    const bundledDirectory = import_path.default.join(__dirname, "dashboard");
+    const directory = import_fs.default.existsSync(bundledDirectory) ? bundledDirectory : import_path.default.join(__dirname, "..", "dashboard");
+    this.writeDashboardHeaders(response, contentType);
+    import_fs.default.readFile(import_path.default.join(directory, filename), (error, contents) => {
+      if (error) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+      response.writeHead(200);
+      response.end(contents);
+    });
+  }
+  writeDashboardHeaders(response, contentType) {
+    response.setHeader("content-type", contentType);
+    response.setHeader("cache-control", "no-store");
+    response.setHeader("x-content-type-options", "nosniff");
+    response.setHeader("x-frame-options", "DENY");
+    response.setHeader(
+      "content-security-policy",
+      "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    );
+  }
+  diagnosticsSnapshot() {
+    const counts = this.registry.diagnosticsCounts();
+    return this.diagnostics.snapshot({
+      now: Date.now(),
+      connectedAgents: counts.connected,
+      graceAgents: counts.grace,
+      claimedTabs: counts.claimedTabs,
+      pendingCommands: this.routes.size
+    });
+  }
+  openEventStream(request, response) {
+    this.writeDiagnosticHeaders(response, "text/event-stream; charset=utf-8");
+    response.setHeader("connection", "keep-alive");
+    response.writeHead(200);
+    response.flushHeaders();
+    this.sseClients.add(response);
+    let closed = false;
+    let unsubscribe = () => void 0;
+    const frames = [];
+    let draining = false;
+    let drainTimer = null;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      if (drainTimer) clearTimeout(drainTimer);
+      unsubscribe();
+      this.sseClients.delete(response);
+    };
+    const failSlowClient = () => {
+      close();
+      response.destroy();
+    };
+    const pump = () => {
+      if (closed || draining) return;
+      while (frames.length > 0) {
+        if (response.write(frames.shift())) continue;
+        draining = true;
+        const resume = () => {
+          if (!draining) return;
+          draining = false;
+          if (drainTimer) clearTimeout(drainTimer);
+          drainTimer = null;
+          pump();
+        };
+        response.once("drain", resume);
+        drainTimer = setTimeout(() => {
+          response.off("drain", resume);
+          failSlowClient();
+        }, 100);
+        return;
+      }
+    };
+    const writeFrame = (frame) => {
+      if (closed) return false;
+      if (frames.length >= 256) {
+        failSlowClient();
+        return false;
+      }
+      frames.push(frame);
+      pump();
+      return !closed;
+    };
+    let replaying = true;
+    let lastSent = -1;
+    const pending = [];
+    const write = (event) => {
+      if (event.sequence <= lastSent || closed) return;
+      if (replaying) {
+        pending.push(event);
+        return;
+      }
+      if (writeFrame(`id: ${event.sequence}
+event: diagnostic
+data: ${JSON.stringify(event)}
+
+`)) {
+        lastSent = event.sequence;
+      }
+    };
+    unsubscribe = this.diagnostics.subscribe(write);
+    request.once("close", close);
+    response.once("close", close);
+    const url = new URL(request.url || "/", "http://localhost");
+    const rawSequence = request.headers["last-event-id"] ?? url.searchParams.get("after") ?? "0";
+    const cursor = Array.isArray(rawSequence) ? rawSequence[0] : rawSequence;
+    const parsed = /^\d+$/.test(cursor) ? Number(cursor) : 0;
+    const sequence = Number.isSafeInteger(parsed) ? parsed : 0;
+    lastSent = sequence;
+    const replay = this.diagnostics.eventsAfter(sequence);
+    if (replay.reset) {
+      if (!writeFrame(`event: RESET
+data: ${JSON.stringify(this.diagnosticsSnapshot())}
+
+`)) return;
+    }
+    for (const event of replay.events) write(event);
+    replaying = false;
+    for (const event of pending.sort((left, right) => left.sequence - right.sequence)) write(event);
+  }
+  recordDiagnostic(level, category, code, summary) {
+    this.diagnostics.record({ level, category, code, summary });
+  }
+  publishExtensionState() {
+    this.diagnostics.setExtensionState({
+      connected: this.isExtensionConnected(),
+      generation: this.extensionGeneration,
+      reconnectPhase: this.extensionReconnectPhase,
+      lastSyncAt: this.extensionLastSyncAt
+    });
   }
   isExtensionConnected() {
     return this.extension?.readyState === wrapper_default.OPEN;
@@ -4112,16 +4386,31 @@ var BrokerServer = class {
   }
   activateExtension(ws, sendWelcome) {
     if (this.extension && this.extension !== ws) {
+      this.recordDiagnostic("warning", "connection", "EXTENSION_REPLACED", "\u6269\u5C55\u8FDE\u63A5\u5DF2\u88AB\u66FF\u6362");
       this.rejectAllRoutes("EXTENSION_DISCONNECTED" /* EXTENSION_DISCONNECTED */);
       this.extension.close(1012, "replaced");
     }
     this.extension = ws;
+    this.extensionGeneration++;
+    const generation = this.extensionGeneration;
+    this.recordDiagnostic("info", "connection", "EXTENSION_CONNECTED", "\u6269\u5C55\u5DF2\u8FDE\u63A5");
+    this.publishExtensionState();
     if (sendWelcome) this.send(ws, { type: "welcome", protocolVersion: PROTOCOL_VERSION });
     ws.on("message", (data) => this.handleExtensionMessage(ws, data));
     if (this.hasActivatedExtension) {
-      this.extensionSync = new Promise((resolve) => setImmediate(resolve)).then(() => this.cleanupDisconnectedRecording(ws)).then(() => this.syncExtensionInventory(ws)).catch(() => {
-        if (this.extension !== ws) return;
+      this.extensionReconnectPhase = "running";
+      this.publishExtensionState();
+      this.extensionSync = new Promise((resolve) => setImmediate(resolve)).then(() => this.cleanupDisconnectedRecording(ws, generation)).then(() => this.syncExtensionInventory(ws, generation)).then(() => {
+        if (!this.isCurrentExtension(ws, generation)) return;
+        this.extensionReconnectPhase = "idle";
+        this.extensionLastSyncAt = Date.now();
+        this.publishExtensionState();
+      }).catch(() => {
+        if (!this.isCurrentExtension(ws, generation)) return;
+        this.extensionReconnectPhase = "failed";
         this.extension = null;
+        this.publishExtensionState();
+        this.recordDiagnostic("warning", "connection", "EXTENSION_DISCONNECTED", "\u6269\u5C55\u5DF2\u65AD\u5F00");
         this.rejectAllRoutes("EXTENSION_DISCONNECTED" /* EXTENSION_DISCONNECTED */);
         ws.close(1012, "inventory synchronization failed");
       });
@@ -4132,8 +4421,13 @@ var BrokerServer = class {
     ws.once("close", () => {
       if (this.extension !== ws) return;
       this.extension = null;
+      this.publishExtensionState();
+      this.recordDiagnostic("warning", "connection", "EXTENSION_DISCONNECTED", "\u6269\u5C55\u5DF2\u65AD\u5F00");
       this.rejectAllRoutes("EXTENSION_DISCONNECTED" /* EXTENSION_DISCONNECTED */);
     });
+  }
+  isCurrentExtension(ws, generation) {
+    return this.extension === ws && this.extensionGeneration === generation;
   }
   handleAgentMessage(sessionId, data) {
     let request;
@@ -4207,7 +4501,8 @@ var BrokerServer = class {
     } catch (error) {
       if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
       if (this.recordingCleanupSessionId === sessionId) {
-        void this.cleanupDisconnectedRecording(this.extension);
+        const ws = this.extension;
+        if (ws) void this.cleanupDisconnectedRecording(ws, this.extensionGeneration);
       }
       throw error;
     }
@@ -4381,7 +4676,8 @@ var BrokerServer = class {
       if (route.command === "start_recording" && recordingId) {
         this.registry.addRecording(route.sessionId, recordingId);
         if (this.recordingCleanupSessionId === route.sessionId) {
-          void this.cleanupDisconnectedRecording(this.extension);
+          const ws = this.extension;
+          if (ws) void this.cleanupDisconnectedRecording(ws, this.extensionGeneration);
         }
       }
       if (route.command === "stop_recording") this.registry.clearRecordings(route.sessionId);
@@ -4402,17 +4698,29 @@ var BrokerServer = class {
       route.reject(new ArcTunnelError(response.error?.code, response.error?.message ?? "Extension command failed", response.error?.details));
     }
   }
-  async syncExtensionInventory(ws) {
-    if (this.extension !== ws || ws.readyState !== wrapper_default.OPEN) return;
-    const result = await this.sendExtensionCommand("", {
-      type: "agent_request",
-      requestId: "extension-sync",
-      command: "list_tabs",
-      params: {},
-      timeout: 1e3
-    });
-    if (this.extension !== ws) return;
-    this.registry.reconcileTabs(new Set(tabIdsFromResult(result)));
+  async syncExtensionInventory(ws, generation) {
+    if (!this.isCurrentExtension(ws, generation) || ws.readyState !== wrapper_default.OPEN) return;
+    this.diagnostics.setInventorySync("running");
+    this.recordDiagnostic("info", "recovery", "INVENTORY_SYNC_STARTED", "\u6807\u7B7E\u9875\u6E05\u5355\u540C\u6B65\u5DF2\u5F00\u59CB");
+    try {
+      const result = await this.sendExtensionCommand("", {
+        type: "agent_request",
+        requestId: "extension-sync",
+        command: "list_tabs",
+        params: {},
+        timeout: 1e3
+      });
+      if (!this.isCurrentExtension(ws, generation)) return;
+      this.registry.reconcileTabs(new Set(tabIdsFromResult(result)));
+      this.diagnostics.setInventorySync("idle");
+      this.recordDiagnostic("info", "recovery", "INVENTORY_SYNC_COMPLETED", "\u6807\u7B7E\u9875\u6E05\u5355\u540C\u6B65\u5DF2\u5B8C\u6210");
+    } catch (error) {
+      if (this.isCurrentExtension(ws, generation)) {
+        this.diagnostics.setInventorySync("failed");
+        this.recordDiagnostic("error", "recovery", "INVENTORY_SYNC_FAILED", "\u6807\u7B7E\u9875\u6E05\u5355\u540C\u6B65\u5931\u8D25");
+      }
+      throw error;
+    }
   }
   handleBrowserEvent(event) {
     if (event.event === "tab_created") {
@@ -4465,23 +4773,28 @@ var BrokerServer = class {
     }
     if (hasActiveRecording || hasStartingRecording) {
       this.recordingCleanupSessionId = sessionId;
-      if (hasActiveRecording) void this.cleanupDisconnectedRecording(this.extension);
+      const ws = this.extension;
+      if (hasActiveRecording && ws) void this.cleanupDisconnectedRecording(ws, this.extensionGeneration);
     } else if (this.recordingReservationSessionId === sessionId) {
       this.recordingReservationSessionId = null;
     }
     if (this.stopping) return;
     this.registry.disconnect(sessionId, Date.now());
+    this.recordDiagnostic("warning", "connection", "AGENT_GRACE_STARTED", "Agent \u5DF2\u8FDB\u5165\u5BBD\u9650\u671F");
     const timer = setTimeout(() => {
       this.ownershipTimers.delete(sessionId);
       const now = Date.now();
       this.registry.expireDisconnected(now);
       this.pruneExpiredSessions(now);
+      this.recordDiagnostic("info", "connection", "AGENT_GRACE_EXPIRED", "Agent \u5BBD\u9650\u671F\u5DF2\u7ED3\u675F");
     }, 3e4);
     this.ownershipTimers.set(sessionId, timer);
   }
-  async cleanupDisconnectedRecording(ws) {
+  async cleanupDisconnectedRecording(ws, generation) {
     const sessionId = this.recordingCleanupSessionId;
-    if (!sessionId || !ws || this.extension !== ws || ws.readyState !== wrapper_default.OPEN) return;
+    if (!sessionId || !this.isCurrentExtension(ws, generation) || ws.readyState !== wrapper_default.OPEN) return;
+    this.diagnostics.setRecordingCleanup("running");
+    this.recordDiagnostic("info", "recovery", "RECORDING_CLEANUP_STARTED", "\u5F55\u5236\u6E05\u7406\u5DF2\u5F00\u59CB");
     try {
       await this.sendExtensionCommand(sessionId, {
         type: "agent_request",
@@ -4490,10 +4803,17 @@ var BrokerServer = class {
         params: {},
         timeout: 1e3
       }, true);
+      if (!this.isCurrentExtension(ws, generation)) return;
       if (this.recordingCleanupSessionId === sessionId) this.recordingCleanupSessionId = null;
+      this.diagnostics.setRecordingCleanup("idle");
+      this.recordDiagnostic("info", "recovery", "RECORDING_CLEANUP_COMPLETED", "\u5F55\u5236\u6E05\u7406\u5DF2\u5B8C\u6210");
     } catch {
+      if (!this.isCurrentExtension(ws, generation)) return;
+      this.diagnostics.setRecordingCleanup("failed");
+      this.recordDiagnostic("error", "recovery", "RECORDING_CLEANUP_FAILED", "\u5F55\u5236\u6E05\u7406\u5931\u8D25");
       if (this.extension === ws) ws.close(1012, "recording cleanup failed");
     } finally {
+      if (!this.isCurrentExtension(ws, generation)) return;
       this.registry.clearRecordings(sessionId);
       if (this.recordingReservationSessionId === sessionId) this.recordingReservationSessionId = null;
       this.pruneExpiredSessions();
@@ -4558,9 +4878,9 @@ Connection: close\r
 };
 
 // src/config.ts
-var import_fs = __toESM(require("fs"));
+var import_fs2 = __toESM(require("fs"));
 var import_os = __toESM(require("os"));
-var import_path = __toESM(require("path"));
+var import_path2 = __toESM(require("path"));
 function parsePort(value) {
   const text = String(value);
   if (!/^\d+$/.test(text)) {
@@ -4581,10 +4901,10 @@ function resolveBrokerConfig(options) {
   };
 }
 function loadBrokerConfig(argv, env, homeDir = import_os.default.homedir()) {
-  const configPath = import_path.default.join(homeDir, ".arc-tunnel", "config.json");
+  const configPath = import_path2.default.join(homeDir, ".arc-tunnel", "config.json");
   let fileConfig = null;
   try {
-    const raw = import_fs.default.readFileSync(configPath, "utf8");
+    const raw = import_fs2.default.readFileSync(configPath, "utf8");
     fileConfig = JSON.parse(raw);
   } catch (error) {
     const nodeError = error;
