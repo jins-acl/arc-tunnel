@@ -43,7 +43,7 @@ export interface DiagnosticsSnapshot {
   recentError: Pick<DiagnosticEvent, 'timestamp' | 'code' | 'summary'> | null;
 }
 
-interface ExtensionState {
+export interface ExtensionState {
   connected: boolean;
   generation: number;
   reconnectPhase: RecoveryPhase;
@@ -65,29 +65,40 @@ export class DiagnosticsStore {
     recordingCleanup: 'idle'
   };
   private recentError: Pick<DiagnosticEvent, 'timestamp' | 'code' | 'summary'> | null = null;
+  private readonly broker: { pid: number; port: number; protocolVersion: number; startedAt: number };
 
-  constructor(private readonly broker: { pid: number; port: number; protocolVersion: number; startedAt: number }) {}
+  constructor(broker: { pid: number; port: number; protocolVersion: number; startedAt: number }) {
+    this.broker = {
+      pid: broker.pid,
+      port: broker.port,
+      protocolVersion: broker.protocolVersion,
+      startedAt: broker.startedAt
+    };
+  }
 
   record(input: Omit<DiagnosticEvent, 'sequence' | 'timestamp'> & { timestamp?: number }): DiagnosticEvent {
-    const event: DiagnosticEvent = {
-      ...input,
+    const event = Object.freeze<DiagnosticEvent>({
       sequence: ++this.sequence,
-      timestamp: input.timestamp ?? Date.now()
-    };
+      timestamp: input.timestamp ?? Date.now(),
+      level: input.level,
+      category: input.category,
+      code: input.code,
+      summary: input.summary
+    });
     this.events.push(event);
     if (this.events.length > 200) this.events.splice(0, this.events.length - 200);
     if (event.level === 'error') {
       this.recentError = { timestamp: event.timestamp, code: event.code, summary: event.summary };
     }
-    for (const listener of this.listeners) listener(event);
-    return event;
+    for (const listener of this.listeners) listener({ ...event });
+    return { ...event };
   }
 
   eventsAfter(sequence: number): { reset: boolean; events: DiagnosticEvent[] } {
     const first = this.events[0]?.sequence ?? this.sequence + 1;
     return {
       reset: sequence < first - 1,
-      events: this.events.filter(event => event.sequence > sequence)
+      events: this.events.filter(event => event.sequence > sequence).map(event => ({ ...event }))
     };
   }
 
