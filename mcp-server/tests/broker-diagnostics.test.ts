@@ -131,6 +131,58 @@ describe('Broker diagnostics API', () => {
     expect((broker as any).sseClients.size).toBe(0);
   });
 
+  it('atomically hands off replay to live delivery without duplicates or reordering', async () => {
+    const diagnostics = (broker as any).diagnostics;
+    diagnostics.record({ level: 'info', category: 'broker', code: 'SECOND', summary: '第二条' });
+    diagnostics.record({ level: 'info', category: 'broker', code: 'THIRD', summary: '第三条' });
+    const original = diagnostics.eventsAfter.bind(diagnostics);
+    diagnostics.eventsAfter = (sequence: number) => {
+      const replay = original(sequence);
+      diagnostics.record({ level: 'info', category: 'broker', code: 'HANDOFF', summary: '交接事件' });
+      diagnostics.eventsAfter = original;
+      return replay;
+    };
+
+    const { events } = await readEvents(broker.address().port, '/api/events?after=1', 3);
+    expect(events.map(event => event.id)).toEqual(['2', '3', '4']);
+  });
+
+  it.each(['1junk', '1.5', '-1', '9007199254740992'])(
+    'treats invalid cursor %s as zero', async cursor => {
+      const diagnostics = (broker as any).diagnostics;
+      diagnostics.record({ level: 'info', category: 'broker', code: 'SECOND', summary: '第二条' });
+      const { events } = await readEvents(broker.address().port, `/api/events?after=${encodeURIComponent(cursor)}`, 1);
+      expect(events[0].id).toBe('1');
+    }
+  );
+
+  it('disconnects a backpressured SSE client and stops within a bounded time', async () => {
+    const originalWrite = http.ServerResponse.prototype.write;
+    const write = jest.spyOn(http.ServerResponse.prototype, 'write').mockImplementation(function (this: http.ServerResponse, ...args: any[]) {
+      originalWrite.apply(this, args as any);
+      return false;
+    } as any);
+    try {
+      await Promise.race([
+        new Promise<void>((resolve, reject) => {
+          const request = http.get(`http://127.0.0.1:${broker.address().port}/api/events`, response => {
+            response.resume();
+            response.once('close', resolve);
+          });
+          request.once('error', error => error.message === 'socket hang up' ? resolve() : reject(error));
+        }),
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error('backpressured client remained open')), 250))
+      ]);
+      expect((broker as any).sseClients.size).toBe(0);
+      await expect(Promise.race([
+        broker.stop(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('stop timed out')), 250))
+      ])).resolves.toBeUndefined();
+    } finally {
+      write.mockRestore();
+    }
+  });
+
   it('emits RESET when replay history is no longer available', async () => {
     const diagnostics = (broker as any).diagnostics;
     for (let index = 0; index < 201; index++) {

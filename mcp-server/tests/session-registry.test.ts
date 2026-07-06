@@ -13,6 +13,18 @@ describe('SessionRegistry', () => {
     expect(registry.diagnosticsCounts()).toEqual({ connected: 1, grace: 1, claimedTabs: 2 });
   });
 
+  it('does not count an expired retained session as grace', () => {
+    const registry = new SessionRegistry();
+    registry.createSession('retained-cleanup');
+    registry.disconnect('retained-cleanup', 1_000);
+
+    registry.expireDisconnected(31_000);
+    registry.pruneDisconnected(31_000, new Set(['retained-cleanup']));
+
+    expect(registry.diagnosticsCounts()).toEqual({ connected: 0, grace: 0, claimedTabs: 0 });
+    expect(() => registry.assertConnected('retained-cleanup')).toThrow(ErrorCode.EXTENSION_DISCONNECTED);
+  });
+
   it('enforces ownership boundaries and per-session visibility', () => {
     const registry = new SessionRegistry();
     const alpha = registry.createSession('alpha');

@@ -308,6 +308,40 @@ describe('BrokerServer', () => {
 
     await new Promise(resolve => setTimeout(resolve, 1_100));
     expect(replacement.readyState).toBe(WebSocket.CLOSED);
+    const status = await fetch(`http://127.0.0.1:${port}/api/status`).then(response => response.json() as any);
+    expect(status.extension).toMatchObject({ connected: false, generation: 2, reconnectPhase: 'failed' });
+    expect(status.recovery.inventorySync).toBe('failed');
+  });
+
+  it('fences recovery state by extension generation during replacement sync', async () => {
+    const port = broker.address().port;
+    const first = await connectRole(port, '/extension', 'extension');
+    sockets.push(first.ws);
+    await closeWs(first.ws);
+
+    const secondWs = await openWs(port, '/extension', 'chrome-extension://test');
+    sockets.push(secondWs);
+    const secondMessages: JsonMessage[] = [];
+    secondWs.on('message', data => secondMessages.push(JSON.parse(data.toString())));
+    secondWs.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    await waitUntil(() => secondMessages.some(message => message.command === 'list_tabs'));
+    const secondSync = secondMessages.find(message => message.command === 'list_tabs')!;
+    expect(secondSync.command).toBe('list_tabs');
+
+    const thirdWs = await openWs(port, '/extension', 'chrome-extension://test');
+    sockets.push(thirdWs);
+    const thirdMessages: JsonMessage[] = [];
+    thirdWs.on('message', data => thirdMessages.push(JSON.parse(data.toString())));
+    thirdWs.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    await waitUntil(() => thirdMessages.some(message => message.command === 'list_tabs'));
+    const thirdSync = thirdMessages.find(message => message.command === 'list_tabs')!;
+    expect(thirdSync.command).toBe('list_tabs');
+    thirdWs.send(JSON.stringify({ id: thirdSync.id, type: 'response', success: true, result: { tabs: [] } }));
+    await waitUntil(() => (broker as any).extensionReconnectPhase === 'idle');
+
+    const status = await fetch(`http://127.0.0.1:${port}/api/status`).then(response => response.json() as any);
+    expect(status.extension).toMatchObject({ connected: true, generation: 3, reconnectPhase: 'idle' });
+    expect(status.recovery.inventorySync).toBe('idle');
   });
 
   it('returns COMMAND_TIMEOUT and ignores a response after its Agent disconnects', async () => {

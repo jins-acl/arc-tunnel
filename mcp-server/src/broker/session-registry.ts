@@ -4,6 +4,7 @@ export interface AgentSession {
   id: string;
   connected: boolean;
   disconnectedAt: number | null;
+  graceExpired: boolean;
   windowId: number | null;
   tabIds: Set<number>;
   recordingIds: Set<string>;
@@ -24,7 +25,7 @@ export class SessionRegistry {
     let grace = 0;
     for (const session of this.sessions.values()) {
       if (session.connected) connected++;
-      else if (session.disconnectedAt !== null) grace++;
+      else if (session.disconnectedAt !== null && !session.graceExpired) grace++;
     }
     return { connected, grace, claimedTabs: this.tabOwners.size };
   }
@@ -37,6 +38,7 @@ export class SessionRegistry {
       id,
       connected: true,
       disconnectedAt: null,
+      graceExpired: false,
       windowId: null,
       tabIds: new Set(),
       recordingIds: new Set(),
@@ -180,6 +182,7 @@ export class SessionRegistry {
     const session = this.requireSession(sessionId);
     session.connected = false;
     session.disconnectedAt = now;
+    session.graceExpired = false;
   }
 
   assertConnected(sessionId: string): void {
@@ -205,6 +208,7 @@ export class SessionRegistry {
       session.recordingIds.clear();
       session.activeRecordingId = null;
       session.savedSessionIds.clear();
+      session.graceExpired = true;
     }
     return expired;
   }

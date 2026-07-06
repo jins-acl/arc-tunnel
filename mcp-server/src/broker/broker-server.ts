@@ -268,6 +268,7 @@ export class BrokerServer {
     this.writeDiagnosticHeaders(response, 'text/event-stream; charset=utf-8');
     response.setHeader('connection', 'keep-alive');
     response.writeHead(200);
+    response.flushHeaders();
     this.sseClients.add(response);
     let closed = false;
     let unsubscribe = (): void => undefined;
@@ -277,18 +278,44 @@ export class BrokerServer {
       unsubscribe();
       this.sseClients.delete(response);
     };
+    const writeFrame = (frame: string): boolean => {
+      if (closed) return false;
+      if (response.write(frame)) return true;
+      close();
+      response.destroy();
+      return false;
+    };
+    let replaying = true;
+    let lastSent = -1;
+    const pending: DiagnosticEvent[] = [];
     const write = (event: DiagnosticEvent) => {
-      if (!closed) response.write(`id: ${event.sequence}\nevent: diagnostic\ndata: ${JSON.stringify(event)}\n\n`);
+      if (event.sequence <= lastSent || closed) return;
+      if (replaying) {
+        pending.push(event);
+        return;
+      }
+      if (writeFrame(`id: ${event.sequence}\nevent: diagnostic\ndata: ${JSON.stringify(event)}\n\n`)) {
+        lastSent = event.sequence;
+      }
     };
     unsubscribe = this.diagnostics.subscribe(write);
     request.once('close', close);
     response.once('close', close);
     const url = new URL(request.url || '/', 'http://localhost');
     const rawSequence = request.headers['last-event-id'] ?? url.searchParams.get('after') ?? '0';
-    const parsed = Number.parseInt(Array.isArray(rawSequence) ? rawSequence[0] : rawSequence, 10);
-    const replay = this.diagnostics.eventsAfter(Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0);
-    if (replay.reset) response.write(`event: RESET\ndata: ${JSON.stringify(this.diagnosticsSnapshot())}\n\n`);
-    for (const event of replay.events) write(event);
+    const cursor = Array.isArray(rawSequence) ? rawSequence[0] : rawSequence;
+    const parsed = /^\d+$/.test(cursor) ? Number(cursor) : 0;
+    const sequence = Number.isSafeInteger(parsed) ? parsed : 0;
+    lastSent = sequence;
+    const replay = this.diagnostics.eventsAfter(sequence);
+    if (replay.reset) {
+      if (!writeFrame(`event: RESET\ndata: ${JSON.stringify(this.diagnosticsSnapshot())}\n\n`)) return;
+      lastSent = replay.events[replay.events.length - 1]?.sequence ?? sequence;
+    } else {
+      for (const event of replay.events) write(event);
+    }
+    replaying = false;
+    for (const event of pending.sort((left, right) => left.sequence - right.sequence)) write(event);
   }
 
   private recordDiagnostic(
@@ -372,6 +399,7 @@ export class BrokerServer {
     }
     this.extension = ws;
     this.extensionGeneration++;
+    const generation = this.extensionGeneration;
     this.recordDiagnostic('info', 'connection', 'EXTENSION_CONNECTED', '扩展已连接');
     this.publishExtensionState();
     if (sendWelcome) this.send(ws, { type: 'welcome', protocolVersion: PROTOCOL_VERSION } satisfies WelcomeMessage);
@@ -381,18 +409,19 @@ export class BrokerServer {
       this.publishExtensionState();
       this.extensionSync = new Promise(resolve => setImmediate(resolve))
         .then(() => this.cleanupDisconnectedRecording(ws))
-        .then(() => this.syncExtensionInventory(ws))
+        .then(() => this.syncExtensionInventory(ws, generation))
         .then(() => {
-          if (this.extension !== ws) return;
+          if (!this.isCurrentExtension(ws, generation)) return;
           this.extensionReconnectPhase = 'idle';
           this.extensionLastSyncAt = Date.now();
           this.publishExtensionState();
         })
         .catch(() => {
-          if (this.extension !== ws) return;
+          if (!this.isCurrentExtension(ws, generation)) return;
           this.extensionReconnectPhase = 'failed';
-          this.publishExtensionState();
           this.extension = null;
+          this.publishExtensionState();
+          this.recordDiagnostic('warning', 'connection', 'EXTENSION_DISCONNECTED', '扩展已断开');
           this.rejectAllRoutes(ErrorCode.EXTENSION_DISCONNECTED);
           ws.close(1012, 'inventory synchronization failed');
         });
@@ -407,6 +436,10 @@ export class BrokerServer {
       this.recordDiagnostic('warning', 'connection', 'EXTENSION_DISCONNECTED', '扩展已断开');
       this.rejectAllRoutes(ErrorCode.EXTENSION_DISCONNECTED);
     });
+  }
+
+  private isCurrentExtension(ws: WebSocket, generation: number): boolean {
+    return this.extension === ws && this.extensionGeneration === generation;
   }
 
   private handleAgentMessage(sessionId: string, data: RawData): void {
@@ -702,21 +735,23 @@ export class BrokerServer {
     }
   }
 
-  private async syncExtensionInventory(ws: WebSocket): Promise<void> {
-    if (this.extension !== ws || ws.readyState !== WebSocket.OPEN) return;
+  private async syncExtensionInventory(ws: WebSocket, generation: number): Promise<void> {
+    if (!this.isCurrentExtension(ws, generation) || ws.readyState !== WebSocket.OPEN) return;
     this.diagnostics.setInventorySync('running');
     this.recordDiagnostic('info', 'recovery', 'INVENTORY_SYNC_STARTED', '标签页清单同步已开始');
     try {
       const result = await this.sendExtensionCommand('', {
         type: 'agent_request', requestId: 'extension-sync', command: 'list_tabs', params: {}, timeout: 1_000
       });
-      if (this.extension !== ws) return;
+      if (!this.isCurrentExtension(ws, generation)) return;
       this.registry.reconcileTabs(new Set(tabIdsFromResult(result)));
       this.diagnostics.setInventorySync('idle');
       this.recordDiagnostic('info', 'recovery', 'INVENTORY_SYNC_COMPLETED', '标签页清单同步已完成');
     } catch (error) {
-      this.diagnostics.setInventorySync('failed');
-      this.recordDiagnostic('error', 'recovery', 'INVENTORY_SYNC_FAILED', '标签页清单同步失败');
+      if (this.isCurrentExtension(ws, generation)) {
+        this.diagnostics.setInventorySync('failed');
+        this.recordDiagnostic('error', 'recovery', 'INVENTORY_SYNC_FAILED', '标签页清单同步失败');
+      }
       throw error;
     }
   }
