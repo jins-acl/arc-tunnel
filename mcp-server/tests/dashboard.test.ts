@@ -54,7 +54,7 @@ describe('Chinese operations dashboard', () => {
     expect(markup).toContain('node scripts/start.js start [--port N]');
   });
 
-  it('refreshes status after diagnostic events without overlapping requests and recovers after failure', async () => {
+  it('polls status without diagnostics, bounds concurrent ticks, and recovers after failure', async () => {
     const script = fs.readFileSync(path.join(__dirname, '..', 'src', 'dashboard', 'dashboard.js'), 'utf8');
     const elements = new Map<string, any>();
     const element = () => ({ className: '', textContent: '', hidden: false, firstChild: null,
@@ -66,23 +66,48 @@ describe('Chinese operations dashboard', () => {
     const handlers: Record<string, (message: any) => void> = {};
     let resolveRequest: ((value: any) => void) | undefined;
     const fetch = jest.fn(() => new Promise(resolve => { resolveRequest = resolve; }));
+    const setInterval = jest.fn();
     const context = { document: { getElementById: (id: string) => elements.get(id), createElement: element },
-      navigator: { clipboard: { writeText: jest.fn() } }, fetch, setTimeout: jest.fn(), console,
+      navigator: { clipboard: { writeText: jest.fn() } }, fetch, setTimeout: jest.fn(), setInterval, console,
       EventSource: class { onopen = null; onerror = null; addEventListener(name: string, handler: any) { handlers[name] = handler; } } };
     vm.runInNewContext(script, context);
+    expect(setInterval).toHaveBeenCalledTimes(1);
+    expect(setInterval).toHaveBeenCalledWith(expect.any(Function), 2_000);
     resolveRequest!({ ok: false });
     await new Promise(resolve => setImmediate(resolve));
 
-    handlers.diagnostic({ data: JSON.stringify({ sequence: 1, timestamp: 1, level: 'info', category: 'connection', code: 'ONE', summary: 'one' }) });
-    handlers.diagnostic({ data: JSON.stringify({ sequence: 2, timestamp: 2, level: 'info', category: 'connection', code: 'TWO', summary: 'two' }) });
+    const tick = setInterval.mock.calls[0][0];
+    tick();
+    tick();
+    tick();
     expect(fetch).toHaveBeenCalledTimes(2);
     resolveRequest!({ ok: false });
     await new Promise(resolve => setImmediate(resolve));
     expect(fetch).toHaveBeenCalledTimes(3);
     resolveRequest!({ ok: false });
     await new Promise(resolve => setImmediate(resolve));
-    handlers.diagnostic({ data: JSON.stringify({ sequence: 3, timestamp: 3, level: 'info', category: 'connection', code: 'THREE', summary: 'three' }) });
+    tick();
     expect(fetch).toHaveBeenCalledTimes(4);
+  });
+
+  it('refreshes status immediately after a diagnostic event', async () => {
+    const script = fs.readFileSync(path.join(__dirname, '..', 'src', 'dashboard', 'dashboard.js'), 'utf8');
+    const elements = new Map<string, any>();
+    const element = () => ({ className: '', textContent: '', hidden: false, firstChild: null,
+      appendChild: jest.fn(), removeChild: jest.fn(), addEventListener: jest.fn(),
+      querySelector: jest.fn(() => ({ textContent: '' })) });
+    for (const id of ['event-list', 'event-filter', 'copy-diagnostics', 'offline-banner', 'overall-status',
+      'broker-card', 'extension-card', 'recovery-card', 'agent-count', 'grace-count',
+      'claimed-tab-count', 'pending-count', 'connection-detail']) elements.set(id, element());
+    const handlers: Record<string, (message: any) => void> = {};
+    const fetch = jest.fn(async () => ({ ok: false }));
+    const context = { document: { getElementById: (id: string) => elements.get(id), createElement: element },
+      navigator: { clipboard: { writeText: jest.fn() } }, fetch, setTimeout: jest.fn(), setInterval: jest.fn(), console,
+      EventSource: class { onopen = null; onerror = null; addEventListener(name: string, handler: any) { handlers[name] = handler; } } };
+    vm.runInNewContext(script, context);
+    await new Promise(resolve => setImmediate(resolve));
+    handlers.diagnostic({ data: JSON.stringify({ sequence: 1, timestamp: 1, level: 'info', category: 'connection', code: 'ONE', summary: 'one' }) });
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it('renders the Broker port and a friendly extension synchronization time', async () => {
@@ -96,7 +121,7 @@ describe('Chinese operations dashboard', () => {
       'claimed-tab-count', 'pending-count', 'connection-detail']) elements.set(id, element());
     const context = { document: { getElementById: (id: string) => elements.get(id), createElement: element },
       navigator: { clipboard: { writeText: jest.fn() } }, fetch: jest.fn(() => new Promise(() => {})),
-      setTimeout: jest.fn(), console, EventSource: class { onopen = null; onerror = null; addEventListener() {} } };
+      setTimeout: jest.fn(), setInterval: jest.fn(), console, EventSource: class { onopen = null; onerror = null; addEventListener() {} } };
     vm.runInNewContext(script, context);
     const renderStatus = vm.runInNewContext('renderStatus', context);
     const snapshot = { broker: { port: 9123, protocolVersion: 2, uptimeMs: 1000 },
@@ -152,7 +177,7 @@ describe('Chinese operations dashboard', () => {
           addEventListener() { /* test stub */ }
         },
         fetch: async () => ({ ok: false }),
-        setTimeout: jest.fn(),
+        setTimeout: jest.fn(), setInterval: jest.fn(),
         console
       };
       vm.runInNewContext(script, context);

@@ -3,6 +3,7 @@
 let currentStatus = null;
 let currentCategory = 'all';
 const diagnosticEvents = [];
+const STATUS_POLL_INTERVAL_MS = 2_000;
 let statusRefresh = null;
 let statusRefreshQueued = false;
 
@@ -114,7 +115,7 @@ async function copyDiagnostics() {
   setTimeout(() => { button.textContent = original; }, 1600);
 }
 
-function fetchStatus() {
+function scheduleStatusRefresh() {
   if (statusRefresh) {
     statusRefreshQueued = true;
     return statusRefresh;
@@ -131,7 +132,7 @@ function fetchStatus() {
     statusRefresh = null;
     if (statusRefreshQueued) {
       statusRefreshQueued = false;
-      void fetchStatus();
+      void scheduleStatusRefresh();
     }
   });
   return statusRefresh;
@@ -142,13 +143,13 @@ function connectEvents() {
   source.addEventListener('diagnostic', (message) => {
     try {
       appendEvent(JSON.parse(message.data));
-      void fetchStatus();
+      void scheduleStatusRefresh();
     } catch { showOffline(true); }
   });
   source.addEventListener('RESET', () => {
     diagnosticEvents.splice(0, diagnosticEvents.length);
     renderEvents();
-    void fetchStatus();
+    void scheduleStatusRefresh();
   });
   source.onopen = () => showOffline(false);
   source.onerror = () => showOffline(true);
@@ -157,5 +158,6 @@ function connectEvents() {
 byId('event-filter').addEventListener('change', (event) => setCategory(event.target.value));
 byId('copy-diagnostics').addEventListener('click', () => { void copyDiagnostics(); });
 renderEvents();
-void fetchStatus();
+void scheduleStatusRefresh();
+setInterval(() => { void scheduleStatusRefresh(); }, STATUS_POLL_INTERVAL_MS);
 connectEvents();
