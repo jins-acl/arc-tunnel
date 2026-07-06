@@ -5,6 +5,10 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
     for (let key of __getOwnPropNames(from))
@@ -21,6 +25,14 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
   mod
 ));
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+
+// src/broker-control.ts
+var broker_control_exports = {};
+__export(broker_control_exports, {
+  runControl: () => runControl
+});
+module.exports = __toCommonJS(broker_control_exports);
 
 // src/broker-launcher.ts
 var import_child_process = require("child_process");
@@ -222,6 +234,78 @@ function createBrokerLauncher(options = {}) {
     if (result.kind !== "arc") return { running: false, port: config.port };
     return { running: true, port: config.port, protocolVersion: result.health.protocolVersion, pid: result.health.pid };
   }
+  function requestJson(config, requestPath) {
+    return new Promise((resolve) => {
+      let settled = false;
+      let response;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        response?.destroy();
+        request.destroy();
+        resolve(result);
+      };
+      const request = import_http.default.get({ hostname: "127.0.0.1", port: config.port, path: requestPath }, (incoming) => {
+        response = incoming;
+        let body = "";
+        incoming.setEncoding("utf8");
+        incoming.on("data", (chunk) => {
+          body += chunk;
+        });
+        incoming.once("aborted", () => finish({ kind: "failed" }));
+        incoming.once("error", () => finish({ kind: "failed" }));
+        incoming.on("end", () => {
+          if (incoming.statusCode !== 200) return finish({ kind: "failed" });
+          try {
+            finish({ kind: "ok", value: JSON.parse(body) });
+          } catch {
+            finish({ kind: "failed" });
+          }
+        });
+      });
+      request.once("error", (error) => {
+        finish({ kind: error.code === "ECONNREFUSED" ? "absent" : "failed" });
+      });
+      const timer = setTimeout(() => finish({ kind: "failed" }), Math.min(250, startupTimeout));
+    });
+  }
+  async function inspectBroker2(config) {
+    const healthResult = await requestJson(config, "/health");
+    if (healthResult.kind === "absent") return { kind: "absent", port: config.port };
+    if (healthResult.kind !== "ok" || !healthResult.value || typeof healthResult.value !== "object") {
+      return { kind: "foreign", port: config.port };
+    }
+    const health = healthResult.value;
+    if (health.name !== "arc-tunnel" || typeof health.protocolVersion !== "number" || typeof health.pid !== "number" || health.port !== config.port) {
+      return { kind: "foreign", port: config.port };
+    }
+    if (health.protocolVersion !== PROTOCOL_VERSION) {
+      return {
+        kind: "incompatible",
+        port: config.port,
+        pid: health.pid,
+        protocolVersion: health.protocolVersion,
+        expectedProtocolVersion: PROTOCOL_VERSION
+      };
+    }
+    const status = await requestJson(config, "/api/status");
+    if (status.kind !== "ok" || !status.value || typeof status.value !== "object") {
+      return {
+        kind: "diagnostics-unavailable",
+        port: config.port,
+        pid: health.pid,
+        protocolVersion: health.protocolVersion
+      };
+    }
+    return {
+      kind: "healthy",
+      port: config.port,
+      pid: health.pid,
+      protocolVersion: health.protocolVersion,
+      diagnostics: status.value
+    };
+  }
   async function stopBroker2(config) {
     const deadline = Date.now() + startupTimeout;
     let result = await probe(config, deadline);
@@ -288,12 +372,13 @@ function createBrokerLauncher(options = {}) {
       throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, "Broker lock ownership changed during cleanup");
     }
   }
-  return { ensureBroker: ensureBroker2, getBrokerStatus: getBrokerStatus2, stopBroker: stopBroker2 };
+  return { ensureBroker: ensureBroker2, getBrokerStatus: getBrokerStatus2, stopBroker: stopBroker2, inspectBroker: inspectBroker2 };
 }
 var defaultLauncher = createBrokerLauncher();
 var ensureBroker = defaultLauncher.ensureBroker;
 var getBrokerStatus = defaultLauncher.getBrokerStatus;
 var stopBroker = defaultLauncher.stopBroker;
+var inspectBroker = defaultLauncher.inspectBroker;
 
 // src/config.ts
 var import_fs2 = __toESM(require("fs"));
@@ -334,23 +419,79 @@ function loadBrokerConfig(argv, env, homeDir = import_os2.default.homedir()) {
 }
 
 // src/broker-control.ts
-async function main() {
-  const action = process.argv[2] ?? "start";
-  const config = loadBrokerConfig(process.argv.slice(3), process.env);
+var EXIT_CODE = {
+  healthy: 0,
+  absent: 2,
+  foreign: 3,
+  incompatible: 4,
+  "diagnostics-unavailable": 5
+};
+function diagnoseJson(inspection) {
+  return inspection.kind === "healthy" ? { running: true, ...inspection, dashboardUrl: `http://127.0.0.1:${inspection.port}/dashboard` } : { running: false, ...inspection };
+}
+function humanDiagnose(inspection) {
+  const dashboard = `http://127.0.0.1:${inspection.port}/dashboard`;
+  const lines = ["Arc Tunnel \u8FD0\u7EF4\u63A7\u5236\u4E2D\u5FC3", "========================"];
+  if (inspection.kind === "healthy") {
+    const d = inspection.diagnostics;
+    lines.push(`Broker: \u6B63\u5E38\uFF08PID ${inspection.pid}\uFF0C\u7AEF\u53E3 ${inspection.port}\uFF0C\u534F\u8BAE ${inspection.protocolVersion}\uFF0C\u8FD0\u884C ${d.broker.uptimeMs} ms\uFF09`);
+    lines.push(`Extension: ${d.extension.connected ? "\u5DF2\u8FDE\u63A5" : "\u672A\u8FDE\u63A5"}`);
+    lines.push(`Agent: \u5DF2\u8FDE\u63A5 ${d.agents.connected}\uFF0C\u5BBD\u9650\u671F ${d.agents.grace}`);
+    lines.push(`\u5DE5\u4F5C\u8D1F\u8F7D: \u5DF2\u8BA4\u9886\u6807\u7B7E\u9875 ${d.workload.claimedTabs}\uFF0C\u5F85\u5904\u7406\u547D\u4EE4 ${d.workload.pendingCommands}`);
+    lines.push(`\u6062\u590D\u9636\u6BB5: \u6E05\u5355\u540C\u6B65 ${d.recovery.inventorySync}\uFF0C\u5F55\u5236\u6E05\u7406 ${d.recovery.recordingCleanup}`);
+    lines.push(`\u6700\u8FD1\u9519\u8BEF: ${d.recentError ? `${d.recentError.code} ${d.recentError.summary}` : "\u65E0"}`);
+    lines.push(`Dashboard: ${dashboard}`);
+    lines.push("\u5EFA\u8BAE: \u82E5\u6D4F\u89C8\u5668\u672A\u8FDE\u63A5\uFF0C\u8BF7\u68C0\u67E5\u6269\u5C55\u5F39\u7A97\u4E2D\u7684 Broker \u7AEF\u53E3\u3002");
+  } else {
+    let messages;
+    if (inspection.kind === "absent") messages = [`Broker: \u672A\u8FD0\u884C\uFF08\u7AEF\u53E3 ${inspection.port}\uFF09`, "\u5EFA\u8BAE: \u8FD0\u884C start \u542F\u52A8 Broker\u3002"];
+    else if (inspection.kind === "foreign") messages = [`Broker: \u7AEF\u53E3 ${inspection.port} \u88AB\u5176\u4ED6\u670D\u52A1\u5360\u7528`, "\u5EFA\u8BAE: \u9009\u62E9\u7A7A\u95F2\u7AEF\u53E3\uFF0C\u4E14\u4E0D\u8981\u505C\u6B62\u672A\u77E5\u8FDB\u7A0B\u3002"];
+    else if (inspection.kind === "incompatible") messages = [
+      `Broker: \u534F\u8BAE\u4E0D\u517C\u5BB9\uFF08\u5F53\u524D ${inspection.protocolVersion}\uFF0C\u9700\u8981 ${inspection.expectedProtocolVersion}\uFF09`,
+      "\u5EFA\u8BAE: \u91CD\u65B0\u6784\u5EFA\u5E76\u7EDF\u4E00\u66F4\u65B0 Broker\u3001\u5BA2\u6237\u7AEF\u548C\u6269\u5C55\u3002"
+    ];
+    else messages = [`Broker: \u6B63\u5E38\uFF0C\u4F46\u8BCA\u65AD\u63A5\u53E3\u4E0D\u53EF\u7528\uFF08PID ${inspection.pid}\uFF09`, "\u5EFA\u8BAE: \u68C0\u67E5\u7248\u672C\u5E76\u91CD\u65B0\u6784\u5EFA Broker bundle\u3002"];
+    lines.push(...messages, `Dashboard: ${dashboard}`);
+  }
+  return `${lines.join("\n")}
+`;
+}
+async function runControl(argv, env, output, launcher = { ensureBroker, getBrokerStatus, stopBroker, inspectBroker }) {
+  const action = argv[0] ?? "start";
+  const config = loadBrokerConfig(argv.slice(1), env);
   if (action === "start") {
-    await ensureBroker(config);
-    console.log(JSON.stringify(await getBrokerStatus(config)));
+    await launcher.ensureBroker(config);
+    output.stdout(`${JSON.stringify(await launcher.getBrokerStatus(config))}
+`);
   } else if (action === "status") {
-    console.log(JSON.stringify(await getBrokerStatus(config)));
+    output.stdout(`${JSON.stringify(await launcher.getBrokerStatus(config))}
+`);
   } else if (action === "stop") {
-    await stopBroker(config);
-    console.log(JSON.stringify({ running: false, port: config.port }));
+    await launcher.stopBroker(config);
+    output.stdout(`${JSON.stringify({ running: false, port: config.port })}
+`);
+  } else if (action === "diagnose") {
+    const inspection = await launcher.inspectBroker(config);
+    output.stdout(argv.includes("--json") ? `${JSON.stringify(diagnoseJson(inspection))}
+` : humanDiagnose(inspection));
+    return EXIT_CODE[inspection.kind];
   } else {
     throw new Error(`Unknown broker action: ${action}`);
   }
+  return 0;
 }
-void main().catch((error) => {
+async function main() {
+  process.exitCode = await runControl(process.argv.slice(2), process.env, {
+    stdout: (value) => process.stdout.write(value),
+    stderr: (value) => process.stderr.write(value)
+  });
+}
+if (require.main === module) void main().catch((error) => {
   console.error(error);
-  process.exit(1);
+  process.exitCode = 1;
+});
+// Annotate the CommonJS export names for ESM import in node:
+0 && (module.exports = {
+  runControl
 });
 //# sourceMappingURL=arc-tunnel-control.js.map

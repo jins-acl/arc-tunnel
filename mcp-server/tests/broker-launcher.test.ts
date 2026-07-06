@@ -89,6 +89,43 @@ describe('broker launcher', () => {
     await new Promise<void>((resolve) => foreign.close(() => resolve()));
   });
 
+  it.each([
+    [{ name: 'arc-tunnel', protocolVersion: 2, pid: 42 }, 'healthy'],
+    [{ name: 'arc-tunnel', protocolVersion: 99, pid: 42 }, 'incompatible'],
+    [{ name: 'other-service' }, 'foreign']
+  ])('classifies endpoint health %j as %s', async (health, kind) => {
+    const server = http.createServer((request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(request.url === '/health' ? { ...health, port } : {
+        broker: { pid: 42, port, protocolVersion: 2, uptimeMs: 10 },
+        extension: { connected: false, generation: 0, reconnectPhase: 'idle', lastSyncAt: null },
+        agents: { connected: 0, grace: 0 }, workload: { claimedTabs: 0, pendingCommands: 0 },
+        recovery: { inventorySync: 'idle', recordingCleanup: 'idle' }, recentError: null
+      }));
+    });
+    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
+    await expect(launcher.inspectBroker({ host: '127.0.0.1', port })).resolves.toMatchObject({ kind });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('classifies a closed endpoint as absent', async () => {
+    await expect(launcher.inspectBroker({ host: '127.0.0.1', port })).resolves.toEqual({ kind: 'absent', port });
+  });
+
+  it('reports unavailable diagnostics only after compatible Arc Tunnel health', async () => {
+    const server = http.createServer((request, response) => {
+      if (request.url === '/health') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ name: 'arc-tunnel', protocolVersion: 2, pid: 42, port }));
+      } else { response.writeHead(503); response.end('unavailable'); }
+    });
+    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
+    await expect(launcher.inspectBroker({ host: '127.0.0.1', port })).resolves.toMatchObject({
+      kind: 'diagnostics-unavailable', port, pid: 42, protocolVersion: 2
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
   it('treats a foreign listener that never sends health headers as PORT_IN_USE', async () => {
     let respond = false;
     const foreign = http.createServer((_request, response) => {

@@ -10876,6 +10876,78 @@ function createBrokerLauncher(options = {}) {
     if (result.kind !== "arc") return { running: false, port: config2.port };
     return { running: true, port: config2.port, protocolVersion: result.health.protocolVersion, pid: result.health.pid };
   }
+  function requestJson(config2, requestPath) {
+    return new Promise((resolve) => {
+      let settled = false;
+      let response;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        response?.destroy();
+        request.destroy();
+        resolve(result);
+      };
+      const request = import_http.default.get({ hostname: "127.0.0.1", port: config2.port, path: requestPath }, (incoming) => {
+        response = incoming;
+        let body = "";
+        incoming.setEncoding("utf8");
+        incoming.on("data", (chunk) => {
+          body += chunk;
+        });
+        incoming.once("aborted", () => finish({ kind: "failed" }));
+        incoming.once("error", () => finish({ kind: "failed" }));
+        incoming.on("end", () => {
+          if (incoming.statusCode !== 200) return finish({ kind: "failed" });
+          try {
+            finish({ kind: "ok", value: JSON.parse(body) });
+          } catch {
+            finish({ kind: "failed" });
+          }
+        });
+      });
+      request.once("error", (error2) => {
+        finish({ kind: error2.code === "ECONNREFUSED" ? "absent" : "failed" });
+      });
+      const timer = setTimeout(() => finish({ kind: "failed" }), Math.min(250, startupTimeout));
+    });
+  }
+  async function inspectBroker2(config2) {
+    const healthResult = await requestJson(config2, "/health");
+    if (healthResult.kind === "absent") return { kind: "absent", port: config2.port };
+    if (healthResult.kind !== "ok" || !healthResult.value || typeof healthResult.value !== "object") {
+      return { kind: "foreign", port: config2.port };
+    }
+    const health = healthResult.value;
+    if (health.name !== "arc-tunnel" || typeof health.protocolVersion !== "number" || typeof health.pid !== "number" || health.port !== config2.port) {
+      return { kind: "foreign", port: config2.port };
+    }
+    if (health.protocolVersion !== PROTOCOL_VERSION) {
+      return {
+        kind: "incompatible",
+        port: config2.port,
+        pid: health.pid,
+        protocolVersion: health.protocolVersion,
+        expectedProtocolVersion: PROTOCOL_VERSION
+      };
+    }
+    const status = await requestJson(config2, "/api/status");
+    if (status.kind !== "ok" || !status.value || typeof status.value !== "object") {
+      return {
+        kind: "diagnostics-unavailable",
+        port: config2.port,
+        pid: health.pid,
+        protocolVersion: health.protocolVersion
+      };
+    }
+    return {
+      kind: "healthy",
+      port: config2.port,
+      pid: health.pid,
+      protocolVersion: health.protocolVersion,
+      diagnostics: status.value
+    };
+  }
   async function stopBroker2(config2) {
     const deadline = Date.now() + startupTimeout;
     let result = await probe(config2, deadline);
@@ -10942,12 +11014,13 @@ function createBrokerLauncher(options = {}) {
       throw new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, "Broker lock ownership changed during cleanup");
     }
   }
-  return { ensureBroker: ensureBroker2, getBrokerStatus: getBrokerStatus2, stopBroker: stopBroker2 };
+  return { ensureBroker: ensureBroker2, getBrokerStatus: getBrokerStatus2, stopBroker: stopBroker2, inspectBroker: inspectBroker2 };
 }
 var defaultLauncher = createBrokerLauncher();
 var ensureBroker = defaultLauncher.ensureBroker;
 var getBrokerStatus = defaultLauncher.getBrokerStatus;
 var stopBroker = defaultLauncher.stopBroker;
+var inspectBroker = defaultLauncher.inspectBroker;
 
 // src/config.ts
 var import_fs2 = __toESM(require("fs"));

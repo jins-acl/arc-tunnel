@@ -5,6 +5,7 @@ import os from 'os';
 import path from 'path';
 import { BrokerConfig } from './config';
 import { ArcTunnelError, ErrorCode, PROTOCOL_VERSION } from './protocol';
+import { DiagnosticsSnapshot } from './broker/diagnostics-store';
 
 interface Health { name: 'arc-tunnel'; protocolVersion: number; pid: number; port: number; }
 interface LockFile { pid: number; port: number; protocolVersion: number; }
@@ -17,6 +18,13 @@ export interface BrokerStatus {
   protocolVersion?: number;
   pid?: number;
 }
+
+export type BrokerInspection =
+  | { kind: 'healthy'; port: number; pid: number; protocolVersion: number; diagnostics: DiagnosticsSnapshot }
+  | { kind: 'absent'; port: number }
+  | { kind: 'foreign'; port: number }
+  | { kind: 'incompatible'; port: number; pid: number; protocolVersion: number; expectedProtocolVersion: number }
+  | { kind: 'diagnostics-unavailable'; port: number; pid: number; protocolVersion: number };
 
 interface LauncherOptions {
   homeDir?: string;
@@ -202,6 +210,63 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
     return { running: true, port: config.port, protocolVersion: result.health.protocolVersion, pid: result.health.pid };
   }
 
+  function requestJson(config: BrokerConfig, requestPath: string): Promise<
+    { kind: 'ok'; value: unknown } | { kind: 'absent' } | { kind: 'failed' }
+  > {
+    return new Promise((resolve) => {
+      let settled = false;
+      let response: http.IncomingMessage | undefined;
+      const finish = (result: { kind: 'ok'; value: unknown } | { kind: 'absent' } | { kind: 'failed' }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        response?.destroy();
+        request.destroy();
+        resolve(result);
+      };
+      const request = http.get({ hostname: '127.0.0.1', port: config.port, path: requestPath }, incoming => {
+        response = incoming;
+        let body = '';
+        incoming.setEncoding('utf8');
+        incoming.on('data', chunk => { body += chunk; });
+        incoming.once('aborted', () => finish({ kind: 'failed' }));
+        incoming.once('error', () => finish({ kind: 'failed' }));
+        incoming.on('end', () => {
+          if (incoming.statusCode !== 200) return finish({ kind: 'failed' });
+          try { finish({ kind: 'ok', value: JSON.parse(body) }); } catch { finish({ kind: 'failed' }); }
+        });
+      });
+      request.once('error', (error: NodeJS.ErrnoException) => {
+        finish({ kind: error.code === 'ECONNREFUSED' ? 'absent' : 'failed' });
+      });
+      const timer = setTimeout(() => finish({ kind: 'failed' }), Math.min(250, startupTimeout));
+    });
+  }
+
+  async function inspectBroker(config: BrokerConfig): Promise<BrokerInspection> {
+    const healthResult = await requestJson(config, '/health');
+    if (healthResult.kind === 'absent') return { kind: 'absent', port: config.port };
+    if (healthResult.kind !== 'ok' || !healthResult.value || typeof healthResult.value !== 'object') {
+      return { kind: 'foreign', port: config.port };
+    }
+    const health = healthResult.value as Partial<Health>;
+    if (health.name !== 'arc-tunnel' || typeof health.protocolVersion !== 'number'
+      || typeof health.pid !== 'number' || health.port !== config.port) {
+      return { kind: 'foreign', port: config.port };
+    }
+    if (health.protocolVersion !== PROTOCOL_VERSION) {
+      return { kind: 'incompatible', port: config.port, pid: health.pid,
+        protocolVersion: health.protocolVersion, expectedProtocolVersion: PROTOCOL_VERSION };
+    }
+    const status = await requestJson(config, '/api/status');
+    if (status.kind !== 'ok' || !status.value || typeof status.value !== 'object') {
+      return { kind: 'diagnostics-unavailable', port: config.port, pid: health.pid,
+        protocolVersion: health.protocolVersion };
+    }
+    return { kind: 'healthy', port: config.port, pid: health.pid, protocolVersion: health.protocolVersion,
+      diagnostics: status.value as DiagnosticsSnapshot };
+  }
+
   async function stopBroker(config: BrokerConfig): Promise<void> {
     const deadline = Date.now() + startupTimeout;
     let result = await probe(config, deadline);
@@ -268,10 +333,11 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
     }
   }
 
-  return { ensureBroker, getBrokerStatus, stopBroker };
+  return { ensureBroker, getBrokerStatus, stopBroker, inspectBroker };
 }
 
 const defaultLauncher = createBrokerLauncher();
 export const ensureBroker = defaultLauncher.ensureBroker;
 export const getBrokerStatus = defaultLauncher.getBrokerStatus;
 export const stopBroker = defaultLauncher.stopBroker;
+export const inspectBroker = defaultLauncher.inspectBroker;
