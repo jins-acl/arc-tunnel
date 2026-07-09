@@ -8,6 +8,7 @@ interface DebuggerControllerOptions {
   navigationTimeoutMs?: number;
   activationTimeoutMs?: number;
   commandTimeoutMs?: number;
+  inputCommandTimeoutMs?: number;
 }
 
 function mapError(err: Error): CodedError {
@@ -30,21 +31,24 @@ export class DebuggerController {
   private navigationTimeoutMs: number;
   private activationTimeoutMs: number;
   private commandTimeoutMs: number;
+  private inputCommandTimeoutMs: number;
 
   constructor(options: DebuggerControllerOptions = {}) {
     this.navigationTimeoutMs = options.navigationTimeoutMs ?? 1500;
     this.activationTimeoutMs = options.activationTimeoutMs ?? 5000;
     this.commandTimeoutMs = options.commandTimeoutMs ?? 5000;
+    this.inputCommandTimeoutMs = options.inputCommandTimeoutMs ?? 15000;
   }
 
   async sendCommand(tabId: number, method: string, params?: any): Promise<any> {
     return new Promise((resolve, reject) => {
       let settled = false;
+      const timeoutMs = this.timeoutForCommand(method);
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        reject(mapError(new Error(`${method} timed out after ${this.commandTimeoutMs}ms`)));
-      }, this.commandTimeoutMs);
+        reject(mapError(new Error(`${method} timed out after ${timeoutMs}ms`)));
+      }, timeoutMs);
       chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
         if (settled) return;
         settled = true;
@@ -56,6 +60,11 @@ export class DebuggerController {
         }
       });
     });
+  }
+
+  private timeoutForCommand(method: string): number {
+    if (method.startsWith('Input.')) return this.inputCommandTimeoutMs;
+    return this.commandTimeoutMs;
   }
 
   private pageEnabledTabs = new Set<number>();

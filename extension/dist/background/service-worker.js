@@ -469,15 +469,17 @@ var init_debugger_controller = __esm({
         this.navigationTimeoutMs = options.navigationTimeoutMs ?? 1500;
         this.activationTimeoutMs = options.activationTimeoutMs ?? 5e3;
         this.commandTimeoutMs = options.commandTimeoutMs ?? 5e3;
+        this.inputCommandTimeoutMs = options.inputCommandTimeoutMs ?? 15e3;
       }
       async sendCommand(tabId, method, params) {
         return new Promise((resolve, reject) => {
           let settled = false;
+          const timeoutMs = this.timeoutForCommand(method);
           const timer = setTimeout(() => {
             if (settled) return;
             settled = true;
-            reject(mapError(new Error(`${method} timed out after ${this.commandTimeoutMs}ms`)));
-          }, this.commandTimeoutMs);
+            reject(mapError(new Error(`${method} timed out after ${timeoutMs}ms`)));
+          }, timeoutMs);
           chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
             if (settled) return;
             settled = true;
@@ -489,6 +491,10 @@ var init_debugger_controller = __esm({
             }
           });
         });
+      }
+      timeoutForCommand(method) {
+        if (method.startsWith("Input.")) return this.inputCommandTimeoutMs;
+        return this.commandTimeoutMs;
       }
       async navigate(tabId, url) {
         if (!this.pageEnabledTabs.has(tabId)) {

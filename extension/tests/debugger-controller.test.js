@@ -124,3 +124,27 @@ test('sendCommand rejects with TIMEOUT when CDP never calls back', async () => {
     );
   });
 });
+
+test('sendCommand allows slower input commands while keeping the generic timeout short', async () => {
+  const calls = [];
+  await withChrome({
+    runtime: {},
+    debugger: {
+      sendCommand(target, method, params, callback) {
+        calls.push([method, params]);
+        setTimeout(() => callback({ acknowledged: true }), 20);
+      }
+    }
+  }, async () => {
+    const controller = new DebuggerController({ commandTimeoutMs: 5, inputCommandTimeoutMs: 50 });
+    const result = await Promise.race([
+      controller.sendCommand(7, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: 1, y: 2 }),
+      failAfter(80, 'sendCommand timed out a slow-but-successful mouse dispatch')
+    ]);
+    assert.deepEqual(result, { acknowledged: true });
+  });
+
+  assert.deepEqual(calls, [
+    ['Input.dispatchMouseEvent', { type: 'mouseMoved', x: 1, y: 2 }]
+  ]);
+});
