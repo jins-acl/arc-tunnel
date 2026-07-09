@@ -454,7 +454,7 @@ function mapError(err) {
     err.code = "ELEMENT_NOT_FOUND";
   } else if (msg.includes("Cannot find context with specified id")) {
     err.code = "TAB_CLOSED";
-  } else if (msg.includes("timeout")) {
+  } else if (msg.includes("timeout") || msg.includes("timed out")) {
     err.code = "TIMEOUT";
   }
   return err;
@@ -468,10 +468,20 @@ var init_debugger_controller = __esm({
         this.pageEnabledTabs = /* @__PURE__ */ new Set();
         this.navigationTimeoutMs = options.navigationTimeoutMs ?? 1500;
         this.activationTimeoutMs = options.activationTimeoutMs ?? 5e3;
+        this.commandTimeoutMs = options.commandTimeoutMs ?? 5e3;
       }
       async sendCommand(tabId, method, params) {
         return new Promise((resolve, reject) => {
+          let settled = false;
+          const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            reject(mapError(new Error(`${method} timed out after ${this.commandTimeoutMs}ms`)));
+          }, this.commandTimeoutMs);
           chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
             if (chrome.runtime.lastError) {
               reject(mapError(new Error(chrome.runtime.lastError.message)));
             } else {

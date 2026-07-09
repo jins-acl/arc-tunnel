@@ -103,3 +103,24 @@ test('screenshot falls back to CDP when activating a frozen tab hangs', async ()
     ['Page.captureScreenshot', { format: 'png', captureBeyondViewport: false }]
   ]);
 });
+
+test('sendCommand rejects with TIMEOUT when CDP never calls back', async () => {
+  await withChrome({
+    runtime: {},
+    debugger: {
+      sendCommand() {
+        // Simulates a renderer-main-thread-bound CDP command that never reaches
+        // its callback on a stuck page.
+      }
+    }
+  }, async () => {
+    const controller = new DebuggerController({ commandTimeoutMs: 5 });
+    await assert.rejects(
+      Promise.race([
+        controller.sendCommand(7, 'Runtime.evaluate', { expression: 'document.body.innerText' }),
+        failAfter(50, 'sendCommand did not apply its own timeout')
+      ]),
+      (error) => error.code === 'TIMEOUT' && /Runtime\.evaluate timed out/.test(error.message)
+    );
+  });
+});

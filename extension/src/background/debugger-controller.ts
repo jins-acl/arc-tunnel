@@ -7,6 +7,7 @@ interface CodedError extends Error {
 interface DebuggerControllerOptions {
   navigationTimeoutMs?: number;
   activationTimeoutMs?: number;
+  commandTimeoutMs?: number;
 }
 
 function mapError(err: Error): CodedError {
@@ -19,7 +20,7 @@ function mapError(err: Error): CodedError {
     (err as CodedError).code = 'ELEMENT_NOT_FOUND';
   } else if (msg.includes('Cannot find context with specified id')) {
     (err as CodedError).code = 'TAB_CLOSED';
-  } else if (msg.includes('timeout')) {
+  } else if (msg.includes('timeout') || msg.includes('timed out')) {
     (err as CodedError).code = 'TIMEOUT';
   }
   return err as CodedError;
@@ -28,15 +29,26 @@ function mapError(err: Error): CodedError {
 export class DebuggerController {
   private navigationTimeoutMs: number;
   private activationTimeoutMs: number;
+  private commandTimeoutMs: number;
 
   constructor(options: DebuggerControllerOptions = {}) {
     this.navigationTimeoutMs = options.navigationTimeoutMs ?? 1500;
     this.activationTimeoutMs = options.activationTimeoutMs ?? 5000;
+    this.commandTimeoutMs = options.commandTimeoutMs ?? 5000;
   }
 
   async sendCommand(tabId: number, method: string, params?: any): Promise<any> {
     return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(mapError(new Error(`${method} timed out after ${this.commandTimeoutMs}ms`)));
+      }, this.commandTimeoutMs);
       chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         if (chrome.runtime.lastError) {
           reject(mapError(new Error(chrome.runtime.lastError.message)));
         } else {
