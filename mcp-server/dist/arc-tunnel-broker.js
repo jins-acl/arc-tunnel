@@ -4750,6 +4750,7 @@ data: ${JSON.stringify(this.diagnosticsSnapshot())}
       const matchesTab = typeof route.params.tabId === "number" && removedTabIds.has(route.params.tabId);
       const matchesWindow = typeof windowId === "number" && route.params.windowId === windowId;
       if (!matchesTab && !matchesWindow) continue;
+      if (matchesTab && route.command === "close_tab") continue;
       clearTimeout(route.timer);
       this.routes.delete(id);
       route.reject(new ArcTunnelError("TAB_CLOSED" /* TAB_CLOSED */, "TAB_CLOSED" /* TAB_CLOSED */));

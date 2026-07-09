@@ -861,6 +861,7 @@ export class BrokerServer {
       const matchesTab = typeof route.params.tabId === 'number' && removedTabIds.has(route.params.tabId);
       const matchesWindow = typeof windowId === 'number' && route.params.windowId === windowId;
       if (!matchesTab && !matchesWindow) continue;
+      if (matchesTab && route.command === 'close_tab') continue;
       clearTimeout(route.timer);
       this.routes.delete(id);
       route.reject(new ArcTunnelError(ErrorCode.TAB_CLOSED, ErrorCode.TAB_CLOSED));

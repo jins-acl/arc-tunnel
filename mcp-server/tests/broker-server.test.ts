@@ -142,6 +142,62 @@ describe('BrokerServer', () => {
     await expect(betaResponse).resolves.toMatchObject({ requestId: 'same-id', result: { tabs: [{ tabId: 2 }] } });
   });
 
+  it('does not reject an in-flight close_tab when tab_removed arrives before success', async () => {
+    const port = broker.address().port;
+    const extension = await connectRole(port, '/extension', 'extension');
+    const alpha = await connectRole(port, '/agent', 'agent');
+    sockets.push(extension.ws, alpha.ws);
+
+    const inventory = nextMessage(extension.ws);
+    alpha.ws.send(JSON.stringify({
+      type: 'agent_request',
+      requestId: 'claim-before-close',
+      command: 'claim_tab',
+      params: { tabId: 77 },
+      timeout: 1_000
+    }));
+    const listTabs = await inventory;
+    extension.ws.send(JSON.stringify({
+      id: listTabs.id,
+      type: 'response',
+      success: true,
+      result: { tabs: [{ tabId: 77, windowId: 1, url: 'https://example.test', title: 'Example', active: true }] }
+    }));
+    await expect(nextMessage(alpha.ws)).resolves.toMatchObject({
+      requestId: 'claim-before-close',
+      result: { tabId: 77, ownership: 'owned' }
+    });
+
+    const command = nextMessage(extension.ws);
+    alpha.ws.send(JSON.stringify({
+      type: 'agent_request',
+      requestId: 'close-race',
+      command: 'close_tab',
+      params: { tabId: 77 },
+      timeout: 1_000
+    }));
+    const closeCommand = await command;
+    const response = nextMessage(alpha.ws);
+
+    extension.ws.send(JSON.stringify({
+      type: 'event',
+      event: 'tab_removed',
+      data: { tabId: 77 },
+      timestamp: Date.now()
+    }));
+    extension.ws.send(JSON.stringify({
+      id: closeCommand.id,
+      type: 'response',
+      success: true,
+      result: { status: 'closed' }
+    }));
+
+    await expect(response).resolves.toMatchObject({
+      requestId: 'close-race',
+      result: { status: 'closed' }
+    });
+  });
+
   it('returns EXTENSION_DISCONNECTED without an extension and for in-flight work on disconnect', async () => {
     const port = broker.address().port;
     const alpha = await connectRole(port, '/agent', 'agent');

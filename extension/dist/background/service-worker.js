@@ -464,8 +464,10 @@ var init_debugger_controller = __esm({
   "src/background/debugger-controller.ts"() {
     "use strict";
     DebuggerController = class {
-      constructor() {
+      constructor(options = {}) {
         this.pageEnabledTabs = /* @__PURE__ */ new Set();
+        this.navigationTimeoutMs = options.navigationTimeoutMs ?? 1500;
+        this.activationTimeoutMs = options.activationTimeoutMs ?? 5e3;
       }
       async sendCommand(tabId, method, params) {
         return new Promise((resolve, reject) => {
@@ -483,7 +485,9 @@ var init_debugger_controller = __esm({
           await this.sendCommand(tabId, "Page.enable");
           this.pageEnabledTabs.add(tabId);
         }
-        await this.sendCommand(tabId, "Page.navigate", { url });
+        const navigation = this.waitForNavigationEvent(tabId, this.navigationTimeoutMs);
+        const result = await this.sendCommand(tabId, "Page.navigate", { url });
+        await navigation(result?.frameId);
       }
       async click(tabId, selector) {
         const safeSelector = JSON.stringify(selector);
@@ -517,7 +521,11 @@ var init_debugger_controller = __esm({
       async screenshot(tabId, fullPage = false) {
         if (!fullPage) {
           try {
-            await chrome.tabs.update(tabId, { active: true });
+            await this.withTimeout(
+              chrome.tabs.update(tabId, { active: true }),
+              this.activationTimeoutMs,
+              "activate tab timeout"
+            );
             const dataUrl = await new Promise((resolve, reject) => {
               const timer = setTimeout(() => reject(new Error("captureVisibleTab timeout")), 5e3);
               chrome.tabs.captureVisibleTab({ format: "png" }).then((url) => {
@@ -538,6 +546,53 @@ var init_debugger_controller = __esm({
           captureBeyondViewport: fullPage
         });
         return result.data;
+      }
+      waitForNavigationEvent(tabId, timeoutMs) {
+        let expectedFrameId;
+        let settled = false;
+        let timer;
+        let resolveNavigation = () => {
+        };
+        const cleanup = () => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          chrome.debugger.onEvent.removeListener(listener);
+        };
+        const complete = () => {
+          cleanup();
+          resolveNavigation();
+        };
+        const listener = (source, method, params) => {
+          if (source.tabId !== tabId) return;
+          if (method === "Page.frameNavigated") {
+            const frameId = params?.frame?.id;
+            if (!expectedFrameId || frameId === expectedFrameId) complete();
+          }
+          if (method === "Page.loadEventFired" || method === "Page.domContentEventFired") complete();
+        };
+        chrome.debugger.onEvent.addListener(listener);
+        const navigation = new Promise((resolve) => {
+          resolveNavigation = resolve;
+          timer = setTimeout(complete, timeoutMs);
+        });
+        return async (frameId) => {
+          expectedFrameId = frameId;
+          await navigation;
+        };
+      }
+      async withTimeout(promise, timeoutMs, message) {
+        let timer;
+        try {
+          return await Promise.race([
+            promise,
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+            })
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
       }
       async executeScript(tabId, script) {
         const result = await this.sendCommand(tabId, "Runtime.evaluate", {
@@ -1445,7 +1500,7 @@ var init_command_handler = __esm({
     init_input_simulator();
     init_actionability_checker();
     CommandHandler = class {
-      constructor(tabManager, debuggerController, recordingEngine, playbackEngine, sessionManager, consoleCapture, storageManager, lightweightController) {
+      constructor(tabManager, debuggerController, recordingEngine, playbackEngine, sessionManager, consoleCapture, storageManager, lightweightController, options = {}) {
         this.tabManager = tabManager;
         this.debuggerController = debuggerController;
         this.recordingEngine = recordingEngine;
@@ -1460,6 +1515,7 @@ var init_command_handler = __esm({
         this.snapshotEngine = new SnapshotEngine(debuggerController);
         this.inputSimulator = new InputSimulator(debuggerController);
         this.actionabilityChecker = new ActionabilityChecker(debuggerController);
+        this.lightweightTimeoutMs = options.lightweightTimeoutMs ?? 1500;
       }
       async handleCommand(command) {
         if (command.command === "start_recording" || command.command === "stop_recording") {
@@ -1852,13 +1908,30 @@ var init_command_handler = __esm({
       }
       async runLightweightFirst(tabId, commandName, lightweightOperation, debuggerOperation) {
         try {
-          return await lightweightOperation();
+          return await this.withTimeout(
+            lightweightOperation(),
+            this.lightweightTimeoutMs,
+            `${commandName} lightweight path timed out`
+          );
         } catch (error) {
           console.warn(
             `[ARC-TUNNEL-DIAG] ${commandName} lightweight path failed, falling back to debugger:`,
             error?.message || error
           );
           return await this.runWithDebugger(tabId, `${commandName}.fallback`, debuggerOperation);
+        }
+      }
+      async withTimeout(promise, timeoutMs, message) {
+        let timer;
+        try {
+          return await Promise.race([
+            promise,
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+            })
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
         }
       }
       async resolveRef(tabId, ref) {

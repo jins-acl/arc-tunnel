@@ -12,10 +12,15 @@ import { ConsoleCapture } from './console-capture';
 import { StorageManager } from './storage-manager';
 import { LightweightController } from './lightweight-controller';
 
+interface CommandHandlerOptions {
+  lightweightTimeoutMs?: number;
+}
+
 export class CommandHandler {
   private snapshotEngine: SnapshotEngine;
   private inputSimulator: InputSimulator;
   private actionabilityChecker: ActionabilityChecker;
+  private lightweightTimeoutMs: number;
   private recordingDebuggerTabId: number | null = null;
   private recordingStartReserved = false;
   private recordingLifecycle: Promise<void> = Promise.resolve();
@@ -28,11 +33,13 @@ export class CommandHandler {
     private sessionManager: SessionManager,
     private consoleCapture: ConsoleCapture,
     private storageManager: StorageManager,
-    private lightweightController: LightweightController
+    private lightweightController: LightweightController,
+    options: CommandHandlerOptions = {}
   ) {
     this.snapshotEngine = new SnapshotEngine(debuggerController);
     this.inputSimulator = new InputSimulator(debuggerController);
     this.actionabilityChecker = new ActionabilityChecker(debuggerController);
+    this.lightweightTimeoutMs = options.lightweightTimeoutMs ?? 1500;
   }
 
   async handleCommand(command: CommandMessage): Promise<ResponseMessage> {
@@ -452,13 +459,31 @@ export class CommandHandler {
     debuggerOperation: () => Promise<T>
   ): Promise<T> {
     try {
-      return await lightweightOperation();
+      return await this.withTimeout(
+        lightweightOperation(),
+        this.lightweightTimeoutMs,
+        `${commandName} lightweight path timed out`
+      );
     } catch (error: any) {
       console.warn(
         `[ARC-TUNNEL-DIAG] ${commandName} lightweight path failed, falling back to debugger:`,
         error?.message || error
       );
       return await this.runWithDebugger(tabId, `${commandName}.fallback`, debuggerOperation);
+    }
+  }
+
+  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 

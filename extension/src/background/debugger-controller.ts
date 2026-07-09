@@ -4,6 +4,11 @@ interface CodedError extends Error {
   code?: string;
 }
 
+interface DebuggerControllerOptions {
+  navigationTimeoutMs?: number;
+  activationTimeoutMs?: number;
+}
+
 function mapError(err: Error): CodedError {
   const msg = err.message || '';
   if (msg.includes('No tab with id') || msg.includes('No target with given id')) {
@@ -21,6 +26,14 @@ function mapError(err: Error): CodedError {
 }
 
 export class DebuggerController {
+  private navigationTimeoutMs: number;
+  private activationTimeoutMs: number;
+
+  constructor(options: DebuggerControllerOptions = {}) {
+    this.navigationTimeoutMs = options.navigationTimeoutMs ?? 1500;
+    this.activationTimeoutMs = options.activationTimeoutMs ?? 5000;
+  }
+
   async sendCommand(tabId: number, method: string, params?: any): Promise<any> {
     return new Promise((resolve, reject) => {
       chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
@@ -40,7 +53,9 @@ export class DebuggerController {
       await this.sendCommand(tabId, 'Page.enable');
       this.pageEnabledTabs.add(tabId);
     }
-    await this.sendCommand(tabId, 'Page.navigate', { url });
+    const navigation = this.waitForNavigationEvent(tabId, this.navigationTimeoutMs);
+    const result = await this.sendCommand(tabId, 'Page.navigate', { url });
+    await navigation(result?.frameId);
   }
 
   async click(tabId: number, selector: string): Promise<void> {
@@ -80,7 +95,11 @@ export class DebuggerController {
       // redraw issues triggered by Page.captureScreenshot. Wrap in a timeout
       // so slow/stuck captures fall back to CDP instead of hanging forever.
       try {
-        await chrome.tabs.update(tabId, { active: true });
+        await this.withTimeout(
+          chrome.tabs.update(tabId, { active: true }),
+          this.activationTimeoutMs,
+          'activate tab timeout'
+        );
         const dataUrl = await new Promise<string>((resolve, reject) => {
           const timer = setTimeout(() => reject(new Error('captureVisibleTab timeout')), 5000);
           chrome.tabs.captureVisibleTab({ format: 'png' })
@@ -98,6 +117,58 @@ export class DebuggerController {
       captureBeyondViewport: fullPage
     });
     return result.data;
+  }
+
+  private waitForNavigationEvent(tabId: number, timeoutMs: number): (frameId?: string) => Promise<void> {
+    let expectedFrameId: string | undefined;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let resolveNavigation: () => void = () => {};
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      chrome.debugger.onEvent.removeListener(listener);
+    };
+    const complete = () => {
+      cleanup();
+      resolveNavigation();
+    };
+    const listener = (
+      source: chrome.debugger.Debuggee,
+      method: string,
+      params?: Record<string, any>
+    ) => {
+      if (source.tabId !== tabId) return;
+      if (method === 'Page.frameNavigated') {
+        const frameId = params?.frame?.id;
+        if (!expectedFrameId || frameId === expectedFrameId) complete();
+      }
+      if (method === 'Page.loadEventFired' || method === 'Page.domContentEventFired') complete();
+    };
+    chrome.debugger.onEvent.addListener(listener);
+    const navigation = new Promise<void>((resolve) => {
+      resolveNavigation = resolve;
+      timer = setTimeout(complete, timeoutMs);
+    });
+    return async (frameId?: string) => {
+      expectedFrameId = frameId;
+      await navigation;
+    };
+  }
+
+  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   async executeScript(tabId: number, script: string): Promise<any> {
