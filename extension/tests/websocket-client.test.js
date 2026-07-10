@@ -240,7 +240,7 @@ environmentTest('valid v2 welcome resolves and sends the extension hello', async
   assert.equal(client.isConnected(), true);
 });
 
-environmentTest('valid welcome starts a 20-second heartbeat interval and sends heartbeat events', async (env) => {
+environmentTest('valid welcome starts a 10-second heartbeat interval and sends heartbeat events', async (env) => {
   const client = new WebSocketClient();
   const connection = client.connect();
   const socket = latestSocket();
@@ -250,7 +250,7 @@ environmentTest('valid welcome starts a 20-second heartbeat interval and sends h
 
   assert.equal(env.intervals.length, 1);
   const heartbeat = env.intervals[0];
-  assert.equal(heartbeat.delay, 20_000);
+  assert.equal(heartbeat.delay, 10_000);
   heartbeat.callback();
   assert.equal(socket.sent.length, 2);
   assert.deepEqual(socket.sent[1], {

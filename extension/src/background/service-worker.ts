@@ -102,7 +102,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 });
 
-// WebSocketClient sends a 20-second heartbeat while connected. Keep this
+// WebSocketClient sends a 10-second heartbeat while connected. Keep this
 // one-minute alarm as the recovery wakeup after the service worker is terminated.
 chrome.alarms.create('keepAlive', { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {

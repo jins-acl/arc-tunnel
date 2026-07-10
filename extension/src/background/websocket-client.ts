@@ -1,7 +1,7 @@
 import { CommandMessage, ResponseMessage, EventMessage, HelloMessage } from '../types';
 
 export const DEFAULT_WS_URL = 'ws://127.0.0.1:8765';
-const HEARTBEAT_INTERVAL_MS = 20_000;
+const HEARTBEAT_INTERVAL_MS = 10_000;
 
 const LEGACY_DEFAULT_URLS = new Map([
   ['ws://localhost:8765', DEFAULT_WS_URL],

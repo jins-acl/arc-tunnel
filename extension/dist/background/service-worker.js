@@ -22,7 +22,7 @@ var init_websocket_client = __esm({
   "src/background/websocket-client.ts"() {
     "use strict";
     DEFAULT_WS_URL = "ws://127.0.0.1:8765";
-    HEARTBEAT_INTERVAL_MS = 2e4;
+    HEARTBEAT_INTERVAL_MS = 1e4;
     LEGACY_DEFAULT_URLS = /* @__PURE__ */ new Map([
       ["ws://localhost:8765", DEFAULT_WS_URL],
       ["ws://localhost:8765/", DEFAULT_WS_URL],
