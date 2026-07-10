@@ -78,6 +78,51 @@ function createConsoleHandler({ tabManager, consoleCapture, lightweightControlle
   );
 }
 
+test('screenshot forwards only supported image options and returns the image result', async () => {
+  const calls = [];
+  const screenshotResult = {
+    screenshot: 'abc123',
+    mimeType: 'image/jpeg',
+    format: 'jpeg',
+    quality: 75,
+    resized: false
+  };
+  const handler = new CommandHandler(
+    {},
+    {
+      screenshot: async (...args) => {
+        calls.push(args);
+        return screenshotResult;
+      }
+    },
+    {}, {}, {}, {}, {}, {}
+  );
+
+  const response = await handler.handleCommand({
+    id: 'screenshot-options',
+    type: 'command',
+    command: 'screenshot',
+    params: {
+      tabId: 42,
+      fullPage: false,
+      format: 'jpeg',
+      quality: 75,
+      maxWidth: 1200,
+      maxHeight: 800,
+      unexpected: 'must-not-forward'
+    }
+  });
+
+  assert.equal(response.success, true);
+  assert.deepEqual(response.result, screenshotResult);
+  assert.deepEqual(calls, [[42, false, {
+    format: 'jpeg',
+    quality: 75,
+    maxWidth: 1200,
+    maxHeight: 800
+  }]]);
+});
+
 test('get_console_logs returns page history without attaching the debugger', async () => {
   const tabManager = {
     ensureDebuggerAttached: async () => assert.fail('page history must not attach the debugger'),

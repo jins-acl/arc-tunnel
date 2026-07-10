@@ -19751,7 +19751,28 @@ function getToolDefinitions() {
         type: "object",
         properties: {
           tabId: { type: "number", description: "Tab ID" },
-          fullPage: { type: "boolean", description: "Capture full page" }
+          fullPage: { type: "boolean", description: "Capture full page" },
+          format: {
+            type: "string",
+            enum: ["jpeg", "png"],
+            description: "Output format; defaults to jpeg."
+          },
+          quality: {
+            type: "number",
+            minimum: 1,
+            maximum: 100,
+            description: "JPEG quality; defaults to 80 and is ignored for PNG."
+          },
+          maxWidth: {
+            type: "number",
+            minimum: 1,
+            description: "Optional maximum output width; preserves aspect ratio."
+          },
+          maxHeight: {
+            type: "number",
+            minimum: 1,
+            description: "Optional maximum output height; preserves aspect ratio."
+          }
         },
         required: ["tabId"]
       }
@@ -19927,6 +19948,18 @@ var ArcTunnelMCPServer = class {
         request.params.arguments ?? {},
         3e4
       );
+      if (request.params.name === "screenshot") {
+        if (typeof result !== "object" || result === null || typeof result.screenshot !== "string" || result.mimeType !== "image/jpeg" && result.mimeType !== "image/png") {
+          throw new Error("Invalid screenshot result from browser extension");
+        }
+        const { screenshot, mimeType, ...metadata } = result;
+        return {
+          content: [
+            { type: "image", data: screenshot, mimeType },
+            { type: "text", text: JSON.stringify(metadata) }
+          ]
+        };
+      }
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (error2) {
       const info = toErrorInfo(error2);

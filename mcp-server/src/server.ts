@@ -28,6 +28,23 @@ export class ArcTunnelMCPServer {
         request.params.arguments ?? {},
         30_000
       );
+      if (request.params.name === 'screenshot') {
+        if (
+          typeof result !== 'object' ||
+          result === null ||
+          typeof (result as any).screenshot !== 'string' ||
+          ((result as any).mimeType !== 'image/jpeg' && (result as any).mimeType !== 'image/png')
+        ) {
+          throw new Error('Invalid screenshot result from browser extension');
+        }
+        const { screenshot, mimeType, ...metadata } = result as Record<string, any>;
+        return {
+          content: [
+            { type: 'image', data: screenshot, mimeType },
+            { type: 'text', text: JSON.stringify(metadata) }
+          ]
+        };
+      }
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     } catch (error) {
       const info = toErrorInfo(error);

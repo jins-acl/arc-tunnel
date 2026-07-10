@@ -93,15 +93,79 @@ test('screenshot falls back to CDP when activating a frozen tab hangs', async ()
   }, async () => {
     const controller = new DebuggerController({ activationTimeoutMs: 5 });
     const result = await Promise.race([
-      controller.screenshot(7, false),
+      controller.screenshot(7, false, {}),
       failAfter(50, 'screenshot did not fall back after activation hung')
     ]);
-    assert.equal(result, 'cdp-image');
+    assert.deepEqual(result, {
+      screenshot: 'cdp-image',
+      mimeType: 'image/jpeg',
+      format: 'jpeg',
+      quality: 80,
+      resized: false
+    });
   });
 
   assert.deepEqual(calls, [
-    ['Page.captureScreenshot', { format: 'png', captureBeyondViewport: false }]
+    ['Page.captureScreenshot', { format: 'jpeg', quality: 80, captureBeyondViewport: false }]
   ]);
+});
+
+test('screenshot captures a visible tab as JPEG quality 80 by default', async () => {
+  let captureOptions;
+  const cdpParams = [];
+  await withChrome({
+    runtime: {},
+    tabs: {
+      update: async () => ({}),
+      captureVisibleTab: async (options) => {
+        captureOptions = options;
+        return 'data:image/jpeg;base64,visible-image';
+      }
+    },
+    debugger: {
+      sendCommand(target, method, params, callback) {
+        cdpParams.push(params);
+        setImmediate(() => callback({ data: 'unexpected-cdp-image' }));
+      }
+    }
+  }, async () => {
+    const controller = new DebuggerController();
+    assert.deepEqual(await controller.screenshot(7, false, {}), {
+      screenshot: 'visible-image',
+      mimeType: 'image/jpeg',
+      format: 'jpeg',
+      quality: 80,
+      resized: false
+    });
+  });
+
+  assert.deepEqual(captureOptions, { format: 'jpeg', quality: 80 });
+  assert.deepEqual(cdpParams, []);
+});
+
+test('screenshot does not retry a visible capture when image processing fails', async () => {
+  const cdpCalls = [];
+  await withChrome({
+    runtime: {},
+    tabs: {
+      update: async () => ({}),
+      captureVisibleTab: async () => 'data:image/jpeg;base64,visible-image'
+    },
+    debugger: {
+      sendCommand(target, method, params, callback) {
+        cdpCalls.push([method, params]);
+        setImmediate(() => callback({ data: 'cdp-image' }));
+      }
+    }
+  }, async () => {
+    const controller = new DebuggerController();
+    await assert.rejects(
+      controller.screenshot(7, false, { maxWidth: 100 }),
+      /resizing is not supported/i
+    );
+  });
+
+  assert.deepEqual(cdpCalls, []);
 });
 
 test('sendCommand rejects with TIMEOUT when CDP never calls back', async () => {

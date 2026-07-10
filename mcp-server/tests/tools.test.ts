@@ -43,6 +43,34 @@ describe('MCP Tools', () => {
     expect(waitForElementTool?.inputSchema.required).toContain('selector');
   });
 
+  it('exposes token-safe screenshot output options with exact bounds', () => {
+    const tool = getToolDefinitions().find(candidate => candidate.name === 'screenshot');
+
+    expect(tool?.inputSchema.properties).toMatchObject({
+      format: {
+        type: 'string',
+        enum: ['jpeg', 'png'],
+        description: 'Output format; defaults to jpeg.'
+      },
+      quality: {
+        type: 'number',
+        minimum: 1,
+        maximum: 100,
+        description: 'JPEG quality; defaults to 80 and is ignored for PNG.'
+      },
+      maxWidth: {
+        type: 'number',
+        minimum: 1,
+        description: 'Optional maximum output width; preserves aspect ratio.'
+      },
+      maxHeight: {
+        type: 'number',
+        minimum: 1,
+        description: 'Optional maximum output height; preserves aspect ratio.'
+      }
+    });
+  });
+
   it('documents console history and restricted-page fallback semantics', () => {
     const tool = getToolDefinitions().find(candidate => candidate.name === 'get_console_logs');
     expect(tool?.description).toMatch(/document_start/);

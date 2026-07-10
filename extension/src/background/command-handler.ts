@@ -284,25 +284,29 @@ export class CommandHandler {
       // ─── Utility & legacy tools ───
 
       case 'screenshot': {
+        const screenshotOptions = {
+          format: params.format,
+          quality: params.quality,
+          maxWidth: params.maxWidth,
+          maxHeight: params.maxHeight
+        };
         if (params.fullPage) {
-          const screenshot = await this.runWithDebugger(params.tabId, 'screenshot.fullPage', () =>
-            this.debuggerController.screenshot(params.tabId, params.fullPage)
+          return await this.runWithDebugger(params.tabId, 'screenshot.fullPage', () =>
+            this.debuggerController.screenshot(params.tabId, params.fullPage, screenshotOptions)
           );
-          return { screenshot };
         }
 
-        let screenshot: string;
         try {
-          screenshot = await this.debuggerController.screenshot(params.tabId, params.fullPage);
+          return await this.debuggerController.screenshot(
+            params.tabId,
+            params.fullPage,
+            screenshotOptions
+          );
         } catch (error) {
-          if (params.fullPage) {
-            throw error;
-          }
-          screenshot = await this.runWithDebugger(params.tabId, 'screenshot.fallback', () =>
-            this.debuggerController.screenshot(params.tabId, params.fullPage)
+          return await this.runWithDebugger(params.tabId, 'screenshot.fallback', () =>
+            this.debuggerController.screenshot(params.tabId, params.fullPage, screenshotOptions)
           );
         }
-        return { screenshot };
       }
 
       case 'execute_script': {

@@ -1,5 +1,11 @@
 // extension/src/background/debugger-controller.ts
 
+import {
+  normalizeScreenshotOptions,
+  processScreenshot,
+  ScreenshotResult
+} from './image-processor';
+
 interface CodedError extends Error {
   code?: string;
 }
@@ -110,34 +116,44 @@ export class DebuggerController {
     await this.executeScript(tabId, script);
   }
 
-  async screenshot(tabId: number, fullPage: boolean = false): Promise<string> {
+  async screenshot(
+    tabId: number,
+    fullPage: boolean = false,
+    rawOptions: Record<string, unknown> = {}
+  ): Promise<ScreenshotResult> {
+    const options = normalizeScreenshotOptions(rawOptions);
     if (!fullPage) {
       // Prefer chrome.tabs.captureVisibleTab to avoid Edge debugger infobar
       // redraw issues triggered by Page.captureScreenshot. Wrap in a timeout
       // so slow/stuck captures fall back to CDP instead of hanging forever.
+      let dataUrl: string | undefined;
       try {
         await this.withTimeout(
           chrome.tabs.update(tabId, { active: true }),
           this.activationTimeoutMs,
           'activate tab timeout'
         );
-        const dataUrl = await new Promise<string>((resolve, reject) => {
+        dataUrl = await new Promise<string>((resolve, reject) => {
           const timer = setTimeout(() => reject(new Error('captureVisibleTab timeout')), 5000);
-          chrome.tabs.captureVisibleTab({ format: 'png' })
+          chrome.tabs.captureVisibleTab({ format: options.format, quality: options.quality })
             .then((url) => { clearTimeout(timer); resolve(url); })
             .catch((err) => { clearTimeout(timer); reject(err); });
         });
-        return dataUrl.replace(/^data:image\/png;base64,/, '');
       } catch (e: any) {
         console.warn('[ARC-TUNNEL-DIAG] captureVisibleTab failed/timed out, falling back to CDP:', e.message);
+      }
+      if (dataUrl !== undefined) {
+        const data = dataUrl.replace(/^data:image\/(?:jpeg|png);base64,/, '');
+        return await processScreenshot(data, options);
       }
     }
 
     const result = await this.sendCommand(tabId, 'Page.captureScreenshot', {
-      format: 'png',
+      format: options.format,
+      quality: options.quality,
       captureBeyondViewport: fullPage
     });
-    return result.data;
+    return await processScreenshot(result.data, options);
   }
 
   private waitForNavigationEvent(tabId: number, timeoutMs: number): (frameId?: string) => Promise<void> {

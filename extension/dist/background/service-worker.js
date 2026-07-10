@@ -466,6 +466,98 @@ var init_tab_manager = __esm({
   }
 });
 
+// src/background/image-processor.ts
+function normalizeScreenshotOptions(raw = {}) {
+  const format = raw.format ?? "jpeg";
+  if (format !== "jpeg" && format !== "png") {
+    throw new Error("format must be either jpeg or png");
+  }
+  const quality = raw.quality ?? 80;
+  if (!Number.isInteger(quality) || quality < 1 || quality > 100) {
+    throw new Error("quality must be an integer between 1 and 100");
+  }
+  const options = { format, quality };
+  for (const key of ["maxWidth", "maxHeight"]) {
+    const value = raw[key];
+    if (value === void 0) continue;
+    if (!Number.isInteger(value) || value < 1) {
+      throw new Error(`${key} must be a positive integer`);
+    }
+    options[key] = value;
+  }
+  return options;
+}
+function calculateOutputSize(originalWidth, originalHeight, limits) {
+  const widthScale = limits.maxWidth === void 0 ? 1 : limits.maxWidth / originalWidth;
+  const heightScale = limits.maxHeight === void 0 ? 1 : limits.maxHeight / originalHeight;
+  const scale = Math.min(1, widthScale, heightScale);
+  if (scale === 1) {
+    return { width: originalWidth, height: originalHeight, resized: false };
+  }
+  return {
+    width: Math.max(1, Math.round(originalWidth * scale)),
+    height: Math.max(1, Math.round(originalHeight * scale)),
+    resized: true
+  };
+}
+function bytesToBase64(bytes) {
+  const chunkSize = 32768;
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+async function processScreenshot(data, options) {
+  const mimeType = options.format === "png" ? "image/png" : "image/jpeg";
+  const quality = options.format === "jpeg" ? options.quality : void 0;
+  if (options.maxWidth === void 0 && options.maxHeight === void 0) {
+    return {
+      screenshot: data,
+      mimeType,
+      format: options.format,
+      quality,
+      resized: false
+    };
+  }
+  if (typeof createImageBitmap !== "function" || typeof OffscreenCanvas !== "function") {
+    throw new Error("Screenshot resizing is not supported by this browser");
+  }
+  const sourceBlob = await (await fetch(`data:${mimeType};base64,${data}`)).blob();
+  const source = await createImageBitmap(sourceBlob);
+  const originalWidth = source.width;
+  const originalHeight = source.height;
+  try {
+    const size = calculateOutputSize(originalWidth, originalHeight, options);
+    const canvas = new OffscreenCanvas(size.width, size.height);
+    const context = canvas.getContext("2d");
+    if (context === null) {
+      throw new Error("Unable to create a 2D canvas context for screenshot resizing");
+    }
+    context.drawImage(source, 0, 0, size.width, size.height);
+    const blob = await canvas.convertToBlob({ type: mimeType, quality: options.quality / 100 });
+    const encoded = bytesToBase64(new Uint8Array(await blob.arrayBuffer()));
+    return {
+      screenshot: encoded,
+      mimeType,
+      format: options.format,
+      quality,
+      width: size.width,
+      height: size.height,
+      originalWidth,
+      originalHeight,
+      resized: size.resized
+    };
+  } finally {
+    source.close();
+  }
+}
+var init_image_processor = __esm({
+  "src/background/image-processor.ts"() {
+    "use strict";
+  }
+});
+
 // src/background/debugger-controller.ts
 function mapError(err) {
   const msg = err.message || "";
@@ -486,6 +578,7 @@ var DebuggerController;
 var init_debugger_controller = __esm({
   "src/background/debugger-controller.ts"() {
     "use strict";
+    init_image_processor();
     DebuggerController = class {
       constructor(options = {}) {
         this.pageEnabledTabs = /* @__PURE__ */ new Set();
@@ -557,17 +650,19 @@ var init_debugger_controller = __esm({
     `;
         await this.executeScript(tabId, script);
       }
-      async screenshot(tabId, fullPage = false) {
+      async screenshot(tabId, fullPage = false, rawOptions = {}) {
+        const options = normalizeScreenshotOptions(rawOptions);
         if (!fullPage) {
+          let dataUrl;
           try {
             await this.withTimeout(
               chrome.tabs.update(tabId, { active: true }),
               this.activationTimeoutMs,
               "activate tab timeout"
             );
-            const dataUrl = await new Promise((resolve, reject) => {
+            dataUrl = await new Promise((resolve, reject) => {
               const timer = setTimeout(() => reject(new Error("captureVisibleTab timeout")), 5e3);
-              chrome.tabs.captureVisibleTab({ format: "png" }).then((url) => {
+              chrome.tabs.captureVisibleTab({ format: options.format, quality: options.quality }).then((url) => {
                 clearTimeout(timer);
                 resolve(url);
               }).catch((err) => {
@@ -575,16 +670,20 @@ var init_debugger_controller = __esm({
                 reject(err);
               });
             });
-            return dataUrl.replace(/^data:image\/png;base64,/, "");
           } catch (e) {
             console.warn("[ARC-TUNNEL-DIAG] captureVisibleTab failed/timed out, falling back to CDP:", e.message);
           }
+          if (dataUrl !== void 0) {
+            const data = dataUrl.replace(/^data:image\/(?:jpeg|png);base64,/, "");
+            return await processScreenshot(data, options);
+          }
         }
         const result = await this.sendCommand(tabId, "Page.captureScreenshot", {
-          format: "png",
+          format: options.format,
+          quality: options.quality,
           captureBeyondViewport: fullPage
         });
-        return result.data;
+        return await processScreenshot(result.data, options);
       }
       waitForNavigationEvent(tabId, timeoutMs) {
         let expectedFrameId;
@@ -1790,28 +1889,32 @@ var init_command_handler = __esm({
           }
           // ─── Utility & legacy tools ───
           case "screenshot": {
+            const screenshotOptions = {
+              format: params.format,
+              quality: params.quality,
+              maxWidth: params.maxWidth,
+              maxHeight: params.maxHeight
+            };
             if (params.fullPage) {
-              const screenshot2 = await this.runWithDebugger(
+              return await this.runWithDebugger(
                 params.tabId,
                 "screenshot.fullPage",
-                () => this.debuggerController.screenshot(params.tabId, params.fullPage)
+                () => this.debuggerController.screenshot(params.tabId, params.fullPage, screenshotOptions)
               );
-              return { screenshot: screenshot2 };
             }
-            let screenshot;
             try {
-              screenshot = await this.debuggerController.screenshot(params.tabId, params.fullPage);
+              return await this.debuggerController.screenshot(
+                params.tabId,
+                params.fullPage,
+                screenshotOptions
+              );
             } catch (error) {
-              if (params.fullPage) {
-                throw error;
-              }
-              screenshot = await this.runWithDebugger(
+              return await this.runWithDebugger(
                 params.tabId,
                 "screenshot.fallback",
-                () => this.debuggerController.screenshot(params.tabId, params.fullPage)
+                () => this.debuggerController.screenshot(params.tabId, params.fullPage, screenshotOptions)
               );
             }
-            return { screenshot };
           }
           case "execute_script": {
             const scriptResult = await this.runLightweightFirst(

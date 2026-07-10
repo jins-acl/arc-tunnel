@@ -120,7 +120,28 @@ export function getToolDefinitions(): ToolDefinition[] {
         type: 'object',
         properties: {
           tabId: { type: 'number', description: 'Tab ID' },
-          fullPage: { type: 'boolean', description: 'Capture full page' }
+          fullPage: { type: 'boolean', description: 'Capture full page' },
+          format: {
+            type: 'string',
+            enum: ['jpeg', 'png'],
+            description: 'Output format; defaults to jpeg.'
+          },
+          quality: {
+            type: 'number',
+            minimum: 1,
+            maximum: 100,
+            description: 'JPEG quality; defaults to 80 and is ignored for PNG.'
+          },
+          maxWidth: {
+            type: 'number',
+            minimum: 1,
+            description: 'Optional maximum output width; preserves aspect ratio.'
+          },
+          maxHeight: {
+            type: 'number',
+            minimum: 1,
+            description: 'Optional maximum output height; preserves aspect ratio.'
+          }
         },
         required: ['tabId']
       }
