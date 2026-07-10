@@ -45,6 +45,7 @@ export class WebSocketClient {
     if (this.isConnected()) return;
     if (this.connectPromise) return this.connectPromise;
 
+    this.clearReconnectTimer();
     const generation = ++this.connectionGeneration;
     this.intentionalClose = false;
     this.handshakeComplete = false;
@@ -142,6 +143,17 @@ export class WebSocketClient {
     this.ws = null;
     this.handshakeComplete = false;
     this.rejectPendingConnect(new Error('Connection closed intentionally'));
+    socket?.close();
+  }
+
+  prepareForSuspend(): void {
+    const generation = ++this.connectionGeneration;
+    this.clearReconnectTimer();
+    const socket = this.ws;
+    this.ws = null;
+    this.handshakeComplete = false;
+    this.rejectPendingConnect(new Error('Service worker suspended'));
+    this.handleReconnect(generation);
     socket?.close();
   }
 

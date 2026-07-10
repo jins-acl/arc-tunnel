@@ -249,6 +249,42 @@ environmentTest('intentional close does not reconnect', async (env) => {
   assert.equal(env.alarms.created.length, 0);
 });
 
+environmentTest('service worker suspension preserves a persistent reconnect', async (env) => {
+  const client = new WebSocketClient();
+  const connection = client.connect();
+  const socket = latestSocket();
+  socket.open();
+  socket.message({ type: 'welcome', protocolVersion: 2 });
+  await connection;
+
+  assert.equal(typeof client.prepareForSuspend, 'function');
+  client.prepareForSuspend();
+  socket.emitClose();
+
+  assert.equal(socket.closeCalls, 1);
+  assert.equal(client.isConnected(), false);
+  assert.equal(env.timers.filter(timer => !timer.cleared).length, 1);
+  assert.deepEqual(env.alarms.created.at(-1), {
+    name: 'ws-reconnect', options: { delayInMinutes: 1 }
+  });
+});
+
+environmentTest('late handshake callbacks after suspension cannot cancel reconnect', async (env) => {
+  const client = new WebSocketClient();
+  const connection = client.connect().then(null, error => error);
+  const socket = latestSocket();
+
+  client.prepareForSuspend();
+  assert.match((await connection).message, /suspend/i);
+
+  socket.open();
+  socket.message({ type: 'welcome', protocolVersion: 2 });
+
+  assert.equal(socket.sent.length, 0);
+  assert.equal(env.timers.filter(timer => !timer.cleared).length, 1);
+  assert.equal(env.alarms.cleared.includes('ws-reconnect'), false);
+});
+
 environmentTest('timer and alarm reconnect overlap cannot create parallel sockets', async (env) => {
   const client = new WebSocketClient();
   const connection = client.connect();
@@ -268,6 +304,31 @@ environmentTest('timer and alarm reconnect overlap cannot create parallel socket
   replacement.open();
   replacement.message({ type: 'welcome', protocolVersion: 2 });
   await alarmAttempt;
+});
+
+environmentTest('failed alarm reconnect replaces the stale generation timer', async (env) => {
+  const client = new WebSocketClient();
+  const connection = client.connect();
+  const firstSocket = latestSocket();
+  firstSocket.open();
+  firstSocket.message({ type: 'welcome', protocolVersion: 2 });
+  await connection;
+  firstSocket.emitClose();
+  const staleTimer = env.timers.find(timer => !timer.cleared);
+  assert.ok(staleTimer);
+
+  const alarmAttempt = client.connect().then(null, error => error);
+  const replacement = latestSocket();
+  replacement.emitClose();
+  assert.match((await alarmAttempt).message, /closed/i);
+
+  assert.equal(staleTimer.cleared, true);
+  const currentTimers = env.timers.filter(timer => !timer.cleared);
+  assert.equal(currentTimers.length, 1);
+  assert.notEqual(currentTimers[0], staleTimer);
+  assert.deepEqual(env.alarms.created.at(-1), {
+    name: 'ws-reconnect', options: { delayInMinutes: 1 }
+  });
 });
 
 environmentTest('switches to a persistent low-frequency retry after fast retries are exhausted', async (env) => {

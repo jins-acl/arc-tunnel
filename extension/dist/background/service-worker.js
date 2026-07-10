@@ -50,6 +50,7 @@ var init_websocket_client = __esm({
       async connect() {
         if (this.isConnected()) return;
         if (this.connectPromise) return this.connectPromise;
+        this.clearReconnectTimer();
         const generation = ++this.connectionGeneration;
         this.intentionalClose = false;
         this.handshakeComplete = false;
@@ -137,6 +138,16 @@ var init_websocket_client = __esm({
         this.ws = null;
         this.handshakeComplete = false;
         this.rejectPendingConnect(new Error("Connection closed intentionally"));
+        socket?.close();
+      }
+      prepareForSuspend() {
+        const generation = ++this.connectionGeneration;
+        this.clearReconnectTimer();
+        const socket = this.ws;
+        this.ws = null;
+        this.handshakeComplete = false;
+        this.rejectPendingConnect(new Error("Service worker suspended"));
+        this.handleReconnect(generation);
         socket?.close();
       }
       isConnected() {
@@ -2196,7 +2207,7 @@ var require_service_worker = __commonJS({
     });
     chrome.runtime.onSuspend.addListener(() => {
       console.log("Service worker suspending");
-      wsClient.disconnect();
+      wsClient.prepareForSuspend();
     });
     initialize();
     console.log("Arc Tunnel service worker loaded");

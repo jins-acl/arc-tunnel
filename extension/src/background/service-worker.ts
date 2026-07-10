@@ -113,10 +113,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-// Handle SW suspension — clean up before being killed
+// Close the current socket while preserving a persistent reconnect wakeup.
 chrome.runtime.onSuspend.addListener(() => {
   console.log('Service worker suspending');
-  wsClient.disconnect();
+  wsClient.prepareForSuspend();
 });
 
 // Initialize on startup
