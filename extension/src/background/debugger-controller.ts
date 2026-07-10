@@ -162,11 +162,20 @@ export class DebuggerController {
           return { moved: true } as const;
         }
 
-        await this.withTimeout(
+        const activatedTab = await this.withTimeout(
           chrome.tabs.update(tabId, { active: true }),
           this.activationTimeoutMs,
           'activate tab timeout'
         );
+        if (activatedTab && activatedTab.windowId !== windowId) {
+          return { moved: true } as const;
+        }
+
+        const captureTab = await chrome.tabs.get(tabId);
+        if (captureTab.windowId !== windowId || captureTab.active !== true) {
+          return { moved: true } as const;
+        }
+
         const dataUrl = await new Promise<string>((resolve, reject) => {
           const timer = setTimeout(() => reject(new Error('captureVisibleTab timeout')), 5000);
           chrome.tabs.captureVisibleTab(windowId, {
