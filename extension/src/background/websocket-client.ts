@@ -1,6 +1,7 @@
 import { CommandMessage, ResponseMessage, EventMessage, HelloMessage } from '../types';
 
 export const DEFAULT_WS_URL = 'ws://127.0.0.1:8765';
+const HEARTBEAT_INTERVAL_MS = 20_000;
 
 const LEGACY_DEFAULT_URLS = new Map([
   ['ws://localhost:8765', DEFAULT_WS_URL],
@@ -32,6 +33,7 @@ export class WebSocketClient {
   private intentionalClose = false;
   private connectionGeneration = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private connectPromise: Promise<void> | null = null;
   private rejectConnect: ((error: Error) => void) | null = null;
   private handshakeComplete = false;
@@ -46,6 +48,7 @@ export class WebSocketClient {
 
     ++this.connectionGeneration;
     this.clearReconnectTimer();
+    this.clearHeartbeatTimer();
     chrome.alarms.clear('ws-reconnect');
     this.intentionalClose = true;
     const oldSocket = this.ws;
@@ -62,6 +65,7 @@ export class WebSocketClient {
     if (this.connectPromise) return this.connectPromise;
 
     this.clearReconnectTimer();
+    this.clearHeartbeatTimer();
     const generation = ++this.connectionGeneration;
     this.intentionalClose = false;
     this.handshakeComplete = false;
@@ -90,6 +94,7 @@ export class WebSocketClient {
         rejectCurrentConnect(error);
         ++this.connectionGeneration;
         this.clearReconnectTimer();
+        this.clearHeartbeatTimer();
         chrome.alarms.clear('ws-reconnect');
         if (this.ws === socket) this.ws = null;
         this.handshakeComplete = false;
@@ -112,6 +117,7 @@ export class WebSocketClient {
       socket.onclose = () => {
         if (generation !== this.connectionGeneration || this.intentionalClose) return;
         console.log('Disconnected from Arc Tunnel broker');
+        this.clearHeartbeatTimer();
         this.ws = null;
         this.handshakeComplete = false;
         rejectCurrentConnect(new Error('WebSocket closed before handshake completed'));
@@ -132,6 +138,7 @@ export class WebSocketClient {
               this.reconnectAttempts = 0;
               this.clearReconnectTimer();
               chrome.alarms.clear('ws-reconnect');
+              this.startHeartbeat(generation, socket);
               resolveConnect();
             }
             return;
@@ -154,6 +161,7 @@ export class WebSocketClient {
     ++this.connectionGeneration;
     this.intentionalClose = true;
     this.clearReconnectTimer();
+    this.clearHeartbeatTimer();
     chrome.alarms.clear('ws-reconnect');
     const socket = this.ws;
     this.ws = null;
@@ -165,6 +173,7 @@ export class WebSocketClient {
   prepareForSuspend(): void {
     const generation = ++this.connectionGeneration;
     this.clearReconnectTimer();
+    this.clearHeartbeatTimer();
     const socket = this.ws;
     this.ws = null;
     this.handshakeComplete = false;
@@ -227,6 +236,33 @@ export class WebSocketClient {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+  }
+
+  private startHeartbeat(generation: number, socket: WebSocket): void {
+    this.clearHeartbeatTimer();
+    this.heartbeatTimer = setInterval(() => {
+      if (
+        generation !== this.connectionGeneration ||
+        this.ws !== socket ||
+        !this.handshakeComplete ||
+        socket.readyState !== WebSocket.OPEN
+      ) return;
+
+      const heartbeat: EventMessage = {
+        type: 'event',
+        event: 'heartbeat',
+        data: {},
+        timestamp: Date.now()
+      };
+      socket.send(JSON.stringify(heartbeat));
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  private clearHeartbeatTimer(): void {
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
     }
   }
 

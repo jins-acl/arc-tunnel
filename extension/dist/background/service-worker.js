@@ -17,11 +17,12 @@ function normalizeWebSocketUrl(url) {
   parsed.pathname = "/extension";
   return parsed.toString();
 }
-var DEFAULT_WS_URL, LEGACY_DEFAULT_URLS, WebSocketClient;
+var DEFAULT_WS_URL, HEARTBEAT_INTERVAL_MS, LEGACY_DEFAULT_URLS, WebSocketClient;
 var init_websocket_client = __esm({
   "src/background/websocket-client.ts"() {
     "use strict";
     DEFAULT_WS_URL = "ws://127.0.0.1:8765";
+    HEARTBEAT_INTERVAL_MS = 2e4;
     LEGACY_DEFAULT_URLS = /* @__PURE__ */ new Map([
       ["ws://localhost:8765", DEFAULT_WS_URL],
       ["ws://localhost:8765/", DEFAULT_WS_URL],
@@ -39,6 +40,7 @@ var init_websocket_client = __esm({
         this.intentionalClose = false;
         this.connectionGeneration = 0;
         this.reconnectTimer = null;
+        this.heartbeatTimer = null;
         this.connectPromise = null;
         this.rejectConnect = null;
         this.handshakeComplete = false;
@@ -49,6 +51,7 @@ var init_websocket_client = __esm({
         if (normalizedUrl === this.url) return;
         ++this.connectionGeneration;
         this.clearReconnectTimer();
+        this.clearHeartbeatTimer();
         chrome.alarms.clear("ws-reconnect");
         this.intentionalClose = true;
         const oldSocket = this.ws;
@@ -63,6 +66,7 @@ var init_websocket_client = __esm({
         if (this.isConnected()) return;
         if (this.connectPromise) return this.connectPromise;
         this.clearReconnectTimer();
+        this.clearHeartbeatTimer();
         const generation = ++this.connectionGeneration;
         this.intentionalClose = false;
         this.handshakeComplete = false;
@@ -87,6 +91,7 @@ var init_websocket_client = __esm({
             rejectCurrentConnect(error);
             ++this.connectionGeneration;
             this.clearReconnectTimer();
+            this.clearHeartbeatTimer();
             chrome.alarms.clear("ws-reconnect");
             if (this.ws === socket) this.ws = null;
             this.handshakeComplete = false;
@@ -106,6 +111,7 @@ var init_websocket_client = __esm({
           socket.onclose = () => {
             if (generation !== this.connectionGeneration || this.intentionalClose) return;
             console.log("Disconnected from Arc Tunnel broker");
+            this.clearHeartbeatTimer();
             this.ws = null;
             this.handshakeComplete = false;
             rejectCurrentConnect(new Error("WebSocket closed before handshake completed"));
@@ -125,6 +131,7 @@ var init_websocket_client = __esm({
                   this.reconnectAttempts = 0;
                   this.clearReconnectTimer();
                   chrome.alarms.clear("ws-reconnect");
+                  this.startHeartbeat(generation, socket);
                   resolveConnect();
                 }
                 return;
@@ -145,6 +152,7 @@ var init_websocket_client = __esm({
         ++this.connectionGeneration;
         this.intentionalClose = true;
         this.clearReconnectTimer();
+        this.clearHeartbeatTimer();
         chrome.alarms.clear("ws-reconnect");
         const socket = this.ws;
         this.ws = null;
@@ -155,6 +163,7 @@ var init_websocket_client = __esm({
       prepareForSuspend() {
         const generation = ++this.connectionGeneration;
         this.clearReconnectTimer();
+        this.clearHeartbeatTimer();
         const socket = this.ws;
         this.ws = null;
         this.handshakeComplete = false;
@@ -203,6 +212,25 @@ var init_websocket_client = __esm({
         if (this.reconnectTimer) {
           clearTimeout(this.reconnectTimer);
           this.reconnectTimer = null;
+        }
+      }
+      startHeartbeat(generation, socket) {
+        this.clearHeartbeatTimer();
+        this.heartbeatTimer = setInterval(() => {
+          if (generation !== this.connectionGeneration || this.ws !== socket || !this.handshakeComplete || socket.readyState !== WebSocket.OPEN) return;
+          const heartbeat = {
+            type: "event",
+            event: "heartbeat",
+            data: {},
+            timestamp: Date.now()
+          };
+          socket.send(JSON.stringify(heartbeat));
+        }, HEARTBEAT_INTERVAL_MS);
+      }
+      clearHeartbeatTimer() {
+        if (this.heartbeatTimer !== null) {
+          clearInterval(this.heartbeatTimer);
+          this.heartbeatTimer = null;
         }
       }
       rejectPendingConnect(error) {

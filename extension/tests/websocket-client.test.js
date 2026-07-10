@@ -67,12 +67,15 @@ function setupEnvironment() {
     chrome: global.chrome,
     setTimeout: global.setTimeout,
     clearTimeout: global.clearTimeout,
+    setInterval: global.setInterval,
+    clearInterval: global.clearInterval,
     random: Math.random,
     log: console.log,
     error: console.error,
     warn: console.warn
   };
   const timers = [];
+  const intervals = [];
   const alarms = { created: [], cleared: [] };
   const logs = { log: [], error: [], warn: [] };
   let nextTimerId = 1;
@@ -94,6 +97,15 @@ function setupEnvironment() {
     const timer = timers.find(candidate => candidate.id === id);
     if (timer) timer.cleared = true;
   };
+  global.setInterval = (callback, delay) => {
+    const interval = { id: nextTimerId++, callback, delay, cleared: false };
+    intervals.push(interval);
+    return interval.id;
+  };
+  global.clearInterval = (id) => {
+    const interval = intervals.find(candidate => candidate.id === id);
+    if (interval) interval.cleared = true;
+  };
   Math.random = () => 0;
   console.log = (...args) => logs.log.push(args);
   console.error = (...args) => logs.error.push(args);
@@ -103,6 +115,7 @@ function setupEnvironment() {
     alarms,
     logs,
     timers,
+    intervals,
     runTimer(timer) {
       if (!timer.cleared) return timer.callback();
     },
@@ -111,6 +124,8 @@ function setupEnvironment() {
       global.chrome = originals.chrome;
       global.setTimeout = originals.setTimeout;
       global.clearTimeout = originals.clearTimeout;
+      global.setInterval = originals.setInterval;
+      global.clearInterval = originals.clearInterval;
       Math.random = originals.random;
       console.log = originals.log;
       console.error = originals.error;
@@ -223,6 +238,84 @@ environmentTest('valid v2 welcome resolves and sends the extension hello', async
   socket.message({ type: 'welcome', protocolVersion: 2 });
   await connection;
   assert.equal(client.isConnected(), true);
+});
+
+environmentTest('valid welcome starts a 20-second heartbeat interval and sends heartbeat events', async (env) => {
+  const client = new WebSocketClient();
+  const connection = client.connect();
+  const socket = latestSocket();
+  socket.open();
+  socket.message({ type: 'welcome', protocolVersion: 2 });
+  await connection;
+
+  assert.equal(env.intervals.length, 1);
+  const heartbeat = env.intervals[0];
+  assert.equal(heartbeat.delay, 20_000);
+  heartbeat.callback();
+  assert.equal(socket.sent.length, 2);
+  assert.deepEqual(socket.sent[1], {
+    type: 'event',
+    event: 'heartbeat',
+    data: {},
+    timestamp: socket.sent[1].timestamp
+  });
+  assert.equal(typeof socket.sent[1].timestamp, 'number');
+});
+
+environmentTest('disconnect clears the active heartbeat interval', async (env) => {
+  const client = new WebSocketClient();
+  const connection = client.connect();
+  const socket = latestSocket();
+  socket.open();
+  socket.message({ type: 'welcome', protocolVersion: 2 });
+  await connection;
+
+  const heartbeat = env.intervals[0];
+  assert.ok(heartbeat);
+  client.disconnect();
+
+  assert.equal(heartbeat.cleared, true);
+});
+
+environmentTest('socket close clears the active heartbeat interval', async (env) => {
+  const client = new WebSocketClient();
+  const connection = client.connect();
+  const socket = latestSocket();
+  socket.open();
+  socket.message({ type: 'welcome', protocolVersion: 2 });
+  await connection;
+
+  const heartbeat = env.intervals[0];
+  assert.ok(heartbeat);
+  socket.emitClose();
+
+  assert.equal(heartbeat.cleared, true);
+});
+
+environmentTest('reconnect keeps one heartbeat interval and ignores a stale callback', async (env) => {
+  const client = new WebSocketClient();
+  const firstConnection = client.connect();
+  const firstSocket = latestSocket();
+  firstSocket.open();
+  firstSocket.message({ type: 'welcome', protocolVersion: 2 });
+  await firstConnection;
+  const staleHeartbeat = env.intervals[0];
+
+  firstSocket.emitClose();
+  const reconnectTimer = env.timers.find(timer => !timer.cleared);
+  const reconnectAttempt = env.runTimer(reconnectTimer);
+  const replacement = latestSocket();
+  replacement.open();
+  replacement.message({ type: 'welcome', protocolVersion: 2 });
+  await reconnectAttempt;
+
+  const activeIntervals = env.intervals.filter(interval => !interval.cleared);
+  assert.equal(activeIntervals.length, 1);
+  assert.notEqual(activeIntervals[0], staleHeartbeat);
+  const replacementSentBeforeStaleCallback = replacement.sent.length;
+  staleHeartbeat.callback();
+  assert.equal(firstSocket.sent.length, 1);
+  assert.equal(replacement.sent.length, replacementSentBeforeStaleCallback);
 });
 
 environmentTest('setting the current URL is idempotent', async () => {
