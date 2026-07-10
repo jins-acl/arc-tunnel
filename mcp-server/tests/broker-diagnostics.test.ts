@@ -107,7 +107,11 @@ describe('Broker diagnostics API', () => {
     expect(status.agents).toEqual({ connected: 1, grace: 0 });
 
     await close(agent);
-    status = await fetch(`http://127.0.0.1:${broker.address().port}/api/status`).then(r => r.json() as any);
+    for (let attempt = 0; attempt < 100; attempt++) {
+      status = await fetch(`http://127.0.0.1:${broker.address().port}/api/status`).then(r => r.json() as any);
+      if (status.agents.connected === 0 && status.agents.grace === 1) break;
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
     expect(status.agents).toEqual({ connected: 0, grace: 1 });
     const events = (broker as any).diagnostics.eventsAfter(0).events;
     expect(events.map((event: any) => event.code)).toEqual(expect.arrayContaining([
