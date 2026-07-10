@@ -19695,7 +19695,7 @@ function getToolDefinitions() {
     },
     {
       name: "get_console_logs",
-      description: "Retrieve captured browser console logs (info, warning, error) for the specified tab.",
+      description: "Retrieve browser console logs captured from document_start. Existing tabs need one refresh after extension reload. Restricted pages fall back to CDP-from-now capture.",
       inputSchema: {
         type: "object",
         properties: {

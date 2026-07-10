@@ -1,5 +1,7 @@
 // extension/src/background/lightweight-controller.ts
 
+import type { ConsoleLogEntry } from './console-capture';
+
 type StructuredContent = {
   title: string;
   url: string;
@@ -15,7 +17,89 @@ type StructuredContent = {
   headings: Array<{ tag: string; text: string }>;
 };
 
+function isPlainObject(value: unknown): value is Record<PropertyKey, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function ownDataValue(object: object, key: PropertyKey): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(object, key);
+  if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) return undefined;
+  return descriptor.value;
+}
+
 export class LightweightController {
+  async getConsoleLogs(
+    tabId: number
+  ): Promise<{ installed: boolean; logs: ConsoleLogEntry[] }> {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: () => {
+        const bufferDescriptor = Object.getOwnPropertyDescriptor(
+          globalThis,
+          Symbol.for('arc-tunnel.console-buffer.v1')
+        );
+        if (!bufferDescriptor || !Object.prototype.hasOwnProperty.call(bufferDescriptor, 'value')) {
+          return { installed: false, logs: [] };
+        }
+        const state = bufferDescriptor.value;
+        if (state === null || typeof state !== 'object' || Array.isArray(state)) {
+          return { installed: false, logs: [] };
+        }
+        const logsDescriptor = Object.getOwnPropertyDescriptor(state, 'logs');
+        if (!logsDescriptor || !Object.prototype.hasOwnProperty.call(logsDescriptor, 'value') ||
+            !Array.isArray(logsDescriptor.value)) {
+          return { installed: false, logs: [] };
+        }
+        return { installed: true, logs: logsDescriptor.value.slice() };
+      }
+    });
+
+    const injection = results[0] as (chrome.scripting.InjectionResult & { error?: string }) | undefined;
+    if (!injection) throw new Error('Console history injection returned no result entry');
+    if (injection.error) throw new Error(`Console history injection failed: ${injection.error}`);
+
+    const envelope = injection.result;
+    if (!isPlainObject(envelope) || Reflect.ownKeys(envelope).length !== 2) {
+      throw new Error('Console history injection returned a malformed result envelope');
+    }
+    const installed = ownDataValue(envelope, 'installed');
+    const logs = ownDataValue(envelope, 'logs');
+    if (typeof installed !== 'boolean' || !Array.isArray(logs)) {
+      throw new Error('Console history injection returned a malformed result envelope');
+    }
+
+    const validatedLogs = logs.map((candidate): ConsoleLogEntry => {
+      if (!isPlainObject(candidate)) {
+        throw new Error('Console history injection returned a malformed log entry');
+      }
+      const level = ownDataValue(candidate, 'level');
+      const text = ownDataValue(candidate, 'text');
+      const source = ownDataValue(candidate, 'source');
+      const timestamp = ownDataValue(candidate, 'timestamp');
+      const line = ownDataValue(candidate, 'line');
+      const column = ownDataValue(candidate, 'column');
+      if (typeof level !== 'string' || typeof text !== 'string' || typeof source !== 'string' ||
+          typeof timestamp !== 'number' || !Number.isFinite(timestamp) ||
+          (line !== undefined && typeof line !== 'number') ||
+          (column !== undefined && typeof column !== 'number')) {
+        throw new Error('Console history injection returned a malformed log entry');
+      }
+      return {
+        level,
+        text,
+        source,
+        timestamp,
+        ...(line === undefined ? {} : { line }),
+        ...(column === undefined ? {} : { column })
+      };
+    });
+
+    return { installed, logs: validatedLogs };
+  }
+
   async executeScript(tabId: number, script: string): Promise<any> {
     const results = await chrome.scripting.executeScript({
       target: { tabId },

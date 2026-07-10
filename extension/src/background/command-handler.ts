@@ -195,11 +195,25 @@ export class CommandHandler {
       }
 
       case 'get_console_logs': {
-        const logs = await this.runWithDebugger(params.tabId, 'get_console_logs', async () => {
-          await this.consoleCapture.enableForTab(params.tabId, this.debuggerController);
-          return this.consoleCapture.getLogs(params.tabId, params.minLevel);
-        });
-        return { logs };
+        return await this.runLightweightFirst(
+          params.tabId,
+          'get_console_logs',
+          async () => {
+            const history = await this.lightweightController.getConsoleLogs(params.tabId);
+            if (!history.installed) throw new Error('Page console history is unavailable');
+            return {
+              logs: this.filterConsoleLogs(history.logs, params.minLevel),
+              capture: { source: 'page-buffer', historyAvailable: true, limit: 500 }
+            };
+          },
+          async () => {
+            await this.consoleCapture.enableForTab(params.tabId, this.debuggerController);
+            return {
+              logs: this.filterConsoleLogs(this.consoleCapture.getLogs(params.tabId), params.minLevel),
+              capture: { source: 'cdp', historyAvailable: false, limit: 500 }
+            };
+          }
+        );
       }
 
       case 'manage_storage': {
@@ -485,6 +499,15 @@ export class CommandHandler {
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
+
+  private filterConsoleLogs<T extends { level: string }>(logs: T[], minLevel?: string): T[] {
+    const normalized = logs.map(log => log.level === 'warn' ? { ...log, level: 'warning' } : log) as T[];
+    if (!minLevel) return normalized;
+    const levels = ['debug', 'info', 'warning', 'error'];
+    const minimum = levels.indexOf(minLevel);
+    if (minimum === -1) return normalized;
+    return normalized.filter(log => levels.indexOf(log.level) >= minimum);
   }
 
   private async resolveRef(tabId: number, ref: string): Promise<number | null> {

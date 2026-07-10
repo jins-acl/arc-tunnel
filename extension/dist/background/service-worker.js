@@ -1103,35 +1103,33 @@ var init_console_capture = __esm({
         this.listeners = /* @__PURE__ */ new Map();
       }
       async enableForTab(tabId, debuggerController) {
-        if (debuggerController) {
-          try {
-            await debuggerController.sendCommand(tabId, "Runtime.enable");
-          } catch {
-          }
+        if (!this.listeners.has(tabId)) {
+          const handler = (source, method, params) => {
+            if (method === "Runtime.consoleAPICalled") {
+              const entry = {
+                level: params.type || "log",
+                text: params.args?.map((a) => a.value || a.description || "").join(" ") || "",
+                source: params.stackTrace?.callFrames?.[0]?.url || "",
+                line: params.stackTrace?.callFrames?.[0]?.lineNumber,
+                column: params.stackTrace?.callFrames?.[0]?.columnNumber,
+                timestamp: Date.now()
+              };
+              if (!this.logs.has(tabId)) {
+                this.logs.set(tabId, []);
+              }
+              this.logs.get(tabId).push(entry);
+              const tabLogs = this.logs.get(tabId);
+              if (tabLogs.length > 500) {
+                tabLogs.splice(0, tabLogs.length - 500);
+              }
+            }
+          };
+          chrome.debugger.onEvent.addListener(handler);
+          this.listeners.set(tabId, handler);
         }
-        if (this.listeners.has(tabId)) return;
-        const handler = (source, method, params) => {
-          if (method === "Runtime.consoleAPICalled") {
-            const entry = {
-              level: params.type || "log",
-              text: params.args?.map((a) => a.value || a.description || "").join(" ") || "",
-              source: params.stackTrace?.callFrames?.[0]?.url || "",
-              line: params.stackTrace?.callFrames?.[0]?.lineNumber,
-              column: params.stackTrace?.callFrames?.[0]?.columnNumber,
-              timestamp: Date.now()
-            };
-            if (!this.logs.has(tabId)) {
-              this.logs.set(tabId, []);
-            }
-            this.logs.get(tabId).push(entry);
-            const tabLogs = this.logs.get(tabId);
-            if (tabLogs.length > 500) {
-              tabLogs.splice(0, tabLogs.length - 500);
-            }
-          }
-        };
-        chrome.debugger.onEvent.addListener(handler);
-        this.listeners.set(tabId, handler);
+        if (debuggerController) {
+          await debuggerController.sendCommand(tabId, "Runtime.enable");
+        }
       }
       disableForTab(tabId) {
         const handler = this.listeners.get(tabId);
@@ -1706,11 +1704,25 @@ var init_command_handler = __esm({
             });
           }
           case "get_console_logs": {
-            const logs = await this.runWithDebugger(params.tabId, "get_console_logs", async () => {
-              await this.consoleCapture.enableForTab(params.tabId, this.debuggerController);
-              return this.consoleCapture.getLogs(params.tabId, params.minLevel);
-            });
-            return { logs };
+            return await this.runLightweightFirst(
+              params.tabId,
+              "get_console_logs",
+              async () => {
+                const history = await this.lightweightController.getConsoleLogs(params.tabId);
+                if (!history.installed) throw new Error("Page console history is unavailable");
+                return {
+                  logs: this.filterConsoleLogs(history.logs, params.minLevel),
+                  capture: { source: "page-buffer", historyAvailable: true, limit: 500 }
+                };
+              },
+              async () => {
+                await this.consoleCapture.enableForTab(params.tabId, this.debuggerController);
+                return {
+                  logs: this.filterConsoleLogs(this.consoleCapture.getLogs(params.tabId), params.minLevel),
+                  capture: { source: "cdp", historyAvailable: false, limit: 500 }
+                };
+              }
+            );
           }
           case "manage_storage": {
             const { type, action: storageAction } = params;
@@ -1973,6 +1985,14 @@ var init_command_handler = __esm({
           if (timer) clearTimeout(timer);
         }
       }
+      filterConsoleLogs(logs, minLevel) {
+        const normalized = logs.map((log) => log.level === "warn" ? { ...log, level: "warning" } : log);
+        if (!minLevel) return normalized;
+        const levels = ["debug", "info", "warning", "error"];
+        const minimum = levels.indexOf(minLevel);
+        if (minimum === -1) return normalized;
+        return normalized.filter((log) => levels.indexOf(log.level) >= minimum);
+      }
       async resolveRef(tabId, ref) {
         try {
           const snapshot = await this.snapshotEngine.getSnapshot(tabId, true);
@@ -1986,11 +2006,80 @@ var init_command_handler = __esm({
 });
 
 // src/background/lightweight-controller.ts
+function isPlainObject(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+function ownDataValue(object, key) {
+  const descriptor = Object.getOwnPropertyDescriptor(object, key);
+  if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, "value")) return void 0;
+  return descriptor.value;
+}
 var LightweightController;
 var init_lightweight_controller = __esm({
   "src/background/lightweight-controller.ts"() {
     "use strict";
     LightweightController = class {
+      async getConsoleLogs(tabId) {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId },
+          world: "MAIN",
+          func: () => {
+            const bufferDescriptor = Object.getOwnPropertyDescriptor(
+              globalThis,
+              /* @__PURE__ */ Symbol.for("arc-tunnel.console-buffer.v1")
+            );
+            if (!bufferDescriptor || !Object.prototype.hasOwnProperty.call(bufferDescriptor, "value")) {
+              return { installed: false, logs: [] };
+            }
+            const state = bufferDescriptor.value;
+            if (state === null || typeof state !== "object" || Array.isArray(state)) {
+              return { installed: false, logs: [] };
+            }
+            const logsDescriptor = Object.getOwnPropertyDescriptor(state, "logs");
+            if (!logsDescriptor || !Object.prototype.hasOwnProperty.call(logsDescriptor, "value") || !Array.isArray(logsDescriptor.value)) {
+              return { installed: false, logs: [] };
+            }
+            return { installed: true, logs: logsDescriptor.value.slice() };
+          }
+        });
+        const injection = results[0];
+        if (!injection) throw new Error("Console history injection returned no result entry");
+        if (injection.error) throw new Error(`Console history injection failed: ${injection.error}`);
+        const envelope = injection.result;
+        if (!isPlainObject(envelope) || Reflect.ownKeys(envelope).length !== 2) {
+          throw new Error("Console history injection returned a malformed result envelope");
+        }
+        const installed = ownDataValue(envelope, "installed");
+        const logs = ownDataValue(envelope, "logs");
+        if (typeof installed !== "boolean" || !Array.isArray(logs)) {
+          throw new Error("Console history injection returned a malformed result envelope");
+        }
+        const validatedLogs = logs.map((candidate) => {
+          if (!isPlainObject(candidate)) {
+            throw new Error("Console history injection returned a malformed log entry");
+          }
+          const level = ownDataValue(candidate, "level");
+          const text = ownDataValue(candidate, "text");
+          const source = ownDataValue(candidate, "source");
+          const timestamp = ownDataValue(candidate, "timestamp");
+          const line = ownDataValue(candidate, "line");
+          const column = ownDataValue(candidate, "column");
+          if (typeof level !== "string" || typeof text !== "string" || typeof source !== "string" || typeof timestamp !== "number" || !Number.isFinite(timestamp) || line !== void 0 && typeof line !== "number" || column !== void 0 && typeof column !== "number") {
+            throw new Error("Console history injection returned a malformed log entry");
+          }
+          return {
+            level,
+            text,
+            source,
+            timestamp,
+            ...line === void 0 ? {} : { line },
+            ...column === void 0 ? {} : { column }
+          };
+        });
+        return { installed, logs: validatedLogs };
+      }
       async executeScript(tabId, script) {
         const results = await chrome.scripting.executeScript({
           target: { tabId },

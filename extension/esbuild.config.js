@@ -13,6 +13,13 @@ async function build() {
         format: 'esm'
       }),
       esbuild.build({
+        entryPoints: ['src/content/console-hook.ts'],
+        bundle: true,
+        outfile: 'dist/content/console-hook.js',
+        platform: 'browser',
+        target: 'chrome96'
+      }),
+      esbuild.build({
         entryPoints: ['src/content/content-script.ts'],
         bundle: true,
         outfile: 'dist/content/content-script.js',

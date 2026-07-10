@@ -43,6 +43,13 @@ describe('MCP Tools', () => {
     expect(waitForElementTool?.inputSchema.required).toContain('selector');
   });
 
+  it('documents console history and restricted-page fallback semantics', () => {
+    const tool = getToolDefinitions().find(candidate => candidate.name === 'get_console_logs');
+    expect(tool?.description).toMatch(/document_start/);
+    expect(tool?.description).toMatch(/existing tabs need one refresh after extension reload/i);
+    expect(tool?.description).toMatch(/restricted pages fall back to CDP-from-now capture/i);
+  });
+
   it('exposes tab ownership tools and warns that storage shares a browser profile', () => {
     const tools = getToolDefinitions();
     for (const name of ['claim_tab', 'release_tab']) {
