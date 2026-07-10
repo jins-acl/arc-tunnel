@@ -1,5 +1,5 @@
 // extension/src/background/service-worker.ts
-import { WebSocketClient } from './websocket-client';
+import { resolveConfiguredWebSocketUrl, WebSocketClient } from './websocket-client';
 import { TabManager } from './tab-manager';
 import { DebuggerController } from './debugger-controller';
 import { RecordingEngine } from './recording-engine';
@@ -11,9 +11,6 @@ import { CommandHandler } from './command-handler';
 import { LightweightController } from './lightweight-controller';
 import { CommandMessage } from '../types';
 
-// Default configuration
-const DEFAULT_WS_URL = 'ws://localhost:8765';
-
 // Initialize components
 const wsClient = new WebSocketClient();
 const tabManager = new TabManager();
@@ -24,6 +21,8 @@ const sessionManager = new SessionManager();
 const consoleCapture = new ConsoleCapture();
 const storageManager = new StorageManager();
 const lightweightController = new LightweightController();
+let initializationComplete = false;
+let pendingWsUrl: string | null = null;
 const commandHandler = new CommandHandler(
   tabManager,
   debuggerController,
@@ -39,22 +38,30 @@ const commandHandler = new CommandHandler(
 async function loadConfig(): Promise<string> {
   try {
     const result = await chrome.storage.local.get(['arc_tunnel_ws_url']);
-    return typeof result.arc_tunnel_ws_url === 'string' ? result.arc_tunnel_ws_url : DEFAULT_WS_URL;
+    const savedUrl = result.arc_tunnel_ws_url;
+    const resolvedUrl = resolveConfiguredWebSocketUrl(savedUrl);
+    if (typeof savedUrl === 'string' && savedUrl !== resolvedUrl) {
+      await chrome.storage.local.set({ arc_tunnel_ws_url: resolvedUrl });
+    }
+    return resolvedUrl;
   } catch {
-    return DEFAULT_WS_URL;
+    return resolveConfiguredWebSocketUrl(undefined);
   }
 }
 
 // Connect to MCP server
 async function initialize() {
-  const wsUrl = await loadConfig();
-  wsClient.setUrl(wsUrl);
+  const loadedWsUrl = await loadConfig();
+  if (pendingWsUrl === null) pendingWsUrl = loadedWsUrl;
   await tabManager.syncExistingTabs();
 
+  initializationComplete = true;
+  wsClient.setUrl(pendingWsUrl ?? loadedWsUrl);
   await connectClient();
 }
 
 async function connectClient(): Promise<void> {
+  if (!initializationComplete) return;
   try {
     await wsClient.connect();
     console.log('Arc Tunnel extension initialized');
@@ -67,10 +74,10 @@ async function connectClient(): Promise<void> {
 // Listen for configuration changes
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.arc_tunnel_ws_url) {
-    const newUrl = typeof changes.arc_tunnel_ws_url.newValue === 'string'
-      ? changes.arc_tunnel_ws_url.newValue
-      : DEFAULT_WS_URL;
+    const newUrl = resolveConfiguredWebSocketUrl(changes.arc_tunnel_ws_url.newValue);
     console.log(`WebSocket URL changed to: ${newUrl}`);
+    pendingWsUrl = newUrl;
+    if (!initializationComplete) return;
     wsClient.setUrl(newUrl);
     void connectClient();
   }
@@ -106,7 +113,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     }
   } else if (alarm.name === 'ws-reconnect') {
     // SW was terminated during a reconnect delay — retry now
-    if (!wsClient.isConnected()) {
+    if (initializationComplete && !wsClient.isConnected()) {
       console.log('[alarm] SW wakeup — attempting reconnect');
       void connectClient();
     }

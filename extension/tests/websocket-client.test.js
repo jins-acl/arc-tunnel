@@ -17,7 +17,11 @@ function loadClientModule() {
   return module.exports;
 }
 
-const { WebSocketClient, normalizeWebSocketUrl } = loadClientModule();
+const {
+  WebSocketClient,
+  normalizeWebSocketUrl,
+  resolveConfiguredWebSocketUrl
+} = loadClientModule();
 
 class FakeWebSocket {
   static CONNECTING = 0;
@@ -135,6 +139,30 @@ test('root URLs normalize to the extension endpoint while explicit paths are pre
   assert.equal(normalizeWebSocketUrl('ws://localhost:8765/custom'), 'ws://localhost:8765/custom');
 });
 
+test('legacy localhost default migrates without changing custom URLs', () => {
+  assert.equal(typeof resolveConfiguredWebSocketUrl, 'function');
+  assert.equal(resolveConfiguredWebSocketUrl(undefined), 'ws://127.0.0.1:8765');
+  assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:8765'), 'ws://127.0.0.1:8765');
+  assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:8765/'), 'ws://127.0.0.1:8765');
+  assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:8765/extension'), 'ws://127.0.0.1:8765/extension');
+  assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:9000'), 'ws://localhost:9000');
+  assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:8765/custom'), 'ws://localhost:8765/custom');
+  assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:8765?profile=x'), 'ws://localhost:8765?profile=x');
+  assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:8765/#fragment'), 'ws://localhost:8765/#fragment');
+  assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:8765/extension?x=1'), 'ws://localhost:8765/extension?x=1');
+  assert.equal(resolveConfiguredWebSocketUrl('ws://example.test:8765/custom'), 'ws://example.test:8765/custom');
+});
+
+environmentTest('default client connects to the IPv4 loopback endpoint', async () => {
+  const client = new WebSocketClient();
+  const connection = client.connect().then(null, error => error);
+  const socket = latestSocket();
+
+  assert.equal(socket.url, 'ws://127.0.0.1:8765/extension');
+  client.disconnect();
+  assert.match((await connection).message, /intentionally/i);
+});
+
 for (const invalidWelcome of [
   { type: 'welcome', protocolVersion: 99 },
   { type: 'welcome' }
@@ -194,6 +222,20 @@ environmentTest('valid v2 welcome resolves and sends the extension hello', async
   assert.deepEqual(socket.sent, [{ type: 'hello', role: 'extension', protocolVersion: 2 }]);
   socket.message({ type: 'welcome', protocolVersion: 2 });
   await connection;
+  assert.equal(client.isConnected(), true);
+});
+
+environmentTest('setting the current URL is idempotent', async () => {
+  const client = new WebSocketClient();
+  const connection = client.connect();
+  const socket = latestSocket();
+  socket.open();
+  socket.message({ type: 'welcome', protocolVersion: 2 });
+  await connection;
+
+  client.setUrl('ws://127.0.0.1:8765');
+
+  assert.equal(socket.closeCalls, 0);
   assert.equal(client.isConnected(), true);
 });
 

@@ -165,7 +165,9 @@ session.
 
 - Existing Agent configs continue to invoke `mcp-server/dist/mcp-server.js`.
 - Existing `WS_PORT` configuration remains valid.
-- The extension default stays `ws://localhost:8765` and custom popup URLs remain saved.
+- The extension defaults to `ws://127.0.0.1:8765` to avoid IPv4/IPv6 `localhost`
+  ambiguity. The three former default forms (root, trailing slash, and `/extension`)
+  migrate to `127.0.0.1`; all custom popup URLs remain unchanged and saved.
 - Existing browser tools keep their names and input shapes except for additive
   `claim_tab` and `release_tab` tools and ownership metadata in `list_tabs` results.
 - Prebuilt `mcp-server/dist` and `extension/dist` artifacts remain committed.

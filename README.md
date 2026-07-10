@@ -109,10 +109,16 @@ coordination, not security isolation.
 3. Select `extension/dist/`.
 4. In the popup, verify the shared Broker port and connection state.
 
-The extension converts a saved root URL such as `ws://localhost:8765/` to the current
+The extension defaults to the unambiguous IPv4 loopback URL `ws://127.0.0.1:8765` and
+converts a saved root URL such as `ws://127.0.0.1:8765/` to the current
 `/extension` endpoint. During migration, the Broker still accepts the legacy `/` path
 only when the WebSocket Origin starts with `chrome-extension://`; new configurations
 should use `/extension`.
+
+On upgrade, the extension rewrites only the former default values
+`ws://localhost:8765`, `ws://localhost:8765/`, and
+`ws://localhost:8765/extension` to their `127.0.0.1` equivalents. Other hosts, ports,
+paths, queries, and fragments remain unchanged.
 
 ## Tools and features
 

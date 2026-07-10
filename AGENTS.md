@@ -74,7 +74,8 @@ operational state and exclude URLs, IDs, cookies, scripts, parameters, and page 
 ## Extension setup
 
 Load `extension/dist/` unpacked in Chrome/Edge Developer mode. The popup defaults to
-`ws://localhost:8765`; change it whenever the Broker uses a custom port.
+`ws://127.0.0.1:8765`; change it whenever the Broker uses a custom port. Using the
+explicit IPv4 loopback avoids `localhost` resolving to an unrelated IPv6 listener.
 
 Root extension URLs are normalized to `/extension`. The legacy `/` path is accepted only
 with a `chrome-extension://` Origin. The Broker rejects ordinary `http://` and `https://`

@@ -1,5 +1,18 @@
 import { CommandMessage, ResponseMessage, EventMessage, HelloMessage } from '../types';
 
+export const DEFAULT_WS_URL = 'ws://127.0.0.1:8765';
+
+const LEGACY_DEFAULT_URLS = new Map([
+  ['ws://localhost:8765', DEFAULT_WS_URL],
+  ['ws://localhost:8765/', DEFAULT_WS_URL],
+  ['ws://localhost:8765/extension', `${DEFAULT_WS_URL}/extension`]
+]);
+
+export function resolveConfiguredWebSocketUrl(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULT_WS_URL;
+  return LEGACY_DEFAULT_URLS.get(value) ?? value;
+}
+
 export function normalizeWebSocketUrl(url: string): string {
   const parsed = new URL(url);
   if (parsed.pathname !== '/') return url;
@@ -24,10 +37,13 @@ export class WebSocketClient {
   private handshakeComplete = false;
 
   constructor(url?: string) {
-    this.url = normalizeWebSocketUrl(url || 'ws://localhost:8765');
+    this.url = normalizeWebSocketUrl(resolveConfiguredWebSocketUrl(url));
   }
 
   setUrl(url: string): void {
+    const normalizedUrl = normalizeWebSocketUrl(resolveConfiguredWebSocketUrl(url));
+    if (normalizedUrl === this.url) return;
+
     ++this.connectionGeneration;
     this.clearReconnectTimer();
     chrome.alarms.clear('ws-reconnect');
@@ -37,7 +53,7 @@ export class WebSocketClient {
     this.handshakeComplete = false;
     this.rejectPendingConnect(new Error('Connection superseded by URL change'));
     oldSocket?.close();
-    this.url = normalizeWebSocketUrl(url);
+    this.url = normalizedUrl;
     this.intentionalClose = false;
   }
 

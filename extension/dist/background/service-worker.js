@@ -7,16 +7,26 @@ var __commonJS = (cb, mod) => function __require() {
 };
 
 // src/background/websocket-client.ts
+function resolveConfiguredWebSocketUrl(value) {
+  if (typeof value !== "string") return DEFAULT_WS_URL;
+  return LEGACY_DEFAULT_URLS.get(value) ?? value;
+}
 function normalizeWebSocketUrl(url) {
   const parsed = new URL(url);
   if (parsed.pathname !== "/") return url;
   parsed.pathname = "/extension";
   return parsed.toString();
 }
-var WebSocketClient;
+var DEFAULT_WS_URL, LEGACY_DEFAULT_URLS, WebSocketClient;
 var init_websocket_client = __esm({
   "src/background/websocket-client.ts"() {
     "use strict";
+    DEFAULT_WS_URL = "ws://127.0.0.1:8765";
+    LEGACY_DEFAULT_URLS = /* @__PURE__ */ new Map([
+      ["ws://localhost:8765", DEFAULT_WS_URL],
+      ["ws://localhost:8765/", DEFAULT_WS_URL],
+      ["ws://localhost:8765/extension", `${DEFAULT_WS_URL}/extension`]
+    ]);
     WebSocketClient = class {
       constructor(url) {
         this.ws = null;
@@ -32,9 +42,11 @@ var init_websocket_client = __esm({
         this.connectPromise = null;
         this.rejectConnect = null;
         this.handshakeComplete = false;
-        this.url = normalizeWebSocketUrl(url || "ws://localhost:8765");
+        this.url = normalizeWebSocketUrl(resolveConfiguredWebSocketUrl(url));
       }
       setUrl(url) {
+        const normalizedUrl = normalizeWebSocketUrl(resolveConfiguredWebSocketUrl(url));
+        if (normalizedUrl === this.url) return;
         ++this.connectionGeneration;
         this.clearReconnectTimer();
         chrome.alarms.clear("ws-reconnect");
@@ -44,7 +56,7 @@ var init_websocket_client = __esm({
         this.handshakeComplete = false;
         this.rejectPendingConnect(new Error("Connection superseded by URL change"));
         oldSocket?.close();
-        this.url = normalizeWebSocketUrl(url);
+        this.url = normalizedUrl;
         this.intentionalClose = false;
       }
       async connect() {
@@ -2128,7 +2140,6 @@ var require_service_worker = __commonJS({
     init_storage_manager();
     init_command_handler();
     init_lightweight_controller();
-    var DEFAULT_WS_URL = "ws://localhost:8765";
     var wsClient = new WebSocketClient();
     var tabManager = new TabManager();
     var debuggerController = new DebuggerController();
@@ -2138,6 +2149,8 @@ var require_service_worker = __commonJS({
     var consoleCapture = new ConsoleCapture();
     var storageManager = new StorageManager();
     var lightweightController = new LightweightController();
+    var initializationComplete = false;
+    var pendingWsUrl = null;
     var commandHandler = new CommandHandler(
       tabManager,
       debuggerController,
@@ -2151,18 +2164,26 @@ var require_service_worker = __commonJS({
     async function loadConfig() {
       try {
         const result = await chrome.storage.local.get(["arc_tunnel_ws_url"]);
-        return typeof result.arc_tunnel_ws_url === "string" ? result.arc_tunnel_ws_url : DEFAULT_WS_URL;
+        const savedUrl = result.arc_tunnel_ws_url;
+        const resolvedUrl = resolveConfiguredWebSocketUrl(savedUrl);
+        if (typeof savedUrl === "string" && savedUrl !== resolvedUrl) {
+          await chrome.storage.local.set({ arc_tunnel_ws_url: resolvedUrl });
+        }
+        return resolvedUrl;
       } catch {
-        return DEFAULT_WS_URL;
+        return resolveConfiguredWebSocketUrl(void 0);
       }
     }
     async function initialize() {
-      const wsUrl = await loadConfig();
-      wsClient.setUrl(wsUrl);
+      const loadedWsUrl = await loadConfig();
+      if (pendingWsUrl === null) pendingWsUrl = loadedWsUrl;
       await tabManager.syncExistingTabs();
+      initializationComplete = true;
+      wsClient.setUrl(pendingWsUrl ?? loadedWsUrl);
       await connectClient();
     }
     async function connectClient() {
+      if (!initializationComplete) return;
       try {
         await wsClient.connect();
         console.log("Arc Tunnel extension initialized");
@@ -2172,8 +2193,10 @@ var require_service_worker = __commonJS({
     }
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area === "local" && changes.arc_tunnel_ws_url) {
-        const newUrl = typeof changes.arc_tunnel_ws_url.newValue === "string" ? changes.arc_tunnel_ws_url.newValue : DEFAULT_WS_URL;
+        const newUrl = resolveConfiguredWebSocketUrl(changes.arc_tunnel_ws_url.newValue);
         console.log(`WebSocket URL changed to: ${newUrl}`);
+        pendingWsUrl = newUrl;
+        if (!initializationComplete) return;
         wsClient.setUrl(newUrl);
         void connectClient();
       }
@@ -2199,7 +2222,7 @@ var require_service_worker = __commonJS({
           wsClient.sendEvent({ type: "event", event: "heartbeat", data: {}, timestamp: Date.now() });
         }
       } else if (alarm.name === "ws-reconnect") {
-        if (!wsClient.isConnected()) {
+        if (initializationComplete && !wsClient.isConnected()) {
           console.log("[alarm] SW wakeup \u2014 attempting reconnect");
           void connectClient();
         }
