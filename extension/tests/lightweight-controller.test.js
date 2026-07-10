@@ -37,6 +37,97 @@ async function withEdgeScripting(run) {
   }
 }
 
+function validConsoleEntry(overrides = {}) {
+  return {
+    level: 'info',
+    text: 'message',
+    source: 'page',
+    timestamp: 1,
+    ...overrides
+  };
+}
+
+test('getConsoleLogs reads only the latest 500 main-world entries', async () => {
+  const originalChrome = global.chrome;
+  const bufferKey = Symbol.for('arc-tunnel.console-buffer.v1');
+  const originalBuffer = Object.getOwnPropertyDescriptor(globalThis, bufferKey);
+  const accessed = [];
+  const logs = new Proxy(
+    Array.from({ length: 600 }, (_, index) => validConsoleEntry({ text: `entry-${index}` })),
+    {
+      getOwnPropertyDescriptor(target, key) {
+        if (/^\d+$/.test(String(key))) accessed.push(Number(key));
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      }
+    }
+  );
+  Object.defineProperty(globalThis, bufferKey, {
+    configurable: true,
+    value: { logs }
+  });
+  global.chrome = {
+    scripting: {
+      async executeScript(options) {
+        assert.equal(options.world, 'MAIN');
+        return [{ frameId: 0, result: options.func() }];
+      }
+    }
+  };
+
+  try {
+    const result = await new LightweightController().getConsoleLogs(41);
+    assert.equal(result.installed, true);
+    assert.equal(result.logs.length, 500);
+    assert.equal(result.logs[0].text, 'entry-100');
+    assert.equal(result.logs[499].text, 'entry-599');
+    assert.equal(accessed.some(index => index < 100), false);
+  } finally {
+    if (originalBuffer) Object.defineProperty(globalThis, bufferKey, originalBuffer);
+    else delete globalThis[bufferKey];
+    if (originalChrome === undefined) delete global.chrome;
+    else global.chrome = originalChrome;
+  }
+});
+
+test('getConsoleLogs rejects more than 500 returned entries', async () => {
+  await withScriptingResult([{
+    frameId: 0,
+    result: { installed: true, logs: Array.from({ length: 501 }, () => validConsoleEntry()) }
+  }], async () => {
+    await assert.rejects(new LightweightController().getConsoleLogs(7), /malformed|500|limit/i);
+  });
+});
+
+test('getConsoleLogs rejects oversized text and illegal level or source', async () => {
+  for (const entry of [
+    validConsoleEntry({ text: 'x'.repeat(16_385) }),
+    validConsoleEntry({ level: 'log' }),
+    validConsoleEntry({ source: 'attacker' })
+  ]) {
+    await withScriptingResult([{
+      frameId: 0,
+      result: { installed: true, logs: [entry] }
+    }], async () => {
+      await assert.rejects(new LightweightController().getConsoleLogs(7), /malformed|invalid/i);
+    });
+  }
+});
+
+test('getConsoleLogs rejects non-finite timestamp, line, and column', async () => {
+  for (const entry of [
+    validConsoleEntry({ timestamp: Number.NaN }),
+    validConsoleEntry({ line: Number.POSITIVE_INFINITY }),
+    validConsoleEntry({ column: Number.NEGATIVE_INFINITY })
+  ]) {
+    await withScriptingResult([{
+      frameId: 0,
+      result: { installed: true, logs: [entry] }
+    }], async () => {
+      await assert.rejects(new LightweightController().getConsoleLogs(7), /malformed|invalid/i);
+    });
+  }
+});
+
 test('executeScript catches injected eval failures before Edge erases them to null', async () => {
   await withEdgeScripting(async () => {
     await assert.rejects(

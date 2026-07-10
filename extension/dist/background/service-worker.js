@@ -2016,10 +2016,12 @@ function ownDataValue(object, key) {
   if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, "value")) return void 0;
   return descriptor.value;
 }
-var LightweightController;
+var CONSOLE_BUFFER_LIMIT, CONSOLE_TEXT_LIMIT, LightweightController;
 var init_lightweight_controller = __esm({
   "src/background/lightweight-controller.ts"() {
     "use strict";
+    CONSOLE_BUFFER_LIMIT = 500;
+    CONSOLE_TEXT_LIMIT = 16384;
     LightweightController = class {
       async getConsoleLogs(tabId) {
         const results = await chrome.scripting.executeScript({
@@ -2041,7 +2043,21 @@ var init_lightweight_controller = __esm({
             if (!logsDescriptor || !Object.prototype.hasOwnProperty.call(logsDescriptor, "value") || !Array.isArray(logsDescriptor.value)) {
               return { installed: false, logs: [] };
             }
-            return { installed: true, logs: logsDescriptor.value.slice() };
+            const logs2 = logsDescriptor.value;
+            const lengthDescriptor = Object.getOwnPropertyDescriptor(logs2, "length");
+            if (!lengthDescriptor || !Object.prototype.hasOwnProperty.call(lengthDescriptor, "value") || typeof lengthDescriptor.value !== "number" || lengthDescriptor.value < 0 || lengthDescriptor.value % 1 !== 0) {
+              return { installed: false, logs: [] };
+            }
+            const boundedLogs = [];
+            const start = lengthDescriptor.value > 500 ? lengthDescriptor.value - 500 : 0;
+            for (let index = start; index < lengthDescriptor.value; index++) {
+              const entryDescriptor = Object.getOwnPropertyDescriptor(logs2, `${index}`);
+              if (!entryDescriptor || !Object.prototype.hasOwnProperty.call(entryDescriptor, "value")) {
+                return { installed: false, logs: [] };
+              }
+              boundedLogs[boundedLogs.length] = entryDescriptor.value;
+            }
+            return { installed: true, logs: boundedLogs };
           }
         });
         const injection = results[0];
@@ -2053,12 +2069,23 @@ var init_lightweight_controller = __esm({
         }
         const installed = ownDataValue(envelope, "installed");
         const logs = ownDataValue(envelope, "logs");
-        if (typeof installed !== "boolean" || !Array.isArray(logs)) {
+        if (typeof installed !== "boolean" || !Array.isArray(logs) || logs.length > CONSOLE_BUFFER_LIMIT || !installed && logs.length !== 0) {
           throw new Error("Console history injection returned a malformed result envelope");
         }
         const validatedLogs = logs.map((candidate) => {
           if (!isPlainObject(candidate)) {
             throw new Error("Console history injection returned a malformed log entry");
+          }
+          const keys = Reflect.ownKeys(candidate);
+          const allowedKeys = ["level", "text", "source", "timestamp", "line", "column"];
+          if (keys.some((key) => typeof key !== "string" || !allowedKeys.includes(key))) {
+            throw new Error("Console history injection returned a malformed log entry");
+          }
+          for (const key of keys) {
+            const descriptor = Object.getOwnPropertyDescriptor(candidate, key);
+            if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, "value")) {
+              throw new Error("Console history injection returned a malformed log entry");
+            }
           }
           const level = ownDataValue(candidate, "level");
           const text = ownDataValue(candidate, "text");
@@ -2066,7 +2093,7 @@ var init_lightweight_controller = __esm({
           const timestamp = ownDataValue(candidate, "timestamp");
           const line = ownDataValue(candidate, "line");
           const column = ownDataValue(candidate, "column");
-          if (typeof level !== "string" || typeof text !== "string" || typeof source !== "string" || typeof timestamp !== "number" || !Number.isFinite(timestamp) || line !== void 0 && typeof line !== "number" || column !== void 0 && typeof column !== "number") {
+          if (level !== "debug" && level !== "info" && level !== "warning" && level !== "error" || typeof text !== "string" || text.length > CONSOLE_TEXT_LIMIT || source !== "page" || typeof timestamp !== "number" || !Number.isFinite(timestamp) || line !== void 0 && (typeof line !== "number" || !Number.isFinite(line)) || column !== void 0 && (typeof column !== "number" || !Number.isFinite(column))) {
             throw new Error("Console history injection returned a malformed log entry");
           }
           return {

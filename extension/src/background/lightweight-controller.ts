@@ -2,6 +2,9 @@
 
 import type { ConsoleLogEntry } from './console-capture';
 
+const CONSOLE_BUFFER_LIMIT = 500;
+const CONSOLE_TEXT_LIMIT = 16_384;
+
 type StructuredContent = {
   title: string;
   url: string;
@@ -53,7 +56,23 @@ export class LightweightController {
             !Array.isArray(logsDescriptor.value)) {
           return { installed: false, logs: [] };
         }
-        return { installed: true, logs: logsDescriptor.value.slice() };
+        const logs = logsDescriptor.value;
+        const lengthDescriptor = Object.getOwnPropertyDescriptor(logs, 'length');
+        if (!lengthDescriptor || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value') ||
+            typeof lengthDescriptor.value !== 'number' || lengthDescriptor.value < 0 ||
+            lengthDescriptor.value % 1 !== 0) {
+          return { installed: false, logs: [] };
+        }
+        const boundedLogs = [];
+        const start = lengthDescriptor.value > 500 ? lengthDescriptor.value - 500 : 0;
+        for (let index = start; index < lengthDescriptor.value; index++) {
+          const entryDescriptor = Object.getOwnPropertyDescriptor(logs, `${index}`);
+          if (!entryDescriptor || !Object.prototype.hasOwnProperty.call(entryDescriptor, 'value')) {
+            return { installed: false, logs: [] };
+          }
+          boundedLogs[boundedLogs.length] = entryDescriptor.value;
+        }
+        return { installed: true, logs: boundedLogs };
       }
     });
 
@@ -67,7 +86,8 @@ export class LightweightController {
     }
     const installed = ownDataValue(envelope, 'installed');
     const logs = ownDataValue(envelope, 'logs');
-    if (typeof installed !== 'boolean' || !Array.isArray(logs)) {
+    if (typeof installed !== 'boolean' || !Array.isArray(logs) ||
+        logs.length > CONSOLE_BUFFER_LIMIT || (!installed && logs.length !== 0)) {
       throw new Error('Console history injection returned a malformed result envelope');
     }
 
@@ -75,16 +95,28 @@ export class LightweightController {
       if (!isPlainObject(candidate)) {
         throw new Error('Console history injection returned a malformed log entry');
       }
+      const keys = Reflect.ownKeys(candidate);
+      const allowedKeys = ['level', 'text', 'source', 'timestamp', 'line', 'column'];
+      if (keys.some(key => typeof key !== 'string' || !allowedKeys.includes(key))) {
+        throw new Error('Console history injection returned a malformed log entry');
+      }
+      for (const key of keys) {
+        const descriptor = Object.getOwnPropertyDescriptor(candidate, key);
+        if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+          throw new Error('Console history injection returned a malformed log entry');
+        }
+      }
       const level = ownDataValue(candidate, 'level');
       const text = ownDataValue(candidate, 'text');
       const source = ownDataValue(candidate, 'source');
       const timestamp = ownDataValue(candidate, 'timestamp');
       const line = ownDataValue(candidate, 'line');
       const column = ownDataValue(candidate, 'column');
-      if (typeof level !== 'string' || typeof text !== 'string' || typeof source !== 'string' ||
+      if ((level !== 'debug' && level !== 'info' && level !== 'warning' && level !== 'error') ||
+          typeof text !== 'string' || text.length > CONSOLE_TEXT_LIMIT || source !== 'page' ||
           typeof timestamp !== 'number' || !Number.isFinite(timestamp) ||
-          (line !== undefined && typeof line !== 'number') ||
-          (column !== undefined && typeof column !== 'number')) {
+          (line !== undefined && (typeof line !== 'number' || !Number.isFinite(line))) ||
+          (column !== undefined && (typeof column !== 'number' || !Number.isFinite(column)))) {
         throw new Error('Console history injection returned a malformed log entry');
       }
       return {
