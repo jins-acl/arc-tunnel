@@ -79,6 +79,7 @@ test('screenshot falls back to CDP when activating a frozen tab hangs', async ()
   await withChrome({
     runtime: {},
     tabs: {
+      get: async () => ({ id: 7, windowId: 70 }),
       update: async () => new Promise(() => {}),
       captureVisibleTab: async () => {
         throw new Error('captureVisibleTab should not run after activate timeout');
@@ -112,12 +113,15 @@ test('screenshot falls back to CDP when activating a frozen tab hangs', async ()
 
 test('screenshot captures a visible tab as JPEG quality 80 by default', async () => {
   let captureOptions;
+  let captureWindowId;
   const cdpParams = [];
   await withChrome({
     runtime: {},
     tabs: {
+      get: async () => ({ id: 7, windowId: 70 }),
       update: async () => ({}),
-      captureVisibleTab: async (options) => {
+      captureVisibleTab: async (windowId, options) => {
+        captureWindowId = windowId;
         captureOptions = options;
         return 'data:image/jpeg;base64,visible-image';
       }
@@ -139,8 +143,124 @@ test('screenshot captures a visible tab as JPEG quality 80 by default', async ()
     });
   });
 
+  assert.equal(captureWindowId, 70);
   assert.deepEqual(captureOptions, { format: 'jpeg', quality: 80 });
   assert.deepEqual(cdpParams, []);
+});
+
+test('visible screenshots in the same window serialize get, activate, and capture', async () => {
+  const events = [];
+  let releaseFirstCapture;
+  const firstCaptureBlocked = new Promise(resolve => { releaseFirstCapture = resolve; });
+  let captureCount = 0;
+
+  await withChrome({
+    runtime: {},
+    tabs: {
+      async get(tabId) {
+        events.push(['get', tabId]);
+        return { id: tabId, windowId: 70 };
+      },
+      async update(tabId) {
+        events.push(['activate', tabId]);
+      },
+      async captureVisibleTab(windowId) {
+        captureCount += 1;
+        events.push(['capture-start', windowId, captureCount]);
+        if (captureCount === 1) await firstCaptureBlocked;
+        events.push(['capture-end', windowId, captureCount]);
+        return `data:image/jpeg;base64,image-${captureCount}`;
+      }
+    },
+    debugger: { sendCommand() { assert.fail('visible captures must not use CDP'); } }
+  }, async () => {
+    const controller = new DebuggerController();
+    const first = controller.screenshot(7, false, {});
+    await new Promise(resolve => setImmediate(resolve));
+    const second = controller.screenshot(8, false, {});
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.deepEqual(events.filter(event => event[0] !== 'get'), [
+      ['activate', 7],
+      ['capture-start', 70, 1]
+    ]);
+
+    releaseFirstCapture();
+    await Promise.all([first, second]);
+  });
+
+  assert.deepEqual(events.filter(event => event[0] !== 'get'), [
+    ['activate', 7],
+    ['capture-start', 70, 1],
+    ['capture-end', 70, 1],
+    ['activate', 8],
+    ['capture-start', 70, 2],
+    ['capture-end', 70, 2]
+  ]);
+});
+
+test('visible screenshots in different windows may capture concurrently', async () => {
+  const started = [];
+  let releaseCaptures;
+  const blocked = new Promise(resolve => { releaseCaptures = resolve; });
+
+  await withChrome({
+    runtime: {},
+    tabs: {
+      async get(tabId) { return { id: tabId, windowId: tabId * 10 }; },
+      async update() {},
+      async captureVisibleTab(windowId) {
+        started.push(windowId);
+        await blocked;
+        return `data:image/jpeg;base64,window-${windowId}`;
+      }
+    },
+    debugger: { sendCommand() { assert.fail('visible captures must not use CDP'); } }
+  }, async () => {
+    const controller = new DebuggerController();
+    const captures = [
+      controller.screenshot(7, false, {}),
+      controller.screenshot(8, false, {})
+    ];
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.deepEqual(started.sort(), [70, 80]);
+    releaseCaptures();
+    await Promise.all(captures);
+  });
+});
+
+test('visible screenshots release old window locks before retrying tabs moved across windows', async () => {
+  const getCalls = new Map();
+  const capturedWindows = [];
+  await withChrome({
+    runtime: {},
+    tabs: {
+      async get(tabId) {
+        const count = (getCalls.get(tabId) || 0) + 1;
+        getCalls.set(tabId, count);
+        if (count === 1) return { id: tabId, windowId: tabId === 7 ? 70 : 80 };
+        return { id: tabId, windowId: tabId === 7 ? 80 : 70 };
+      },
+      async update() {},
+      async captureVisibleTab(windowId) {
+        capturedWindows.push(windowId);
+        return `data:image/jpeg;base64,window-${windowId}`;
+      }
+    },
+    debugger: { sendCommand() { assert.fail('visible captures must not use CDP'); } }
+  }, async () => {
+    const controller = new DebuggerController();
+    await Promise.race([
+      Promise.all([
+        controller.screenshot(7, false, {}),
+        controller.screenshot(8, false, {})
+      ]),
+      failAfter(100, 'cross-window capture retry deadlocked')
+    ]);
+  });
+
+  assert.deepEqual(capturedWindows.sort(), [70, 80]);
 });
 
 test('screenshot does not retry a visible capture when image processing fails', async () => {
@@ -148,6 +268,7 @@ test('screenshot does not retry a visible capture when image processing fails', 
   await withChrome({
     runtime: {},
     tabs: {
+      get: async () => ({ id: 7, windowId: 70 }),
       update: async () => ({}),
       captureVisibleTab: async () => 'data:image/jpeg;base64,visible-image'
     },

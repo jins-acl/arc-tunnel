@@ -255,8 +255,32 @@ export class WebSocketClient {
         data: {},
         timestamp: Date.now()
       };
-      socket.send(JSON.stringify(heartbeat));
+      try {
+        socket.send(JSON.stringify(heartbeat));
+      } catch (error) {
+        this.recoverFromHeartbeatFailure(generation, socket, error);
+      }
     }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  private recoverFromHeartbeatFailure(generation: number, socket: WebSocket, error: unknown): void {
+    if (
+      generation !== this.connectionGeneration ||
+      this.ws !== socket ||
+      !this.handshakeComplete
+    ) return;
+
+    console.error('WebSocket heartbeat send failed:', error);
+    this.clearHeartbeatTimer();
+    this.ws = null;
+    this.handshakeComplete = false;
+    const reconnectGeneration = ++this.connectionGeneration;
+    try {
+      socket.close();
+    } catch (closeError) {
+      console.error('Failed to close WebSocket after heartbeat failure:', closeError);
+    }
+    this.handleReconnect(reconnectGeneration);
   }
 
   private clearHeartbeatTimer(): void {

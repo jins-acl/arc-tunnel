@@ -40,6 +40,7 @@ export class DebuggerController {
   private activationTimeoutMs: number;
   private commandTimeoutMs: number;
   private inputCommandTimeoutMs: number;
+  private visibleCaptureLocks = new Map<number, Promise<void>>();
 
   constructor(options: DebuggerControllerOptions = {}) {
     this.navigationTimeoutMs = options.navigationTimeoutMs ?? 1500;
@@ -130,17 +131,7 @@ export class DebuggerController {
       // so slow/stuck captures fall back to CDP instead of hanging forever.
       let dataUrl: string | undefined;
       try {
-        await this.withTimeout(
-          chrome.tabs.update(tabId, { active: true }),
-          this.activationTimeoutMs,
-          'activate tab timeout'
-        );
-        dataUrl = await new Promise<string>((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error('captureVisibleTab timeout')), 5000);
-          chrome.tabs.captureVisibleTab({ format: options.format, quality: options.quality })
-            .then((url) => { clearTimeout(timer); resolve(url); })
-            .catch((err) => { clearTimeout(timer); reject(err); });
-        });
+        dataUrl = await this.captureVisibleTab(tabId, options);
       } catch (e: any) {
         console.warn('[ARC-TUNNEL-DIAG] captureVisibleTab failed/timed out, falling back to CDP:', e.message);
       }
@@ -156,6 +147,61 @@ export class DebuggerController {
       captureBeyondViewport: fullPage
     });
     return await processScreenshot(result.data, options);
+  }
+
+  private async captureVisibleTab(
+    tabId: number,
+    options: ReturnType<typeof normalizeScreenshotOptions>
+  ): Promise<string> {
+    while (true) {
+      const routedTab = await chrome.tabs.get(tabId);
+      const windowId = routedTab.windowId;
+      const attempt = await this.withVisibleCaptureLock(windowId, async () => {
+        const currentTab = await chrome.tabs.get(tabId);
+        if (currentTab.windowId !== windowId) {
+          return { moved: true } as const;
+        }
+
+        await this.withTimeout(
+          chrome.tabs.update(tabId, { active: true }),
+          this.activationTimeoutMs,
+          'activate tab timeout'
+        );
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('captureVisibleTab timeout')), 5000);
+          chrome.tabs.captureVisibleTab(windowId, {
+            format: options.format,
+            quality: options.quality
+          }).then((url) => {
+            clearTimeout(timer);
+            resolve(url);
+          }).catch((err) => {
+            clearTimeout(timer);
+            reject(err);
+          });
+        });
+        return { moved: false, dataUrl } as const;
+      });
+      if (!attempt.moved) return attempt.dataUrl;
+    }
+  }
+
+  private async withVisibleCaptureLock<T>(windowId: number, operation: () => Promise<T>): Promise<T> {
+    const previous = this.visibleCaptureLocks.get(windowId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const tail = previous.then(() => gate);
+    this.visibleCaptureLocks.set(windowId, tail);
+
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.visibleCaptureLocks.get(windowId) === tail) {
+        this.visibleCaptureLocks.delete(windowId);
+      }
+    }
   }
 
   private waitForNavigationEvent(tabId: number, timeoutMs: number): (frameId?: string) => Promise<void> {

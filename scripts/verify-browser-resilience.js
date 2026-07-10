@@ -6,6 +6,7 @@ const path = require('node:path');
 const { performance } = require('node:perf_hooks');
 const { Client } = require('../mcp-server/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js');
 const { StdioClientTransport } = require('../mcp-server/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/stdio.js');
+const { parseToolResult } = require('./parse-tool-result.js');
 
 const root = path.resolve(__dirname, '..');
 const args = process.argv.slice(2);
@@ -14,34 +15,6 @@ const valueAfter = flag => {
   return index >= 0 ? args[index + 1] : undefined;
 };
 const port = Number(valueAfter('--port') || process.env.WS_PORT || 8765);
-
-function parseToolResult(result) {
-  if (!result || !Array.isArray(result.content)) {
-    throw new Error('Tool returned invalid MCP content');
-  }
-
-  const images = result.content.filter(item => item?.type === 'image');
-  const texts = result.content
-    .filter(item => item?.type === 'text' && typeof item.text === 'string')
-    .map(item => item.text);
-  const parsedTexts = texts.map(text => {
-    try {
-      return JSON.parse(text);
-    } catch {
-      return text;
-    }
-  });
-  const value = parsedTexts.length <= 1 ? parsedTexts[0] : parsedTexts;
-
-  if (result.isError) {
-    const details = parsedTexts.find(item => item && typeof item === 'object' && !Array.isArray(item)) || {};
-    const error = new Error(typeof details.error === 'string' ? details.error : 'Tool failed');
-    Object.assign(error, details);
-    throw error;
-  }
-
-  return { value, images, texts };
-}
 
 function assertFailFastTiming(command, elapsedMs) {
   if (!Number.isFinite(elapsedMs) || elapsedMs < 5_000 || elapsedMs > 8_000) {

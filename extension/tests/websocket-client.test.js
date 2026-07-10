@@ -34,6 +34,7 @@ class FakeWebSocket {
     this.readyState = FakeWebSocket.CONNECTING;
     this.sent = [];
     this.closeCalls = 0;
+    this.throwOnSend = null;
     FakeWebSocket.instances.push(this);
   }
 
@@ -47,6 +48,7 @@ class FakeWebSocket {
   }
 
   send(value) {
+    if (this.throwOnSend) throw this.throwOnSend;
     this.sent.push(JSON.parse(value));
   }
 
@@ -262,6 +264,54 @@ environmentTest('valid welcome starts a 10-second heartbeat interval and sends h
   assert.equal(typeof socket.sent[1].timestamp, 'number');
 });
 
+environmentTest('does not start heartbeat before a valid welcome', async (env) => {
+  const client = new WebSocketClient();
+  const connection = client.connect().then(null, error => error);
+  const socket = latestSocket();
+  socket.open();
+
+  assert.equal(env.intervals.length, 0);
+
+  client.disconnect();
+  await connection;
+});
+
+environmentTest('repeated welcome messages keep exactly one heartbeat interval', async (env) => {
+  const client = new WebSocketClient();
+  const connection = client.connect();
+  const socket = latestSocket();
+  socket.open();
+  socket.message({ type: 'welcome', protocolVersion: 2 });
+  await connection;
+  socket.message({ type: 'welcome', protocolVersion: 2 });
+
+  assert.equal(env.intervals.length, 1);
+  assert.equal(env.intervals.filter(interval => !interval.cleared).length, 1);
+});
+
+environmentTest('heartbeat send failure closes the generation and schedules one safe reconnect', async (env) => {
+  const client = new WebSocketClient();
+  const connection = client.connect();
+  const socket = latestSocket();
+  socket.open();
+  socket.message({ type: 'welcome', protocolVersion: 2 });
+  await connection;
+  const heartbeat = env.intervals[0];
+  socket.throwOnSend = new Error('heartbeat send failed');
+
+  assert.doesNotThrow(() => heartbeat.callback());
+  assert.equal(heartbeat.cleared, true);
+  assert.equal(socket.closeCalls, 1);
+  assert.equal(client.isConnected(), false);
+  assert.equal(env.timers.filter(timer => !timer.cleared).length, 1);
+  assert.deepEqual(env.alarms.created.at(-1), {
+    name: 'ws-reconnect', options: { delayInMinutes: 1 }
+  });
+
+  socket.emitClose();
+  assert.equal(env.timers.filter(timer => !timer.cleared).length, 1);
+});
+
 environmentTest('disconnect clears the active heartbeat interval', async (env) => {
   const client = new WebSocketClient();
   const connection = client.connect();
@@ -350,6 +400,23 @@ environmentTest('setUrl invalidates the old generation and one connect creates o
   assert.equal(newSocket.url, 'ws://localhost:9999/extension');
 });
 
+environmentTest('setUrl clears heartbeat and makes its stale callback inert', async (env) => {
+  const client = new WebSocketClient();
+  const connection = client.connect();
+  const socket = latestSocket();
+  socket.open();
+  socket.message({ type: 'welcome', protocolVersion: 2 });
+  await connection;
+  const heartbeat = env.intervals[0];
+
+  client.setUrl('ws://localhost:9999');
+  const sentBeforeStaleCallback = socket.sent.length;
+  heartbeat.callback();
+
+  assert.equal(heartbeat.cleared, true);
+  assert.equal(socket.sent.length, sentBeforeStaleCallback);
+});
+
 environmentTest('stale old-socket callbacks do nothing', async (env) => {
   const client = new WebSocketClient();
   const oldConnection = client.connect().catch(() => undefined);
@@ -397,11 +464,29 @@ environmentTest('service worker suspension preserves a persistent reconnect', as
   socket.emitClose();
 
   assert.equal(socket.closeCalls, 1);
+  assert.equal(env.intervals[0].cleared, true);
   assert.equal(client.isConnected(), false);
   assert.equal(env.timers.filter(timer => !timer.cleared).length, 1);
   assert.deepEqual(env.alarms.created.at(-1), {
     name: 'ws-reconnect', options: { delayInMinutes: 1 }
   });
+});
+
+environmentTest('suspension makes the cleared heartbeat callback inert', async (env) => {
+  const client = new WebSocketClient();
+  const connection = client.connect();
+  const socket = latestSocket();
+  socket.open();
+  socket.message({ type: 'welcome', protocolVersion: 2 });
+  await connection;
+  const heartbeat = env.intervals[0];
+
+  client.prepareForSuspend();
+  const sentBeforeStaleCallback = socket.sent.length;
+  heartbeat.callback();
+
+  assert.equal(heartbeat.cleared, true);
+  assert.equal(socket.sent.length, sentBeforeStaleCallback);
 });
 
 environmentTest('late handshake callbacks after suspension cannot cancel reconnect', async (env) => {

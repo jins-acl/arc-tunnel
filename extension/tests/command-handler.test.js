@@ -344,6 +344,46 @@ test('get_console_logs falls back to CDP when main-world injection fails', async
   });
 });
 
+for (const source of ['page-buffer', 'cdp']) {
+  test(`get_console_logs applies identical normalized filtering to ${source}`, async () => {
+    const rawLogs = [
+      { level: 'debug', text: 'd', source: 'test', timestamp: 1 },
+      { level: 'log', text: 'i', source: 'test', timestamp: 2 },
+      { level: 'warn', text: 'w', source: 'test', timestamp: 3 },
+      { level: 'error', text: 'e', source: 'test', timestamp: 4 }
+    ];
+    const handler = createConsoleHandler({
+      tabManager: {
+        ensureDebuggerAttached: async () => {},
+        scheduleDebuggerDetach() {}
+      },
+      debuggerController: {},
+      consoleCapture: {
+        enableForTab: async () => {},
+        getLogs: () => rawLogs
+      },
+      lightweightController: {
+        getConsoleLogs: async () => source === 'page-buffer'
+          ? { installed: true, logs: rawLogs }
+          : { installed: false, logs: [] }
+      }
+    });
+
+    const result = await handler.handleCommand({
+      id: `filter-${source}`,
+      type: 'command',
+      command: 'get_console_logs',
+      params: { tabId: 25, minLevel: 'info' }
+    });
+
+    assert.deepEqual(result.result.logs.map(({ level, text }) => ({ level, text })), [
+      { level: 'info', text: 'i' },
+      { level: 'warning', text: 'w' },
+      { level: 'error', text: 'e' }
+    ]);
+  });
+}
+
 test('ConsoleCapture installs its listener before Runtime.enable can emit synchronously', async () => {
   const original = global.chrome;
   let listener;

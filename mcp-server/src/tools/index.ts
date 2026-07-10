@@ -115,7 +115,7 @@ export function getToolDefinitions(): ToolDefinition[] {
 
     {
       name: 'screenshot',
-      description: 'Take a screenshot of the tab',
+      description: 'Take a screenshot delivered as MCP image content. Uses JPEG quality 80 by default; choose lossless PNG or optional aspect-preserving resizing when needed. Full-page capture has a higher time and image-size cost.',
       inputSchema: {
         type: 'object',
         properties: {

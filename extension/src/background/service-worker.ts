@@ -9,6 +9,7 @@ import { ConsoleCapture } from './console-capture';
 import { StorageManager } from './storage-manager';
 import { CommandHandler } from './command-handler';
 import { LightweightController } from './lightweight-controller';
+import { bindConsoleCaptureCleanup } from './lifecycle-cleanup';
 import { CommandMessage } from '../types';
 
 // Initialize components
@@ -21,6 +22,7 @@ const sessionManager = new SessionManager();
 const consoleCapture = new ConsoleCapture();
 const storageManager = new StorageManager();
 const lightweightController = new LightweightController();
+bindConsoleCaptureCleanup(tabManager, consoleCapture);
 let initializationComplete = false;
 let pendingWsUrl: string | null = null;
 const commandHandler = new CommandHandler(

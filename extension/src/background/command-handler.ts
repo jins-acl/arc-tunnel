@@ -512,7 +512,11 @@ export class CommandHandler {
   }
 
   private filterConsoleLogs<T extends { level: string }>(logs: T[], minLevel?: string): T[] {
-    const normalized = logs.map(log => log.level === 'warn' ? { ...log, level: 'warning' } : log) as T[];
+    const normalized = logs.map(log => {
+      if (log.level === 'log') return { ...log, level: 'info' };
+      if (log.level === 'warn') return { ...log, level: 'warning' };
+      return log;
+    }) as T[];
     if (!minLevel) return normalized;
     const levels = ['debug', 'info', 'warning', 'error'];
     const minimum = levels.indexOf(minLevel);

@@ -224,8 +224,26 @@ var init_websocket_client = __esm({
             data: {},
             timestamp: Date.now()
           };
-          socket.send(JSON.stringify(heartbeat));
+          try {
+            socket.send(JSON.stringify(heartbeat));
+          } catch (error) {
+            this.recoverFromHeartbeatFailure(generation, socket, error);
+          }
         }, HEARTBEAT_INTERVAL_MS);
+      }
+      recoverFromHeartbeatFailure(generation, socket, error) {
+        if (generation !== this.connectionGeneration || this.ws !== socket || !this.handshakeComplete) return;
+        console.error("WebSocket heartbeat send failed:", error);
+        this.clearHeartbeatTimer();
+        this.ws = null;
+        this.handshakeComplete = false;
+        const reconnectGeneration = ++this.connectionGeneration;
+        try {
+          socket.close();
+        } catch (closeError) {
+          console.error("Failed to close WebSocket after heartbeat failure:", closeError);
+        }
+        this.handleReconnect(reconnectGeneration);
       }
       clearHeartbeatTimer() {
         if (this.heartbeatTimer !== null) {
@@ -654,6 +672,7 @@ var init_debugger_controller = __esm({
     init_image_processor();
     DebuggerController = class {
       constructor(options = {}) {
+        this.visibleCaptureLocks = /* @__PURE__ */ new Map();
         this.pageEnabledTabs = /* @__PURE__ */ new Set();
         this.navigationTimeoutMs = options.navigationTimeoutMs ?? 1500;
         this.activationTimeoutMs = options.activationTimeoutMs ?? 5e3;
@@ -728,21 +747,7 @@ var init_debugger_controller = __esm({
         if (!fullPage) {
           let dataUrl;
           try {
-            await this.withTimeout(
-              chrome.tabs.update(tabId, { active: true }),
-              this.activationTimeoutMs,
-              "activate tab timeout"
-            );
-            dataUrl = await new Promise((resolve, reject) => {
-              const timer = setTimeout(() => reject(new Error("captureVisibleTab timeout")), 5e3);
-              chrome.tabs.captureVisibleTab({ format: options.format, quality: options.quality }).then((url) => {
-                clearTimeout(timer);
-                resolve(url);
-              }).catch((err) => {
-                clearTimeout(timer);
-                reject(err);
-              });
-            });
+            dataUrl = await this.captureVisibleTab(tabId, options);
           } catch (e) {
             console.warn("[ARC-TUNNEL-DIAG] captureVisibleTab failed/timed out, falling back to CDP:", e.message);
           }
@@ -757,6 +762,56 @@ var init_debugger_controller = __esm({
           captureBeyondViewport: fullPage
         });
         return await processScreenshot(result.data, options);
+      }
+      async captureVisibleTab(tabId, options) {
+        while (true) {
+          const routedTab = await chrome.tabs.get(tabId);
+          const windowId = routedTab.windowId;
+          const attempt = await this.withVisibleCaptureLock(windowId, async () => {
+            const currentTab = await chrome.tabs.get(tabId);
+            if (currentTab.windowId !== windowId) {
+              return { moved: true };
+            }
+            await this.withTimeout(
+              chrome.tabs.update(tabId, { active: true }),
+              this.activationTimeoutMs,
+              "activate tab timeout"
+            );
+            const dataUrl = await new Promise((resolve, reject) => {
+              const timer = setTimeout(() => reject(new Error("captureVisibleTab timeout")), 5e3);
+              chrome.tabs.captureVisibleTab(windowId, {
+                format: options.format,
+                quality: options.quality
+              }).then((url) => {
+                clearTimeout(timer);
+                resolve(url);
+              }).catch((err) => {
+                clearTimeout(timer);
+                reject(err);
+              });
+            });
+            return { moved: false, dataUrl };
+          });
+          if (!attempt.moved) return attempt.dataUrl;
+        }
+      }
+      async withVisibleCaptureLock(windowId, operation) {
+        const previous = this.visibleCaptureLocks.get(windowId) ?? Promise.resolve();
+        let release;
+        const gate = new Promise((resolve) => {
+          release = resolve;
+        });
+        const tail = previous.then(() => gate);
+        this.visibleCaptureLocks.set(windowId, tail);
+        await previous;
+        try {
+          return await operation();
+        } finally {
+          release();
+          if (this.visibleCaptureLocks.get(windowId) === tail) {
+            this.visibleCaptureLocks.delete(windowId);
+          }
+        }
       }
       waitForNavigationEvent(tabId, timeoutMs) {
         let expectedFrameId;
@@ -1265,10 +1320,20 @@ var init_session_manager = __esm({
 });
 
 // src/background/console-capture.ts
-var ConsoleCapture;
+function normalizeLevel(level) {
+  if (level === "log") return "info";
+  if (level === "warn") return "warning";
+  return typeof level === "string" ? level : "info";
+}
+function bound(value, limit) {
+  return value.length > limit ? value.slice(0, limit) : value;
+}
+var CONSOLE_TEXT_LIMIT, CONSOLE_SOURCE_LIMIT, ConsoleCapture;
 var init_console_capture = __esm({
   "src/background/console-capture.ts"() {
     "use strict";
+    CONSOLE_TEXT_LIMIT = 16384;
+    CONSOLE_SOURCE_LIMIT = 4096;
     ConsoleCapture = class {
       constructor() {
         this.logs = /* @__PURE__ */ new Map();
@@ -1277,11 +1342,13 @@ var init_console_capture = __esm({
       async enableForTab(tabId, debuggerController) {
         if (!this.listeners.has(tabId)) {
           const handler = (source, method, params) => {
-            if (method === "Runtime.consoleAPICalled") {
+            if (source.tabId === tabId && method === "Runtime.consoleAPICalled") {
+              const text = params.args?.map((argument) => argument.value ?? argument.description ?? "").join(" ") || "";
+              const sourceUrl = params.stackTrace?.callFrames?.[0]?.url || "";
               const entry = {
-                level: params.type || "log",
-                text: params.args?.map((a) => a.value || a.description || "").join(" ") || "",
-                source: params.stackTrace?.callFrames?.[0]?.url || "",
+                level: normalizeLevel(params.type),
+                text: bound(String(text), CONSOLE_TEXT_LIMIT),
+                source: bound(String(sourceUrl), CONSOLE_SOURCE_LIMIT),
                 line: params.stackTrace?.callFrames?.[0]?.lineNumber,
                 column: params.stackTrace?.callFrames?.[0]?.columnNumber,
                 timestamp: Date.now()
@@ -2167,7 +2234,11 @@ var init_command_handler = __esm({
         }
       }
       filterConsoleLogs(logs, minLevel) {
-        const normalized = logs.map((log) => log.level === "warn" ? { ...log, level: "warning" } : log);
+        const normalized = logs.map((log) => {
+          if (log.level === "log") return { ...log, level: "info" };
+          if (log.level === "warn") return { ...log, level: "warning" };
+          return log;
+        });
         if (!minLevel) return normalized;
         const levels = ["debug", "info", "warning", "error"];
         const minimum = levels.indexOf(minLevel);
@@ -2197,12 +2268,12 @@ function ownDataValue(object, key) {
   if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, "value")) return void 0;
   return descriptor.value;
 }
-var CONSOLE_BUFFER_LIMIT, CONSOLE_TEXT_LIMIT, LightweightController;
+var CONSOLE_BUFFER_LIMIT, CONSOLE_TEXT_LIMIT2, LightweightController;
 var init_lightweight_controller = __esm({
   "src/background/lightweight-controller.ts"() {
     "use strict";
     CONSOLE_BUFFER_LIMIT = 500;
-    CONSOLE_TEXT_LIMIT = 16384;
+    CONSOLE_TEXT_LIMIT2 = 16384;
     LightweightController = class {
       async getConsoleLogs(tabId) {
         const results = await chrome.scripting.executeScript({
@@ -2274,7 +2345,7 @@ var init_lightweight_controller = __esm({
           const timestamp = ownDataValue(candidate, "timestamp");
           const line = ownDataValue(candidate, "line");
           const column = ownDataValue(candidate, "column");
-          if (level !== "debug" && level !== "info" && level !== "warning" && level !== "error" || typeof text !== "string" || text.length > CONSOLE_TEXT_LIMIT || source !== "page" || typeof timestamp !== "number" || !Number.isFinite(timestamp) || line !== void 0 && (typeof line !== "number" || !Number.isFinite(line)) || column !== void 0 && (typeof column !== "number" || !Number.isFinite(column))) {
+          if (level !== "debug" && level !== "info" && level !== "warning" && level !== "error" || typeof text !== "string" || text.length > CONSOLE_TEXT_LIMIT2 || source !== "page" || typeof timestamp !== "number" || !Number.isFinite(timestamp) || line !== void 0 && (typeof line !== "number" || !Number.isFinite(line)) || column !== void 0 && (typeof column !== "number" || !Number.isFinite(column))) {
             throw new Error("Console history injection returned a malformed log entry");
           }
           return {
@@ -2424,6 +2495,20 @@ var init_lightweight_controller = __esm({
   }
 });
 
+// src/background/lifecycle-cleanup.ts
+function bindConsoleCaptureCleanup(tabManager, consoleCapture) {
+  return tabManager.onLifecycle((event, data) => {
+    if (event === "tab_removed" && typeof data.tabId === "number") {
+      consoleCapture.disableForTab(data.tabId);
+    }
+  });
+}
+var init_lifecycle_cleanup = __esm({
+  "src/background/lifecycle-cleanup.ts"() {
+    "use strict";
+  }
+});
+
 // src/background/service-worker.ts
 var require_service_worker = __commonJS({
   "src/background/service-worker.ts"() {
@@ -2437,6 +2522,7 @@ var require_service_worker = __commonJS({
     init_storage_manager();
     init_command_handler();
     init_lightweight_controller();
+    init_lifecycle_cleanup();
     var wsClient = new WebSocketClient();
     var tabManager = new TabManager();
     var debuggerController = new DebuggerController();
@@ -2446,6 +2532,7 @@ var require_service_worker = __commonJS({
     var consoleCapture = new ConsoleCapture();
     var storageManager = new StorageManager();
     var lightweightController = new LightweightController();
+    bindConsoleCaptureCleanup(tabManager, consoleCapture);
     var initializationComplete = false;
     var pendingWsUrl = null;
     var commandHandler = new CommandHandler(

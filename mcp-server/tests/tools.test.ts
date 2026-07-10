@@ -69,6 +69,11 @@ describe('MCP Tools', () => {
         description: 'Optional maximum output height; preserves aspect ratio.'
       }
     });
+    expect(tool?.description).toMatch(/JPEG quality 80 by default/i);
+    expect(tool?.description).toMatch(/lossless PNG/i);
+    expect(tool?.description).toMatch(/optional.*resiz/i);
+    expect(tool?.description).toMatch(/MCP image/i);
+    expect(tool?.description).toMatch(/full-page.*cost/i);
   });
 
   it('documents console history and restricted-page fallback semantics', () => {

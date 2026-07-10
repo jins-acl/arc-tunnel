@@ -33,6 +33,7 @@ test('configuration changes wait for tab synchronization and the latest URL wins
   const originals = { chrome: global.chrome, WebSocket: global.WebSocket };
   const storageChanged = event();
   const alarmEvent = event();
+  const createdAlarms = [];
   const tabsReady = deferred();
   const storedValues = [];
 
@@ -84,7 +85,7 @@ test('configuration changes wait for tab synchronization and the latest URL wins
       onSuspend: noopEvent()
     },
     alarms: {
-      create() {},
+      create(name, options) { createdAlarms.push({ name, options }); },
       clear() {},
       onAlarm: alarmEvent
     }
@@ -100,6 +101,10 @@ test('configuration changes wait for tab synchronization and the latest URL wins
     });
     new Function('require', result.outputFiles[0].text)(require);
     await flushMicrotasks();
+
+    assert.deepEqual(createdAlarms[0], {
+      name: 'keepAlive', options: { periodInMinutes: 1 }
+    });
 
     assert.deepEqual(storedValues, [{ arc_tunnel_ws_url: 'ws://127.0.0.1:8765' }]);
     assert.equal(FakeWebSocket.instances.length, 0);
