@@ -123,6 +123,71 @@ test('screenshot forwards only supported image options and returns the image res
   }]]);
 });
 
+test('screenshot processing errors do not retry or attach the debugger', async () => {
+  let screenshotCalls = 0;
+  const lifecycle = [];
+  const handler = new CommandHandler(
+    {
+      ensureDebuggerAttached: async tabId => lifecycle.push(['attach', tabId]),
+      scheduleDebuggerDetach: (tabId, reason) => lifecycle.push(['detach', tabId, reason])
+    },
+    {
+      screenshot: async () => {
+        screenshotCalls += 1;
+        throw new Error('Screenshot conversion failed: Debugger is not attached');
+      }
+    },
+    {}, {}, {}, {}, {}, {}
+  );
+
+  const response = await handler.handleCommand({
+    id: 'processing-failure',
+    type: 'command',
+    command: 'screenshot',
+    params: { tabId: 42, maxWidth: 800 }
+  });
+
+  assert.equal(response.success, false);
+  assert.match(response.error.message, /conversion failed/i);
+  assert.equal(screenshotCalls, 1);
+  assert.deepEqual(lifecycle, []);
+});
+
+test('screenshot retries with an attached debugger only for a not-attached error', async () => {
+  let screenshotCalls = 0;
+  const lifecycle = [];
+  const handler = new CommandHandler(
+    {
+      ensureDebuggerAttached: async tabId => lifecycle.push(['attach', tabId]),
+      scheduleDebuggerDetach: (tabId, reason) => lifecycle.push(['detach', tabId, reason])
+    },
+    {
+      screenshot: async () => {
+        screenshotCalls += 1;
+        if (screenshotCalls === 1) {
+          throw Object.assign(new Error('Debugger is not attached'), { code: 'DEBUGGER_NOT_ATTACHED' });
+        }
+        return { screenshot: 'YWJj', mimeType: 'image/jpeg', format: 'jpeg', quality: 80, resized: false };
+      }
+    },
+    {}, {}, {}, {}, {}, {}
+  );
+
+  const response = await handler.handleCommand({
+    id: 'attach-retry',
+    type: 'command',
+    command: 'screenshot',
+    params: { tabId: 42 }
+  });
+
+  assert.equal(response.success, true);
+  assert.equal(screenshotCalls, 2);
+  assert.deepEqual(lifecycle, [
+    ['attach', 42],
+    ['detach', 42, 'screenshot.fallback']
+  ]);
+});
+
 test('get_console_logs returns page history without attaching the debugger', async () => {
   const tabManager = {
     ensureDebuggerAttached: async () => assert.fail('page history must not attach the debugger'),

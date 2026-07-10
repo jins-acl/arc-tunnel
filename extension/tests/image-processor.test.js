@@ -167,3 +167,121 @@ test('closes the bitmap and reports a clear error when no 2D canvas context is a
 
   assert.equal(closed, 1);
 });
+
+test('wraps screenshot fetch failures with decode context and preserves the cause', async () => {
+  const cause = new Error('fetch exploded');
+  await withGlobals({
+    fetch: async () => { throw cause; },
+    createImageBitmap: async () => assert.fail('bitmap decode must not run after fetch failure'),
+    OffscreenCanvas: class {}
+  }, async () => {
+    await assert.rejects(
+      processScreenshot('abc123', { format: 'jpeg', quality: 80, maxWidth: 100 }),
+      error => /decode failed/i.test(error.message) && error.cause === cause
+    );
+  });
+});
+
+test('wraps bitmap decode failures with context and preserves the cause', async () => {
+  const cause = new Error('bitmap exploded');
+  await withGlobals({
+    createImageBitmap: async () => { throw cause; },
+    OffscreenCanvas: class {}
+  }, async () => {
+    await assert.rejects(
+      processScreenshot('abc123', { format: 'jpeg', quality: 80, maxWidth: 100 }),
+      error => /decode failed/i.test(error.message) && error.cause === cause
+    );
+  });
+});
+
+test('wraps draw failures and closes the bitmap', async () => {
+  const cause = new Error('draw exploded');
+  let closed = 0;
+  await withGlobals({
+    createImageBitmap: async () => ({ width: 200, height: 100, close: () => { closed += 1; } }),
+    OffscreenCanvas: class {
+      getContext() { return { drawImage: () => { throw cause; } }; }
+    }
+  }, async () => {
+    await assert.rejects(
+      processScreenshot('abc123', { format: 'jpeg', quality: 80, maxWidth: 100 }),
+      error => /draw failed/i.test(error.message) && error.cause === cause
+    );
+  });
+  assert.equal(closed, 1);
+});
+
+test('closes the bitmap when reading its dimensions fails', async () => {
+  const cause = new Error('width exploded');
+  let closed = 0;
+  await withGlobals({
+    createImageBitmap: async () => ({
+      get width() { throw cause; },
+      height: 100,
+      close: () => { closed += 1; }
+    }),
+    OffscreenCanvas: class {}
+  }, async () => {
+    await assert.rejects(
+      processScreenshot('abc123', { format: 'jpeg', quality: 80, maxWidth: 100 }),
+      error => /draw failed/i.test(error.message) && error.cause === cause
+    );
+  });
+  assert.equal(closed, 1);
+});
+
+test('wraps conversion failures and closes the bitmap', async () => {
+  const cause = new Error('conversion exploded');
+  let closed = 0;
+  await withGlobals({
+    createImageBitmap: async () => ({ width: 200, height: 100, close: () => { closed += 1; } }),
+    OffscreenCanvas: class {
+      getContext() { return { drawImage() {} }; }
+      async convertToBlob() { throw cause; }
+    }
+  }, async () => {
+    await assert.rejects(
+      processScreenshot('abc123', { format: 'jpeg', quality: 80, maxWidth: 100 }),
+      error => /conversion failed/i.test(error.message) && error.cause === cause
+    );
+  });
+  assert.equal(closed, 1);
+});
+
+test('wraps output read failures and closes the bitmap', async () => {
+  const cause = new Error('read exploded');
+  let closed = 0;
+  await withGlobals({
+    createImageBitmap: async () => ({ width: 200, height: 100, close: () => { closed += 1; } }),
+    OffscreenCanvas: class {
+      getContext() { return { drawImage() {} }; }
+      async convertToBlob() { return { arrayBuffer: async () => { throw cause; } }; }
+    }
+  }, async () => {
+    await assert.rejects(
+      processScreenshot('abc123', { format: 'jpeg', quality: 80, maxWidth: 100 }),
+      error => /output read failed/i.test(error.message) && error.cause === cause
+    );
+  });
+  assert.equal(closed, 1);
+});
+
+test('wraps base64 encoding failures and closes the bitmap', async () => {
+  const cause = new Error('encode exploded');
+  let closed = 0;
+  await withGlobals({
+    btoa: () => { throw cause; },
+    createImageBitmap: async () => ({ width: 200, height: 100, close: () => { closed += 1; } }),
+    OffscreenCanvas: class {
+      getContext() { return { drawImage() {} }; }
+      async convertToBlob() { return { arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer }; }
+    }
+  }, async () => {
+    await assert.rejects(
+      processScreenshot('abc123', { format: 'jpeg', quality: 80, maxWidth: 100 }),
+      error => /encoding failed/i.test(error.message) && error.cause === cause
+    );
+  });
+  assert.equal(closed, 1);
+});

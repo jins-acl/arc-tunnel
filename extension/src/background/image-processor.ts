@@ -72,6 +72,13 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+function stageError(stage: string, cause: unknown): Error & { cause?: unknown } {
+  const detail = cause instanceof Error && cause.message ? `: ${cause.message}` : '';
+  const error = new Error(`Screenshot ${stage} failed${detail}`) as Error & { cause?: unknown };
+  error.cause = cause;
+  return error;
+}
+
 export async function processScreenshot(
   data: string,
   options: ScreenshotOptions
@@ -92,20 +99,58 @@ export async function processScreenshot(
     throw new Error('Screenshot resizing is not supported by this browser');
   }
 
-  const sourceBlob = await (await fetch(`data:${mimeType};base64,${data}`)).blob();
-  const source = await createImageBitmap(sourceBlob);
-  const originalWidth = source.width;
-  const originalHeight = source.height;
+  let sourceBlob: Blob;
   try {
-    const size = calculateOutputSize(originalWidth, originalHeight, options);
-    const canvas = new OffscreenCanvas(size.width, size.height);
-    const context = canvas.getContext('2d');
-    if (context === null) {
-      throw new Error('Unable to create a 2D canvas context for screenshot resizing');
+    sourceBlob = await (await fetch(`data:${mimeType};base64,${data}`)).blob();
+  } catch (cause) {
+    throw stageError('decode', cause);
+  }
+
+  let source: ImageBitmap;
+  try {
+    source = await createImageBitmap(sourceBlob);
+  } catch (cause) {
+    throw stageError('decode', cause);
+  }
+  try {
+    let originalWidth: number;
+    let originalHeight: number;
+    let size: { width: number; height: number; resized: boolean };
+    let canvas: OffscreenCanvas;
+    try {
+      originalWidth = source.width;
+      originalHeight = source.height;
+      size = calculateOutputSize(originalWidth, originalHeight, options);
+      canvas = new OffscreenCanvas(size.width, size.height);
+      const context = canvas.getContext('2d');
+      if (context === null) {
+        throw new Error('Unable to create a 2D canvas context for screenshot resizing');
+      }
+      context.drawImage(source, 0, 0, size.width, size.height);
+    } catch (cause) {
+      throw stageError('draw', cause);
     }
-    context.drawImage(source, 0, 0, size.width, size.height);
-    const blob = await canvas.convertToBlob({ type: mimeType, quality: options.quality / 100 });
-    const encoded = bytesToBase64(new Uint8Array(await blob.arrayBuffer()));
+
+    let blob: Blob;
+    try {
+      blob = await canvas.convertToBlob({ type: mimeType, quality: options.quality / 100 });
+    } catch (cause) {
+      throw stageError('conversion', cause);
+    }
+
+    let output: ArrayBuffer;
+    try {
+      output = await blob.arrayBuffer();
+    } catch (cause) {
+      throw stageError('output read', cause);
+    }
+
+    let encoded: string;
+    try {
+      encoded = bytesToBase64(new Uint8Array(output));
+    } catch (cause) {
+      throw stageError('encoding', cause);
+    }
 
     return {
       screenshot: encoded,
@@ -119,6 +164,10 @@ export async function processScreenshot(
       resized: size.resized
     };
   } finally {
-    source.close();
+    try {
+      source.close();
+    } catch {
+      // Cleanup must not hide the processing stage and its original cause.
+    }
   }
 }

@@ -19928,6 +19928,54 @@ function getToolDefinitions() {
 }
 
 // src/server.ts
+var SCREENSHOT_KEYS = /* @__PURE__ */ new Set([
+  "screenshot",
+  "mimeType",
+  "format",
+  "quality",
+  "resized",
+  "width",
+  "height",
+  "originalWidth",
+  "originalHeight"
+]);
+var RAW_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+function screenshotContent(result) {
+  if (typeof result !== "object" || result === null || Array.isArray(result)) {
+    throw new Error("Invalid screenshot result from browser extension");
+  }
+  const value = result;
+  if (Object.keys(value).some((key) => !SCREENSHOT_KEYS.has(key))) {
+    throw new Error("Invalid screenshot result from browser extension");
+  }
+  if (typeof value.screenshot !== "string" || value.screenshot.length === 0 || !RAW_BASE64.test(value.screenshot) || value.format !== "jpeg" && value.format !== "png" || value.mimeType !== (value.format === "png" ? "image/png" : "image/jpeg") || typeof value.resized !== "boolean") {
+    throw new Error("Invalid screenshot result from browser extension");
+  }
+  if (value.quality !== void 0 && (!Number.isInteger(value.quality) || value.quality < 1 || value.quality > 100) || value.format === "png" && value.quality !== void 0) {
+    throw new Error("Invalid screenshot result from browser extension");
+  }
+  for (const key of ["width", "height", "originalWidth", "originalHeight"]) {
+    const dimension = value[key];
+    if (dimension !== void 0 && (!Number.isInteger(dimension) || dimension < 1)) {
+      throw new Error("Invalid screenshot result from browser extension");
+    }
+  }
+  const metadata = {
+    format: value.format,
+    quality: value.quality,
+    resized: value.resized,
+    width: value.width,
+    height: value.height,
+    originalWidth: value.originalWidth,
+    originalHeight: value.originalHeight
+  };
+  return {
+    content: [
+      { type: "image", data: value.screenshot, mimeType: value.mimeType },
+      { type: "text", text: JSON.stringify(metadata) }
+    ]
+  };
+}
 var ArcTunnelMCPServer = class {
   constructor(brokerClient) {
     this.brokerClient = brokerClient;
@@ -19949,16 +19997,7 @@ var ArcTunnelMCPServer = class {
         3e4
       );
       if (request.params.name === "screenshot") {
-        if (typeof result !== "object" || result === null || typeof result.screenshot !== "string" || result.mimeType !== "image/jpeg" && result.mimeType !== "image/png") {
-          throw new Error("Invalid screenshot result from browser extension");
-        }
-        const { screenshot, mimeType, ...metadata } = result;
-        return {
-          content: [
-            { type: "image", data: screenshot, mimeType },
-            { type: "text", text: JSON.stringify(metadata) }
-          ]
-        };
+        return screenshotContent(result);
       }
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (error2) {

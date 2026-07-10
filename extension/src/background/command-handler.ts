@@ -16,6 +16,11 @@ interface CommandHandlerOptions {
   lightweightTimeoutMs?: number;
 }
 
+function isDebuggerNotAttachedError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  return (error as { code?: unknown }).code === 'DEBUGGER_NOT_ATTACHED';
+}
+
 export class CommandHandler {
   private snapshotEngine: SnapshotEngine;
   private inputSimulator: InputSimulator;
@@ -303,6 +308,7 @@ export class CommandHandler {
             screenshotOptions
           );
         } catch (error) {
+          if (!isDebuggerNotAttachedError(error)) throw error;
           return await this.runWithDebugger(params.tabId, 'screenshot.fallback', () =>
             this.debuggerController.screenshot(params.tabId, params.fullPage, screenshotOptions)
           );

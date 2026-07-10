@@ -508,6 +508,12 @@ function bytesToBase64(bytes) {
   }
   return btoa(binary);
 }
+function stageError(stage, cause) {
+  const detail = cause instanceof Error && cause.message ? `: ${cause.message}` : "";
+  const error = new Error(`Screenshot ${stage} failed${detail}`);
+  error.cause = cause;
+  return error;
+}
 async function processScreenshot(data, options) {
   const mimeType = options.format === "png" ? "image/png" : "image/jpeg";
   const quality = options.format === "jpeg" ? options.quality : void 0;
@@ -523,20 +529,54 @@ async function processScreenshot(data, options) {
   if (typeof createImageBitmap !== "function" || typeof OffscreenCanvas !== "function") {
     throw new Error("Screenshot resizing is not supported by this browser");
   }
-  const sourceBlob = await (await fetch(`data:${mimeType};base64,${data}`)).blob();
-  const source = await createImageBitmap(sourceBlob);
-  const originalWidth = source.width;
-  const originalHeight = source.height;
+  let sourceBlob;
   try {
-    const size = calculateOutputSize(originalWidth, originalHeight, options);
-    const canvas = new OffscreenCanvas(size.width, size.height);
-    const context = canvas.getContext("2d");
-    if (context === null) {
-      throw new Error("Unable to create a 2D canvas context for screenshot resizing");
+    sourceBlob = await (await fetch(`data:${mimeType};base64,${data}`)).blob();
+  } catch (cause) {
+    throw stageError("decode", cause);
+  }
+  let source;
+  try {
+    source = await createImageBitmap(sourceBlob);
+  } catch (cause) {
+    throw stageError("decode", cause);
+  }
+  try {
+    let originalWidth;
+    let originalHeight;
+    let size;
+    let canvas;
+    try {
+      originalWidth = source.width;
+      originalHeight = source.height;
+      size = calculateOutputSize(originalWidth, originalHeight, options);
+      canvas = new OffscreenCanvas(size.width, size.height);
+      const context = canvas.getContext("2d");
+      if (context === null) {
+        throw new Error("Unable to create a 2D canvas context for screenshot resizing");
+      }
+      context.drawImage(source, 0, 0, size.width, size.height);
+    } catch (cause) {
+      throw stageError("draw", cause);
     }
-    context.drawImage(source, 0, 0, size.width, size.height);
-    const blob = await canvas.convertToBlob({ type: mimeType, quality: options.quality / 100 });
-    const encoded = bytesToBase64(new Uint8Array(await blob.arrayBuffer()));
+    let blob;
+    try {
+      blob = await canvas.convertToBlob({ type: mimeType, quality: options.quality / 100 });
+    } catch (cause) {
+      throw stageError("conversion", cause);
+    }
+    let output;
+    try {
+      output = await blob.arrayBuffer();
+    } catch (cause) {
+      throw stageError("output read", cause);
+    }
+    let encoded;
+    try {
+      encoded = bytesToBase64(new Uint8Array(output));
+    } catch (cause) {
+      throw stageError("encoding", cause);
+    }
     return {
       screenshot: encoded,
       mimeType,
@@ -549,7 +589,10 @@ async function processScreenshot(data, options) {
       resized: size.resized
     };
   } finally {
-    source.close();
+    try {
+      source.close();
+    } catch {
+    }
   }
 }
 var init_image_processor = __esm({
@@ -563,6 +606,8 @@ function mapError(err) {
   const msg = err.message || "";
   if (msg.includes("No tab with id") || msg.includes("No target with given id")) {
     err.code = "TAB_NOT_FOUND";
+  } else if (msg.toLowerCase().includes("debugger is not attached")) {
+    err.code = "DEBUGGER_NOT_ATTACHED";
   } else if (msg.includes("Another debugger is already attached")) {
     err.code = "DEBUGGER_ATTACH_FAILED";
   } else if (msg.includes("Element not found")) {
@@ -1628,6 +1673,10 @@ var init_actionability_checker = __esm({
 });
 
 // src/background/command-handler.ts
+function isDebuggerNotAttachedError(error) {
+  if (typeof error !== "object" || error === null) return false;
+  return error.code === "DEBUGGER_NOT_ATTACHED";
+}
 var CommandHandler;
 var init_command_handler = __esm({
   "src/background/command-handler.ts"() {
@@ -1909,6 +1958,7 @@ var init_command_handler = __esm({
                 screenshotOptions
               );
             } catch (error) {
+              if (!isDebuggerNotAttachedError(error)) throw error;
               return await this.runWithDebugger(
                 params.tabId,
                 "screenshot.fallback",

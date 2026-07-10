@@ -21,6 +21,8 @@ function mapError(err: Error): CodedError {
   const msg = err.message || '';
   if (msg.includes('No tab with id') || msg.includes('No target with given id')) {
     (err as CodedError).code = 'TAB_NOT_FOUND';
+  } else if (msg.toLowerCase().includes('debugger is not attached')) {
+    (err as CodedError).code = 'DEBUGGER_NOT_ATTACHED';
   } else if (msg.includes('Another debugger is already attached')) {
     (err as CodedError).code = 'DEBUGGER_ATTACH_FAILED';
   } else if (msg.includes('Element not found')) {
