@@ -170,6 +170,20 @@ lightweight client (`mcp-server/dist/mcp-server.js`), shared Broker
 `extension/dist/`. For component-specific debugging, run the child `test`, typecheck,
 or `build` commands from `mcp-server/` or `extension/`.
 
+### Real-browser resilience verification
+
+With the current `extension/dist/` loaded and connected to the shared Broker, run:
+
+```bash
+node scripts/verify-browser-resilience.js [--port 8765]
+```
+
+The verifier creates a loopback HTTP server, one lightweight MCP client, and one owned
+browser tab. It checks pre-call console history, MCP image screenshot delivery, bounded
+`TIMEOUT` responses from a deliberately frozen page, screenshot recovery, and tab
+closure. On success or failure it closes only the tab, client, and HTTP server that it
+created. It never stops the shared Broker and does not close any pre-existing tab.
+
 ## Security
 
 The Broker binds only `127.0.0.1`, is not exposed on the LAN, and rejects WebSocket

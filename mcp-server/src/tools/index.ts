@@ -148,7 +148,7 @@ export function getToolDefinitions(): ToolDefinition[] {
     },
     {
       name: 'execute_script',
-      description: 'Execute JavaScript in the tab. WARNING: scripts have full page access (DOM, cookies, storage, network). Use with caution.',
+      description: 'Execute JavaScript in the tab. Frozen pages fail with a coded TIMEOUT after the bounded lightweight and debugger paths. WARNING: scripts have full page access (DOM, cookies, storage, network). Use with caution.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -160,7 +160,7 @@ export function getToolDefinitions(): ToolDefinition[] {
     },
     {
       name: 'get_content',
-      description: 'Extract page content without interacting with the page. Supports html, text, structured, and markdown modes.',
+      description: 'Extract page content without interacting with the page. Supports html, text, structured, and markdown modes. Frozen pages fail with a coded TIMEOUT after the bounded lightweight and debugger paths.',
       inputSchema: {
         type: 'object',
         properties: {

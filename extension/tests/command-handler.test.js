@@ -64,6 +64,49 @@ test('CommandHandler falls back to debugger when a lightweight command hangs', a
   ]);
 });
 
+for (const [command, params, fallbackMethod] of [
+  ['execute_script', { tabId: 42, script: 'document.title' }, 'executeScript'],
+  ['get_content', { tabId: 42, mode: 'text' }, 'getContent']
+]) {
+  test(`${command} returns a coded timeout within the combined fail-fast bound`, async () => {
+    const events = [];
+    const timeoutError = Object.assign(new Error(`${command} debugger path timed out`), {
+      code: 'TIMEOUT'
+    });
+    const tabManager = {
+      ensureDebuggerAttached: async tabId => events.push(['attach', tabId]),
+      scheduleDebuggerDetach: (tabId, reason) => events.push(['detach', tabId, reason])
+    };
+    const debuggerController = {
+      [fallbackMethod]: async () => new Promise((resolve, reject) => {
+        setTimeout(() => reject(timeoutError), 5);
+      })
+    };
+    const lightweightController = {
+      [fallbackMethod]: async () => new Promise(() => {})
+    };
+    const handler = new CommandHandler(
+      tabManager,
+      debuggerController,
+      {}, {}, {}, {}, {},
+      lightweightController,
+      { lightweightTimeoutMs: 5 }
+    );
+
+    const response = await Promise.race([
+      handler.handleCommand({ id: command, type: 'command', command, params }),
+      failAfter(50, `${command} exceeded the combined fail-fast bound`)
+    ]);
+
+    assert.equal(response.success, false);
+    assert.equal(response.error.code, 'TIMEOUT');
+    assert.deepEqual(events, [
+      ['attach', 42],
+      ['detach', 42, `${command}.fallback`]
+    ]);
+  });
+}
+
 function createConsoleHandler({ tabManager, consoleCapture, lightweightController, debuggerController }) {
   return new CommandHandler(
     tabManager,

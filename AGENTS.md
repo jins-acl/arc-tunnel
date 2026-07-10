@@ -100,3 +100,13 @@ Verify connection in the extension popup and with `node scripts/start.js status`
 disconnected, ensure all client `WS_PORT` values and the popup port match, reload the
 current `extension/dist/`, and rebuild all bundles together on protocol mismatch. Never
 stop an unknown process occupying a selected port.
+
+For the repeatable frozen-page D/F/C check, run:
+
+```bash
+node scripts/verify-browser-resilience.js [--port 8765]
+```
+
+The verifier uses one loopback HTTP server, one lightweight MCP client, and one owned
+tab. Its `finally` cleanup closes only that tab, client, and HTTP server, including after
+failure. It never stops the shared Broker or closes pre-existing browser tabs.
