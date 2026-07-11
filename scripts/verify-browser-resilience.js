@@ -22,6 +22,19 @@ function assertFailFastTiming(command, elapsedMs) {
   }
 }
 
+function closeHttpServer(server, sockets = new Set()) {
+  for (const socket of sockets) socket.destroy();
+  if (!server.listening) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    server.close(error => {
+      if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') reject(error);
+      else resolve();
+    });
+    if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+  });
+}
+
 async function main() {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error(`Invalid port: ${port}`);
@@ -29,6 +42,7 @@ async function main() {
 
   const cleanupErrors = [];
   let server;
+  const serverSockets = new Set();
   let client;
   let transport;
   let tabId;
@@ -53,6 +67,10 @@ async function main() {
   <script>console.log('ARC_CONSOLE_BEFORE_CALL');</script>
 </body>
 </html>`);
+    });
+    server.on('connection', socket => {
+      serverSockets.add(socket);
+      socket.once('close', () => serverSockets.delete(socket));
     });
     await new Promise((resolve, reject) => {
       server.once('error', reject);
@@ -157,10 +175,7 @@ async function main() {
     if (client) await client.close().catch(error => cleanupErrors.push(error));
     if (transport) await transport.close().catch(error => cleanupErrors.push(error));
     if (server) {
-      await new Promise(resolve => server.close(error => {
-        if (error) cleanupErrors.push(error);
-        resolve();
-      }));
+      await closeHttpServer(server, serverSockets).catch(error => cleanupErrors.push(error));
     }
   }
 
@@ -174,7 +189,7 @@ async function main() {
   if (cleanupErrors.length) throw Object.assign(new Error('Cleanup failed'), { cleanupErrors });
 }
 
-module.exports = { assertFailFastTiming, parseToolResult };
+module.exports = { assertFailFastTiming, closeHttpServer, parseToolResult };
 
 if (require.main === module) {
   main().catch(error => {
