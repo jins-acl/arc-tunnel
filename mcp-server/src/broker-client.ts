@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import WebSocket, { RawData } from 'ws';
-import { BrokerConfig } from './config';
+import { BrokerEndpointConfig } from './config';
 import {
   AgentRequest, AgentResponse, ArcTunnelError, ErrorCode, HelloMessage,
   PROTOCOL_VERSION, isAgentResponse, isWelcomeMessage
@@ -22,7 +22,7 @@ export class BrokerClient {
     ws.once('error', () => this.rejectPending(ErrorCode.CONNECTION_LOST));
   }
 
-  static async connect(config: BrokerConfig): Promise<BrokerClient> {
+  static async connect(config: BrokerEndpointConfig): Promise<BrokerClient> {
     const ws = new WebSocket(`ws://127.0.0.1:${config.port}/agent`);
     await new Promise<void>((resolve, reject) => {
       let settled = false;

@@ -4,7 +4,7 @@ import { AddressInfo } from 'net';
 import fs from 'fs';
 import path from 'path';
 import WebSocket, { RawData, WebSocketServer } from 'ws';
-import { BrokerConfig } from '../config';
+import { BrokerEndpointConfig } from '../config';
 import {
   AgentRequest,
   AgentResponse,
@@ -131,7 +131,7 @@ export class BrokerServer {
   private recordingReservationSessionId: string | null = null;
   private recordingCleanupSessionId: string | null = null;
 
-  constructor(private readonly config: BrokerConfig, dependencies: BrokerDependencies = {}) {
+  constructor(private readonly config: BrokerEndpointConfig, dependencies: BrokerDependencies = {}) {
     this.registry = dependencies.registry ?? new SessionRegistry();
   }
 

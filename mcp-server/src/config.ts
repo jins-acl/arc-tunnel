@@ -1,16 +1,21 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { isValidAuthToken } from './auth-token';
 
-export interface BrokerConfig {
+export interface BrokerEndpointConfig {
   host: '127.0.0.1';
   port: number;
+}
+
+export interface BrokerConfig extends BrokerEndpointConfig {
+  token: string;
 }
 
 export interface ResolveOptions {
   argv: string[];
   env: Record<string, string | undefined>;
-  fileConfig: { port?: unknown } | null;
+  fileConfig: { port?: unknown; token?: unknown } | null;
 }
 
 function parsePort(value: unknown): number {
@@ -28,7 +33,7 @@ function parsePort(value: unknown): number {
   return port;
 }
 
-export function resolveBrokerConfig(options: ResolveOptions): BrokerConfig {
+export function resolveBrokerConfig(options: ResolveOptions): BrokerEndpointConfig {
   const index = options.argv.indexOf('--port');
   const raw = index >= 0
     ? options.argv[index + 1]
@@ -40,23 +45,41 @@ export function resolveBrokerConfig(options: ResolveOptions): BrokerConfig {
   };
 }
 
-export function loadBrokerConfig(
-  argv: string[],
-  env: Record<string, string | undefined>,
-  homeDir: string = os.homedir()
-): BrokerConfig {
+function loadFileConfig(homeDir: string): { port?: unknown; token?: unknown } | null {
   const configPath = path.join(homeDir, '.arc-tunnel', 'config.json');
-  let fileConfig: { port?: unknown } | null = null;
 
   try {
     const raw = fs.readFileSync(configPath, 'utf8');
-    fileConfig = JSON.parse(raw) as { port?: unknown };
+    return JSON.parse(raw) as { port?: unknown; token?: unknown };
   } catch (error) {
     const nodeError = error as NodeJS.ErrnoException;
     if (nodeError.code !== 'ENOENT') {
       throw new Error(`Invalid Arc Tunnel config: ${configPath}`);
     }
+    return null;
+  }
+}
+
+export function loadBrokerEndpointConfig(
+  argv: string[],
+  env: Record<string, string | undefined>,
+  homeDir: string = os.homedir()
+): BrokerEndpointConfig {
+  return resolveBrokerConfig({ argv, env, fileConfig: loadFileConfig(homeDir) });
+}
+
+export function loadBrokerConfig(
+  argv: string[],
+  env: Record<string, string | undefined>,
+  homeDir: string = os.homedir()
+): BrokerConfig {
+  const fileConfig = loadFileConfig(homeDir);
+  const endpoint = resolveBrokerConfig({ argv, env, fileConfig });
+  const token = env.ARC_TUNNEL_TOKEN ?? fileConfig?.token;
+
+  if (!isValidAuthToken(token)) {
+    throw new Error('Arc Tunnel authentication token is missing or invalid. Run node scripts/install.js to configure it.');
   }
 
-  return resolveBrokerConfig({ argv, env, fileConfig });
+  return { ...endpoint, token };
 }
