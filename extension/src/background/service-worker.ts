@@ -12,6 +12,13 @@ import { LightweightController } from './lightweight-controller';
 import { bindConsoleCaptureCleanup } from './lifecycle-cleanup';
 import { CommandMessage } from '../types';
 
+const STORAGE_KEYS = ['arc_tunnel_ws_url', 'authToken'] as const;
+
+interface StoredConnectionConfig {
+  wsUrl: string;
+  authToken: string;
+}
+
 // Initialize components
 const wsClient = new WebSocketClient();
 const tabManager = new TabManager();
@@ -24,7 +31,7 @@ const storageManager = new StorageManager();
 const lightweightController = new LightweightController();
 bindConsoleCaptureCleanup(tabManager, consoleCapture);
 let initializationComplete = false;
-let pendingWsUrl: string | null = null;
+let pendingConfig: StoredConnectionConfig | null = null;
 const commandHandler = new CommandHandler(
   tabManager,
   debuggerController,
@@ -37,28 +44,38 @@ const commandHandler = new CommandHandler(
 );
 
 // Load configuration from storage
-async function loadConfig(): Promise<string> {
+async function loadConfig(): Promise<StoredConnectionConfig> {
   try {
-    const result = await chrome.storage.local.get(['arc_tunnel_ws_url']);
+    const result = await chrome.storage.local.get([...STORAGE_KEYS]);
     const savedUrl = result.arc_tunnel_ws_url;
-    const resolvedUrl = resolveConfiguredWebSocketUrl(savedUrl);
-    if (typeof savedUrl === 'string' && savedUrl !== resolvedUrl) {
-      await chrome.storage.local.set({ arc_tunnel_ws_url: resolvedUrl });
+    const config = {
+      wsUrl: resolveConfiguredWebSocketUrl(savedUrl),
+      authToken: typeof result.authToken === 'string' ? result.authToken : ''
+    };
+    if (typeof savedUrl === 'string' && savedUrl !== config.wsUrl) {
+      await chrome.storage.local.set({
+        arc_tunnel_ws_url: config.wsUrl,
+        authToken: config.authToken
+      });
     }
-    return resolvedUrl;
+    return config;
   } catch {
-    return resolveConfiguredWebSocketUrl(undefined);
+    return {
+      wsUrl: resolveConfiguredWebSocketUrl(undefined),
+      authToken: ''
+    };
   }
 }
 
 // Connect to MCP server
 async function initialize() {
-  const loadedWsUrl = await loadConfig();
-  if (pendingWsUrl === null) pendingWsUrl = loadedWsUrl;
+  const loadedConfig = await loadConfig();
+  if (pendingConfig === null) pendingConfig = loadedConfig;
   await tabManager.syncExistingTabs();
 
   initializationComplete = true;
-  wsClient.setUrl(pendingWsUrl ?? loadedWsUrl);
+  const config = pendingConfig ?? loadedConfig;
+  wsClient.setConfig(config.wsUrl, config.authToken);
   await connectClient();
 }
 
@@ -75,14 +92,28 @@ async function connectClient(): Promise<void> {
 
 // Listen for configuration changes
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes.arc_tunnel_ws_url) {
-    const newUrl = resolveConfiguredWebSocketUrl(changes.arc_tunnel_ws_url.newValue);
-    console.log(`WebSocket URL changed to: ${newUrl}`);
-    pendingWsUrl = newUrl;
-    if (!initializationComplete) return;
-    wsClient.setUrl(newUrl);
-    void connectClient();
-  }
+  if (
+    area !== 'local' ||
+    (!changes.arc_tunnel_ws_url && !changes.authToken)
+  ) return;
+
+  const previousConfig = pendingConfig ?? {
+    wsUrl: resolveConfiguredWebSocketUrl(undefined),
+    authToken: ''
+  };
+  const nextConfig: StoredConnectionConfig = {
+    wsUrl: changes.arc_tunnel_ws_url
+      ? resolveConfiguredWebSocketUrl(changes.arc_tunnel_ws_url.newValue)
+      : previousConfig.wsUrl,
+    authToken: changes.authToken
+      ? (typeof changes.authToken.newValue === 'string' ? changes.authToken.newValue : '')
+      : previousConfig.authToken
+  };
+  pendingConfig = nextConfig;
+  if (!initializationComplete) return;
+
+  wsClient.setConfig(nextConfig.wsUrl, nextConfig.authToken);
+  void connectClient();
 });
 
 // Handle commands from MCP server
@@ -99,7 +130,10 @@ tabManager.onLifecycle((event, data) => {
 // Respond to popup status queries
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'get_status') {
-    sendResponse({ connected: wsClient.isConnected() });
+    sendResponse({
+      connected: wsClient.isConnected(),
+      state: wsClient.getConnectionState()
+    });
     return true; // Keep channel open for async response
   }
 });
@@ -113,8 +147,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
       wsClient.sendEvent({ type: 'event', event: 'heartbeat', data: {}, timestamp: Date.now() });
     }
   } else if (alarm.name === 'ws-reconnect') {
-    // SW was terminated during a reconnect delay — retry now
-    if (initializationComplete && !wsClient.isConnected()) {
+    // The service worker may have terminated during a reconnect delay.
+    if (
+      initializationComplete &&
+      !wsClient.isConnected() &&
+      wsClient.canReconnect()
+    ) {
       console.log('[alarm] SW wakeup — attempting reconnect');
       void connectClient();
     }
