@@ -2,13 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import vm from 'vm';
 import { BrokerServer } from '../src/broker/broker-server';
+import { testBrokerConfig } from './helpers/auth';
 
 describe('Chinese operations dashboard', () => {
   let broker: BrokerServer;
   let base: string;
 
   beforeEach(async () => {
-    broker = new BrokerServer({ host: '127.0.0.1', port: 0 });
+    broker = new BrokerServer(testBrokerConfig());
     await broker.start();
     base = `http://127.0.0.1:${broker.address().port}`;
   });

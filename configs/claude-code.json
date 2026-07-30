@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "arc-tunnel": {
-      "description": "Arc Tunnel client for the shared multi-agent Browser Broker",
+      "description": "Arc Tunnel client for the shared multi-agent Browser Broker; authentication is read from ~/.arc-tunnel/config.json",
       "command": "node",
       "args": ["{{REPO_PATH}}/mcp-server/dist/mcp-server.js"],
       "env": {

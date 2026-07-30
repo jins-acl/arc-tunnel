@@ -17,7 +17,11 @@ Broker. Use one window per Agent so each task has an independent MCP session.
 npm ci --prefix mcp-server
 npm ci --prefix extension
 npm run verify
+npm run audit:prod
 ```
+
+Arc Tunnel requires Node.js `>=22`. The production audit command checks both component
+lockfiles and fails on high or critical production findings.
 
 Use child `test`, typecheck, and `build` commands inside `mcp-server/` or
 `extension/` only for component-specific debugging.
@@ -32,8 +36,25 @@ Run `node scripts/install.js` or use the files in `configs/`. Do not change the 
 entry path: every Agent invokes `mcp-server/dist/mcp-server.js` with `WS_PORT`.
 
 Port precedence is CLI `--port` → `WS_PORT` → `~/.arc-tunnel/config.json` → `8765`.
-The persisted file uses `{ "port": 9000 }`. Every client and the extension popup must
-select the same custom port.
+The persisted file uses `{ "port": 8765, "token": "..." }`. Authentication has
+separate precedence: `ARC_TUNNEL_TOKEN` takes precedence over the file token, while the
+port precedence remains unchanged. Every client and the extension popup must select the
+same custom port.
+
+Run `node scripts/install.js` to generate a missing token or migrate a legacy port-only
+file. The installer preserves a valid existing token and prints a newly generated token
+once. That generated file token is the popup token only when `ARC_TUNNEL_TOKEN` is not
+set. Agent templates must not contain the token: the lightweight client reads the
+user-level config. Authentication has no credential command-line flag and never puts a
+token in a WebSocket URL, avoiding exposure through process listings, shell history,
+and URL logging.
+
+With no override, the newly generated file token is the active popup credential. With a
+valid `ARC_TUNNEL_TOKEN` override, the installer labels the generated file token as a
+fallback: use the effective environment token from its controlled source, or unset the
+override and restart the Broker and every Agent client before using the fallback. An
+empty or malformed environment override blocks startup instead of falling back; remove
+or replace it before startup. The installer never prints the environment override value.
 
 ## Broker lifecycle
 
@@ -52,6 +73,8 @@ test or manual validation.
 The read-only Operations Control Center is served at
 `http://127.0.0.1:<port>/dashboard`. It and the `diagnose` output expose only aggregate
 operational state and exclude URLs, IDs, cookies, scripts, parameters, and page content.
+The aggregate loopback `/health`, `/dashboard`, and `diagnose` interfaces remain
+unauthenticated; browser-control WebSocket capabilities require the token.
 
 ## Multi-Agent rules
 
@@ -61,6 +84,8 @@ operational state and exclude URLs, IDs, cookies, scripts, parameters, and page 
 - Disconnecting an Agent releases its claims.
 - All tabs use the same browser profile, so cookies and profile state are shared.
 - One window per Agent provides session identity, not cookie or security isolation.
+- Token authentication protects the local Broker capability boundary; it does not turn
+  tab ownership into cookie, account, or browser-profile isolation.
 
 ## Project structure
 
@@ -76,10 +101,30 @@ operational state and exclude URLs, IDs, cookies, scripts, parameters, and page 
 Load `extension/dist/` unpacked in Chrome/Edge Developer mode. The popup defaults to
 `ws://127.0.0.1:8765`; change it whenever the Broker uses a custom port. Using the
 explicit IPv4 loopback avoids `localhost` resolving to an unrelated IPv6 listener.
+The extension accepts only the `ws:` scheme with the literal host `127.0.0.1`, an
+explicit port from 1 through 65535, and path `/` or `/extension`. It rejects `wss:`,
+userinfo, queries, fragments, alternate IP spellings, non-loopback hosts, missing or
+out-of-range ports, and other paths before creating a socket. The three exact legacy
+`localhost` defaults—`ws://localhost:8765`, `ws://localhost:8765/`, and
+`ws://localhost:8765/extension`—are migration-only inputs. The extension never sends
+the authentication token to an off-loopback destination.
+
+When a valid `ARC_TUNNEL_TOKEN` is set, the extension must use that same effective
+token, obtained from the controlled source that set the environment; the persisted file
+token does not override it. Alternatively, unset the environment override, restart the
+Broker and every Agent client, then use the token from `~/.arc-tunnel/config.json`.
+Paste the effective token into the popup password field and Save. If the popup shows
+`Authentication failed` (`auth_failed`), save the correct effective token and confirm
+the state returns to `Connected`; the extension does not retry the same rejected
+credential. Never use a command that prints the token.
 
 Root extension URLs are normalized to `/extension`. The legacy `/` path is accepted only
 with a `chrome-extension://` Origin. The Broker rejects ordinary `http://` and `https://`
 WebSocket Origins, binds only `127.0.0.1`, and has no LAN exposure.
+
+The static token rejects local clients that do not possess it, but it is not a same-user
+sandbox. Hostile same-OS-user processes that can read the user config or impersonate the
+selected local port are outside this static-token boundary.
 
 ## Browser control and debugger lifecycle
 
@@ -101,6 +146,24 @@ disconnected, ensure all client `WS_PORT` values and the popup port match, reloa
 current `extension/dist/`, and rebuild all bundles together on protocol mismatch. Never
 stop an unknown process occupying a selected port.
 
+For migration, pull and build the source, run `node scripts/install.js`, and determine
+the effective source (a valid `ARC_TUNNEL_TOKEN` from its controlled source when
+present, otherwise the persisted token only when the override is absent). An empty or
+malformed override blocks startup and must be removed or replaced rather than silently
+falling back. After resolving the source, reload `extension/dist/`, paste and Save the
+same effective token, then confirm `Connected` and run
+`node scripts/start.js diagnose --json`. An installer-displayed token is effective only
+when there is no environment override.
+
+Real-browser authentication recovery must prove that a valid-format but incorrect popup
+token reaches `Authentication failed` (`auth_failed`) without a reconnect loop, then
+that saving the correct effective token reaches `Connected`. If a valid environment
+override remains set, recovery must use that environment token; an empty or malformed
+override must first be removed or replaced. The persisted token becomes effective only
+after unsetting the override and restarting the Broker and every Agent client. The
+tracked MCP-client verifiers inherit environment and file authentication without
+printing credentials.
+
 For the repeatable frozen-page D/F/C check, run:
 
 ```bash
@@ -110,3 +173,12 @@ node scripts/verify-browser-resilience.js [--port 8765]
 The verifier uses one loopback HTTP server, one lightweight MCP client, and one owned
 tab. Its `finally` cleanup closes only that tab, client, and HTTP server, including after
 failure. It never stops the shared Broker or closes pre-existing browser tabs.
+
+For multi-Agent ownership and JPEG screenshot isolation, run:
+
+```bash
+node scripts/verify-multi-agent.js [--port 8765] [--manual-tab N]
+```
+
+Each Agent must receive non-empty JPEG image content from its owned tab, while a foreign
+screenshot returns `TAB_NOT_OWNED`. Verifier logs must never include image base64.

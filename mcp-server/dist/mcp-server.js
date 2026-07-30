@@ -796,6 +796,10 @@ var require_receiver = __commonJS({
        *     extensions
        * @param {Boolean} [options.isServer=false] Specifies whether to operate in
        *     client or server mode
+       * @param {Number} [options.maxBufferedChunks=0] The maximum number of
+       *     buffered data chunks
+       * @param {Number} [options.maxFragments=0] The maximum number of message
+       *     fragments
        * @param {Number} [options.maxPayload=0] The maximum allowed message length
        * @param {Boolean} [options.skipUTF8Validation=false] Specifies whether or
        *     not to skip UTF-8 validation for text and close messages
@@ -806,6 +810,8 @@ var require_receiver = __commonJS({
         this._binaryType = options.binaryType || BINARY_TYPES[0];
         this._extensions = options.extensions || {};
         this._isServer = !!options.isServer;
+        this._maxBufferedChunks = options.maxBufferedChunks | 0;
+        this._maxFragments = options.maxFragments | 0;
         this._maxPayload = options.maxPayload | 0;
         this._skipUTF8Validation = !!options.skipUTF8Validation;
         this[kWebSocket] = void 0;
@@ -820,6 +826,7 @@ var require_receiver = __commonJS({
         this._opcode = 0;
         this._totalPayloadLength = 0;
         this._messageLength = 0;
+        this._numFragments = 0;
         this._fragments = [];
         this._errored = false;
         this._loop = false;
@@ -835,6 +842,18 @@ var require_receiver = __commonJS({
        */
       _write(chunk, encoding, cb) {
         if (this._opcode === 8 && this._state == GET_INFO) return cb();
+        if (this._maxBufferedChunks > 0 && this._buffers.length >= this._maxBufferedChunks) {
+          cb(
+            this.createError(
+              RangeError,
+              "Too many buffered chunks",
+              false,
+              1008,
+              "WS_ERR_TOO_MANY_BUFFERED_PARTS"
+            )
+          );
+          return;
+        }
         this._bufferedBytes += chunk.length;
         this._buffers.push(chunk);
         this.startLoop(cb);
@@ -1158,6 +1177,17 @@ var require_receiver = __commonJS({
           this.controlMessage(data, cb);
           return;
         }
+        if (this._maxFragments > 0 && ++this._numFragments > this._maxFragments) {
+          const error2 = this.createError(
+            RangeError,
+            "Too many message fragments",
+            false,
+            1008,
+            "WS_ERR_TOO_MANY_BUFFERED_PARTS"
+          );
+          cb(error2);
+          return;
+        }
         if (this._compressed) {
           this._state = INFLATING;
           this.decompress(data, cb);
@@ -1215,6 +1245,7 @@ var require_receiver = __commonJS({
         this._totalPayloadLength = 0;
         this._messageLength = 0;
         this._fragmented = 0;
+        this._numFragments = 0;
         this._fragments = [];
         if (this._opcode === 2) {
           let data;
@@ -2399,6 +2430,10 @@ var require_websocket = __commonJS({
        *     multiple times in the same tick
        * @param {Function} [options.generateMask] The function used to generate the
        *     masking key
+       * @param {Number} [options.maxBufferedChunks=0] The maximum number of
+       *     buffered data chunks
+       * @param {Number} [options.maxFragments=0] The maximum number of message
+       *     fragments
        * @param {Number} [options.maxPayload=0] The maximum allowed message size
        * @param {Boolean} [options.skipUTF8Validation=false] Specifies whether or
        *     not to skip UTF-8 validation for text and close messages
@@ -2410,6 +2445,8 @@ var require_websocket = __commonJS({
           binaryType: this.binaryType,
           extensions: this._extensions,
           isServer: this._isServer,
+          maxBufferedChunks: options.maxBufferedChunks,
+          maxFragments: options.maxFragments,
           maxPayload: options.maxPayload,
           skipUTF8Validation: options.skipUTF8Validation
         });
@@ -2709,6 +2746,8 @@ var require_websocket = __commonJS({
         autoPong: true,
         closeTimeout: CLOSE_TIMEOUT,
         protocolVersion: protocolVersions[1],
+        maxBufferedChunks: 256 * 1024,
+        maxFragments: 16 * 1024,
         maxPayload: 100 * 1024 * 1024,
         skipUTF8Validation: false,
         perMessageDeflate: true,
@@ -2951,6 +2990,8 @@ var require_websocket = __commonJS({
         websocket.setSocket(socket, head, {
           allowSynchronousEvents: opts.allowSynchronousEvents,
           generateMask: opts.generateMask,
+          maxBufferedChunks: opts.maxBufferedChunks,
+          maxFragments: opts.maxFragments,
           maxPayload: opts.maxPayload,
           skipUTF8Validation: opts.skipUTF8Validation
         });
@@ -3293,6 +3334,10 @@ var require_websocket_server = __commonJS({
        *     called
        * @param {Function} [options.handleProtocols] A hook to handle protocols
        * @param {String} [options.host] The hostname where to bind the server
+       * @param {Number} [options.maxBufferedChunks=262144] The maximum number of
+       *     buffered data chunks
+       * @param {Number} [options.maxFragments=16384] The maximum number of message
+       *     fragments
        * @param {Number} [options.maxPayload=104857600] The maximum allowed message
        *     size
        * @param {Boolean} [options.noServer=false] Enable no server mode
@@ -3314,6 +3359,8 @@ var require_websocket_server = __commonJS({
         options = {
           allowSynchronousEvents: true,
           autoPong: true,
+          maxBufferedChunks: 256 * 1024,
+          maxFragments: 16 * 1024,
           maxPayload: 100 * 1024 * 1024,
           skipUTF8Validation: false,
           perMessageDeflate: false,
@@ -3593,6 +3640,8 @@ var require_websocket_server = __commonJS({
         socket.removeListener("error", socketOnError);
         ws.setSocket(socket, head, {
           allowSynchronousEvents: this.options.allowSynchronousEvents,
+          maxBufferedChunks: this.options.maxBufferedChunks,
+          maxFragments: this.options.maxFragments,
           maxPayload: this.options.maxPayload,
           skipUTF8Validation: this.options.skipUTF8Validation
         });
@@ -7386,6 +7435,7 @@ var require_fast_uri = __commonJS({
       return uriTokens.join("");
     }
     var URI_PARSE = /^(?:([^#/:?]+):)?(?:\/\/((?:([^#/?@]*)@)?(\[[^#/?\]]+\]|[^#/:?]*)(?::(\d*))?))?([^#?]*)(?:\?([^#]*))?(?:#((?:.|[\n\r])*))?/u;
+    var AUTHORITY_PREFIX = /^(?:[^#/:?]+:)?\/\/([^/?#]*)/;
     function getParseError(parsed, matches) {
       if (matches[2] !== void 0 && parsed.path && parsed.path[0] !== "/") {
         return 'URI path must start with "/" when authority is present.';
@@ -7414,6 +7464,11 @@ var require_fast_uri = __commonJS({
         } else {
           uri = "//" + uri;
         }
+      }
+      const authorityMatch = uri.match(AUTHORITY_PREFIX);
+      if (authorityMatch !== null && authorityMatch[1].indexOf("\\") !== -1) {
+        parsed.error = "URI authority must not contain a literal backslash.";
+        malformedAuthorityOrPort = true;
       }
       const matches = uri.match(URI_PARSE);
       if (matches) {
@@ -7458,7 +7513,7 @@ var require_fast_uri = __commonJS({
         if (!options.unicodeSupport && (!schemeHandler || !schemeHandler.unicodeSupport)) {
           if (parsed.host && (options.domainHost || schemeHandler && schemeHandler.domainHost) && isIP === false && nonSimpleDomain(parsed.host)) {
             try {
-              parsed.host = URL.domainToASCII(parsed.host.toLowerCase());
+              parsed.host = new URL("http://" + parsed.host).hostname;
             } catch (e) {
               parsed.error = parsed.error || "Host's domain name can not be converted to ASCII: " + e;
             }
@@ -10596,6 +10651,7 @@ var BrokerClient = class _BrokerClient {
         type: "hello",
         role: "agent",
         protocolVersion: PROTOCOL_VERSION,
+        token: config2.token,
         clientName: "arc-tunnel-mcp"
       }));
       const onMessage = (data) => {
@@ -10617,7 +10673,13 @@ var BrokerClient = class _BrokerClient {
       const onError = () => {
         if (!settled) fail(new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, "Unable to connect to Broker"));
       };
-      const onClose = () => fail(new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, "Broker closed during handshake"));
+      const onClose = (code, reason) => {
+        if (code === 1008 && reason.toString() === "AUTH_FAILED" /* AUTH_FAILED */) {
+          fail(new ArcTunnelError("AUTH_FAILED" /* AUTH_FAILED */, "Broker authentication failed"));
+          return;
+        }
+        fail(new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, "Broker closed during handshake"));
+      };
       const timer = setTimeout(() => fail(new ArcTunnelError("CONNECTION_LOST" /* CONNECTION_LOST */, "Broker handshake timed out")), 5e3);
       ws.once("open", onOpen);
       ws.once("message", onMessage);
@@ -10844,10 +10906,11 @@ function createBrokerLauncher(options = {}) {
         ownedLockRaw = JSON.stringify({ pid: process.pid, port: config2.port, protocolVersion: PROTOCOL_VERSION });
         import_fs.default.writeFileSync(fd, ownedLockRaw);
         import_fs.default.closeSync(fd);
-        child = spawnProcess(process.execPath, [brokerEntry, ...brokerArgs(config2)], {
+        child = spawnProcess(process.execPath, [brokerEntry, ...brokerArgs({ host: config2.host, port: config2.port })], {
           detached: true,
           stdio: "ignore",
-          windowsHide: true
+          windowsHide: true,
+          env: { ...process.env, ARC_TUNNEL_TOKEN: config2.token }
         });
         child.unref();
         if (typeof child.pid !== "number") throw new Error("Broker process did not provide a pid");
@@ -11047,6 +11110,14 @@ var inspectBroker = defaultLauncher.inspectBroker;
 var import_fs2 = __toESM(require("fs"));
 var import_os2 = __toESM(require("os"));
 var import_path2 = __toESM(require("path"));
+
+// src/auth-token.ts
+var AUTH_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+function isValidAuthToken(value) {
+  return typeof value === "string" && AUTH_TOKEN_PATTERN.test(value) && Buffer.from(value, "base64url").toString("base64url") === value;
+}
+
+// src/config.ts
 function parsePort(value) {
   const text = String(value);
   if (!/^\d+$/.test(text)) {
@@ -11066,19 +11137,27 @@ function resolveBrokerConfig(options) {
     port: parsePort(raw)
   };
 }
-function loadBrokerConfig(argv, env, homeDir = import_os2.default.homedir()) {
+function loadFileConfig(homeDir) {
   const configPath = import_path2.default.join(homeDir, ".arc-tunnel", "config.json");
-  let fileConfig = null;
   try {
     const raw = import_fs2.default.readFileSync(configPath, "utf8");
-    fileConfig = JSON.parse(raw);
+    return JSON.parse(raw);
   } catch (error2) {
     const nodeError = error2;
     if (nodeError.code !== "ENOENT") {
       throw new Error(`Invalid Arc Tunnel config: ${configPath}`);
     }
+    return null;
   }
-  return resolveBrokerConfig({ argv, env, fileConfig });
+}
+function loadBrokerConfig(argv, env, homeDir = import_os2.default.homedir()) {
+  const fileConfig = loadFileConfig(homeDir);
+  const endpoint = resolveBrokerConfig({ argv, env, fileConfig });
+  const token = env.ARC_TUNNEL_TOKEN ?? fileConfig?.token;
+  if (!isValidAuthToken(token)) {
+    throw new Error("Arc Tunnel authentication token is missing or invalid. Run node scripts/install.js to configure it.");
+  }
+  return { ...endpoint, token };
 }
 
 // node_modules/zod/v4/core/core.js
@@ -19235,16 +19314,7 @@ var Server = class extends Protocol {
     if (!methodSchema) {
       throw new Error("Schema is missing a method literal");
     }
-    let methodValue;
-    if (isZ4Schema(methodSchema)) {
-      const v4Schema = methodSchema;
-      const v4Def = v4Schema._zod?.def;
-      methodValue = v4Def?.value ?? v4Schema.value;
-    } else {
-      const v3Schema = methodSchema;
-      const legacyDef = v3Schema._def;
-      methodValue = legacyDef?.value ?? v3Schema.value;
-    }
+    const methodValue = getLiteralValue(methodSchema);
     if (typeof methodValue !== "string") {
       throw new Error("Schema method literal must be a string");
     }
@@ -19553,8 +19623,17 @@ var Server = class extends Protocol {
 var import_node_process = __toESM(require("node:process"), 1);
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/shared/stdio.js
+var STDIO_DEFAULT_MAX_BUFFER_SIZE = 10 * 1024 * 1024;
 var ReadBuffer = class {
+  constructor(options) {
+    this._maxBufferSize = options?.maxBufferSize ?? STDIO_DEFAULT_MAX_BUFFER_SIZE;
+  }
   append(chunk) {
+    const newSize = (this._buffer?.length ?? 0) + chunk.length;
+    if (newSize > this._maxBufferSize) {
+      this.clear();
+      throw new Error(`ReadBuffer exceeded maximum size of ${this._maxBufferSize} bytes`);
+    }
     this._buffer = this._buffer ? Buffer.concat([this._buffer, chunk]) : chunk;
   }
   readMessage() {
@@ -19582,18 +19661,24 @@ function serializeMessage(message) {
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
 var StdioServerTransport = class {
-  constructor(_stdin = import_node_process.default.stdin, _stdout = import_node_process.default.stdout) {
+  constructor(_stdin = import_node_process.default.stdin, _stdout = import_node_process.default.stdout, options) {
     this._stdin = _stdin;
     this._stdout = _stdout;
-    this._readBuffer = new ReadBuffer();
     this._started = false;
     this._ondata = (chunk) => {
-      this._readBuffer.append(chunk);
-      this.processReadBuffer();
+      try {
+        this._readBuffer.append(chunk);
+        this.processReadBuffer();
+      } catch (error2) {
+        this.onerror?.(error2);
+        this.close().catch(() => {
+        });
+      }
     };
     this._onerror = (error2) => {
       this.onerror?.(error2);
     };
+    this._readBuffer = new ReadBuffer({ maxBufferSize: options?.maxBufferSize });
   }
   /**
    * Starts listening for messages on stdin.

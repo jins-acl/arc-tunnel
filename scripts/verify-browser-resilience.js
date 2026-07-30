@@ -35,6 +35,22 @@ function closeHttpServer(server, sockets = new Set()) {
   });
 }
 
+async function cleanupVerifierResources({ tabId, client, transport, server, serverSockets, call }, cleanupErrors) {
+  if (tabId !== undefined && client) {
+    try {
+      const closed = (await call('close_tab', { tabId })).value;
+      if (closed?.status !== 'closed') throw new Error(`Unexpected cleanup close_tab result: ${JSON.stringify(closed)}`);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (client) await client.close().catch(error => cleanupErrors.push(error));
+  if (transport) await transport.close().catch(error => cleanupErrors.push(error));
+  if (server) {
+    await closeHttpServer(server, serverSockets).catch(error => cleanupErrors.push(error));
+  }
+}
+
 async function main() {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error(`Invalid port: ${port}`);
@@ -164,19 +180,7 @@ async function main() {
   } catch (error) {
     failure = error;
   } finally {
-    if (tabId !== undefined && client) {
-      try {
-        const closed = (await call('close_tab', { tabId })).value;
-        if (closed?.status !== 'closed') throw new Error(`Unexpected cleanup close_tab result: ${JSON.stringify(closed)}`);
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
-    }
-    if (client) await client.close().catch(error => cleanupErrors.push(error));
-    if (transport) await transport.close().catch(error => cleanupErrors.push(error));
-    if (server) {
-      await closeHttpServer(server, serverSockets).catch(error => cleanupErrors.push(error));
-    }
+    await cleanupVerifierResources({ tabId, client, transport, server, serverSockets, call }, cleanupErrors);
   }
 
   if (failure && cleanupErrors.length) {
@@ -189,7 +193,7 @@ async function main() {
   if (cleanupErrors.length) throw Object.assign(new Error('Cleanup failed'), { cleanupErrors });
 }
 
-module.exports = { assertFailFastTiming, closeHttpServer, parseToolResult };
+module.exports = { assertFailFastTiming, cleanupVerifierResources, closeHttpServer, parseToolResult };
 
 if (require.main === module) {
   main().catch(error => {

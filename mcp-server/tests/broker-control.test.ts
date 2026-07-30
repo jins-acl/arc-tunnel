@@ -1,4 +1,8 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { runControl } from '../src/broker-control';
+import { testBrokerConfig } from './helpers/auth';
 
 const diagnostics = {
   broker: { pid: 42, port: 19090, protocolVersion: 2, uptimeMs: 1234 },
@@ -65,7 +69,58 @@ describe('broker control diagnose', () => {
   it('keeps status JSON byte-compatible', async () => {
     const capture = output();
     const status = { running: true, port: 19090, protocolVersion: 2, pid: 42 };
-    await runControl(['status', '--port', '19090'], {}, capture.write, { getBrokerStatus: async () => status });
+    let receivedConfig: unknown;
+    await runControl(['status', '--port', '19090'], {}, capture.write, {
+      getBrokerStatus: async (config) => { receivedConfig = config; return status; }
+    });
     expect(capture.read().stdout).toBe(`${JSON.stringify(status)}\n`);
+    expect(receivedConfig).toEqual({ host: '127.0.0.1', port: 19090 });
+  });
+
+  it('stops with endpoint-only configuration when no token is available', async () => {
+    const capture = output();
+    let receivedConfig: unknown;
+    await runControl(['stop', '--port', '19090'], {}, capture.write, {
+      stopBroker: async (config) => { receivedConfig = config; }
+    });
+
+    expect(receivedConfig).toEqual({ host: '127.0.0.1', port: 19090 });
+    expect(capture.read().stdout).toBe('{"running":false,"port":19090}\n');
+  });
+
+  it('rejects start without a token and gives the installer instruction', async () => {
+    const capture = output();
+    const configuredHome = fs.mkdtempSync(path.join(os.tmpdir(), 'arc-control-configured-'));
+    const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'arc-control-empty-'));
+    fs.mkdirSync(path.join(configuredHome, '.arc-tunnel'), { recursive: true });
+    fs.writeFileSync(
+      path.join(configuredHome, '.arc-tunnel', 'config.json'),
+      JSON.stringify({ token: testBrokerConfig().token })
+    );
+    const homedir = jest.spyOn(os, 'homedir').mockReturnValue(configuredHome);
+
+    try {
+      await expect(runControl(['start'], {}, capture.write, {
+        homeDir: emptyHome,
+        ensureBroker: async () => undefined,
+        getBrokerStatus: async () => ({ running: false, port: 8765 })
+      }))
+        .rejects.toThrow('node scripts/install.js');
+    } finally {
+      homedir.mockRestore();
+      fs.rmSync(configuredHome, { recursive: true, force: true });
+      fs.rmSync(emptyHome, { recursive: true, force: true });
+    }
+  });
+
+  it('starts with a configured token', async () => {
+    const capture = output();
+    let receivedConfig: unknown;
+    await runControl(['start', '--port', '19090'], { ARC_TUNNEL_TOKEN: testBrokerConfig().token }, capture.write, {
+      ensureBroker: async (config) => { receivedConfig = config; },
+      getBrokerStatus: async () => ({ running: true, port: 19090 })
+    });
+
+    expect(receivedConfig).toEqual(testBrokerConfig(19090));
   });
 });

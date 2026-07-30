@@ -19,9 +19,14 @@ function loadClientModule() {
 
 const {
   WebSocketClient,
+  isValidAuthToken,
   normalizeWebSocketUrl,
   resolveConfiguredWebSocketUrl
 } = loadClientModule();
+
+const TEST_AUTH_TOKEN = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const OTHER_AUTH_TOKEN = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA';
+const NONCANONICAL_AUTH_TOKEN = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB';
 
 class FakeWebSocket {
   static CONNECTING = 0;
@@ -57,9 +62,9 @@ class FakeWebSocket {
     this.readyState = FakeWebSocket.CLOSED;
   }
 
-  emitClose() {
+  emitClose(code = 1006, reason = '') {
     this.readyState = FakeWebSocket.CLOSED;
-    this.onclose?.();
+    this.onclose?.({ code, reason });
   }
 }
 
@@ -151,23 +156,59 @@ function latestSocket() {
   return FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
 }
 
-test('root URLs normalize to the extension endpoint while explicit paths are preserved', () => {
-  assert.equal(normalizeWebSocketUrl('ws://localhost:8765'), 'ws://localhost:8765/extension');
-  assert.equal(normalizeWebSocketUrl('ws://localhost:8765/custom'), 'ws://localhost:8765/custom');
+test('explicit IPv4 loopback root and extension URLs normalize to one safe endpoint', () => {
+  for (const [value, expected] of [
+    ['ws://127.0.0.1:1', 'ws://127.0.0.1:1/extension'],
+    ['ws://127.0.0.1:80', 'ws://127.0.0.1:80/extension'],
+    ['ws://127.0.0.1:8765/', 'ws://127.0.0.1:8765/extension'],
+    ['ws://127.0.0.1:65535/extension', 'ws://127.0.0.1:65535/extension']
+  ]) {
+    assert.equal(normalizeWebSocketUrl(value), expected);
+  }
 });
 
-test('legacy localhost default migrates without changing custom URLs', () => {
+test('only the supported legacy localhost defaults migrate before validation', () => {
   assert.equal(typeof resolveConfiguredWebSocketUrl, 'function');
   assert.equal(resolveConfiguredWebSocketUrl(undefined), 'ws://127.0.0.1:8765');
   assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:8765'), 'ws://127.0.0.1:8765');
   assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:8765/'), 'ws://127.0.0.1:8765');
   assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:8765/extension'), 'ws://127.0.0.1:8765/extension');
-  assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:9000'), 'ws://localhost:9000');
-  assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:8765/custom'), 'ws://localhost:8765/custom');
-  assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:8765?profile=x'), 'ws://localhost:8765?profile=x');
-  assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:8765/#fragment'), 'ws://localhost:8765/#fragment');
-  assert.equal(resolveConfiguredWebSocketUrl('ws://localhost:8765/extension?x=1'), 'ws://localhost:8765/extension?x=1');
-  assert.equal(resolveConfiguredWebSocketUrl('ws://example.test:8765/custom'), 'ws://example.test:8765/custom');
+  assert.equal(
+    normalizeWebSocketUrl(resolveConfiguredWebSocketUrl('ws://localhost:8765')),
+    'ws://127.0.0.1:8765/extension'
+  );
+});
+
+test('browser-safe URL validation rejects every non-loopback or ambiguous endpoint', () => {
+  for (const value of [
+    'ws://localhost:9000',
+    'ws://127.0.0.1',
+    'ws://127.0.0.1:0',
+    'ws://127.0.0.1:65536',
+    'ws://127.0.0.1:not-a-port',
+    'wss://127.0.0.1:8765',
+    'ws://example.test:8765',
+    'ws://127.0.0.2:8765',
+    'ws://127.1:8765',
+    'ws://2130706433:8765',
+    'ws://0x7f000001:8765',
+    'ws://0177.0.0.1:8765',
+    'ws://[::1]:8765',
+    'ws://user:password@127.0.0.1:8765',
+    'ws://127.0.0.1:8765/custom',
+    'ws://127.0.0.1:8765?profile=x',
+    'ws://127.0.0.1:8765/#fragment',
+    'ws://127.0.0.1:8765/extension?x=1',
+    'not a URL',
+    null,
+    42
+  ]) {
+    assert.equal(
+      normalizeWebSocketUrl(resolveConfiguredWebSocketUrl(value)),
+      null,
+      value
+    );
+  }
 });
 
 environmentTest('default client connects to the IPv4 loopback endpoint', async () => {
@@ -232,14 +273,39 @@ environmentTest('commands are ignored until a valid welcome completes the handsh
 });
 
 environmentTest('valid v2 welcome resolves and sends the extension hello', async () => {
-  const client = new WebSocketClient();
+  const client = new WebSocketClient(undefined, TEST_AUTH_TOKEN);
   const connection = client.connect();
   const socket = latestSocket();
   socket.open();
-  assert.deepEqual(socket.sent, [{ type: 'hello', role: 'extension', protocolVersion: 2 }]);
+  assert.deepEqual(socket.sent, [{
+    type: 'hello',
+    role: 'extension',
+    protocolVersion: 2,
+    token: TEST_AUTH_TOKEN
+  }]);
   socket.message({ type: 'welcome', protocolVersion: 2 });
   await connection;
   assert.equal(client.isConnected(), true);
+});
+
+environmentTest('connect remains pending and heartbeat-free until a valid welcome', async (env) => {
+  const client = new WebSocketClient(undefined, TEST_AUTH_TOKEN);
+  let settled = false;
+  const connection = client.connect().finally(() => {
+    settled = true;
+  });
+  const socket = latestSocket();
+  socket.open();
+  await Promise.resolve();
+
+  assert.equal(settled, false);
+  assert.equal(env.intervals.length, 0);
+  assert.equal(client.getConnectionState(), 'connecting');
+
+  socket.message({ type: 'welcome', protocolVersion: 2 });
+  await connection;
+  assert.equal(settled, true);
+  assert.equal(client.getConnectionState(), 'connected');
 });
 
 environmentTest('valid welcome starts a 10-second heartbeat interval and sends heartbeat events', async (env) => {
@@ -387,7 +453,7 @@ environmentTest('setUrl invalidates the old generation and one connect creates o
   const oldConnection = client.connect().then(null, error => error);
   const oldSocket = latestSocket();
 
-  client.setUrl('ws://localhost:9999');
+  client.setUrl('ws://127.0.0.1:9999');
   const replacement = client.connect();
   assert.equal(FakeWebSocket.instances.length, 2);
   assert.match((await oldConnection).message, /superseded/i);
@@ -397,7 +463,7 @@ environmentTest('setUrl invalidates the old generation and one connect creates o
   newSocket.open();
   newSocket.message({ type: 'welcome', protocolVersion: 2 });
   await replacement;
-  assert.equal(newSocket.url, 'ws://localhost:9999/extension');
+  assert.equal(newSocket.url, 'ws://127.0.0.1:9999/extension');
 });
 
 environmentTest('setUrl clears heartbeat and makes its stale callback inert', async (env) => {
@@ -409,7 +475,7 @@ environmentTest('setUrl clears heartbeat and makes its stale callback inert', as
   await connection;
   const heartbeat = env.intervals[0];
 
-  client.setUrl('ws://localhost:9999');
+  client.setUrl('ws://127.0.0.1:9999');
   const sentBeforeStaleCallback = socket.sent.length;
   heartbeat.callback();
 
@@ -421,7 +487,7 @@ environmentTest('stale old-socket callbacks do nothing', async (env) => {
   const client = new WebSocketClient();
   const oldConnection = client.connect().catch(() => undefined);
   const oldSocket = latestSocket();
-  client.setUrl('ws://localhost:9999');
+  client.setUrl('ws://127.0.0.1:9999');
   await oldConnection;
   const replacement = client.connect();
   const newSocket = latestSocket();
@@ -568,4 +634,280 @@ environmentTest('switches to a persistent low-frequency retry after fast retries
   assert.deepEqual(env.alarms.created.at(-1), {
     name: 'ws-reconnect', options: { delayInMinutes: 1 }
   });
+});
+
+test('browser-safe token validation rejects noncanonical base64url aliases', () => {
+  assert.equal(typeof isValidAuthToken, 'function');
+  assert.equal(isValidAuthToken(TEST_AUTH_TOKEN), true);
+  assert.equal(isValidAuthToken(OTHER_AUTH_TOKEN), true);
+  assert.equal(isValidAuthToken(NONCANONICAL_AUTH_TOKEN), false);
+  assert.equal(isValidAuthToken('short'), false);
+  assert.equal(isValidAuthToken(null), false);
+});
+
+environmentTest('authentication failure is stable and rejects without exposing the token', async (env) => {
+  const client = new WebSocketClient(undefined, TEST_AUTH_TOKEN);
+  assert.equal(typeof client.getConnectionState, 'function');
+  assert.equal(typeof client.canReconnect, 'function');
+
+  const connection = client.connect().then(
+    () => ({ resolved: true }),
+    error => ({ error })
+  );
+  const socket = latestSocket();
+  socket.open();
+  socket.emitClose(1008, 'AUTH_FAILED');
+  const outcome = await connection;
+
+  assert.equal(outcome.resolved, undefined);
+  assert.match(outcome.error.message, /authentication failed/i);
+  assert.equal(outcome.error.message.includes(TEST_AUTH_TOKEN), false);
+  assert.equal(client.getConnectionState(), 'auth_failed');
+  assert.equal(client.isConnected(), false);
+  assert.equal(client.canReconnect(), false);
+  assert.equal(env.timers.filter(timer => !timer.cleared).length, 0);
+  assert.equal(env.intervals.filter(interval => !interval.cleared).length, 0);
+  assert.ok(env.alarms.cleared.includes('ws-reconnect'));
+});
+
+environmentTest('a restored matching rejection suppresses the first socket after cold start', async () => {
+  const client = new WebSocketClient(undefined, TEST_AUTH_TOKEN);
+  assert.equal(typeof client.restoreRejectedToken, 'function');
+
+  client.restoreRejectedToken(TEST_AUTH_TOKEN);
+  const error = await client.connect().catch(value => value);
+
+  assert.equal(client.getConnectionState(), 'auth_failed');
+  assert.equal(client.canReconnect(), false);
+  assert.match(error.message, /authentication failed/i);
+  assert.equal(error.message.includes(TEST_AUTH_TOKEN), false);
+  assert.equal(FakeWebSocket.instances.length, 0);
+});
+
+environmentTest('authentication failure notifies persistence before the connection rejects', async () => {
+  const notifications = [];
+  const client = new WebSocketClient(undefined, TEST_AUTH_TOKEN);
+  assert.equal(typeof client.setAuthFailureHandler, 'function');
+  client.setAuthFailureHandler(token => notifications.push(token));
+
+  const connection = client.connect().catch(error => error);
+  const socket = latestSocket();
+  socket.open();
+  socket.emitClose(1008, 'AUTH_FAILED');
+  const error = await connection;
+
+  assert.deepEqual(notifications, [TEST_AUTH_TOKEN]);
+  assert.match(error.message, /authentication failed/i);
+});
+
+environmentTest('authentication failure after welcome clears the active heartbeat', async (env) => {
+  const client = new WebSocketClient(undefined, TEST_AUTH_TOKEN);
+  const connection = client.connect();
+  const socket = latestSocket();
+  socket.open();
+  socket.message({ type: 'welcome', protocolVersion: 2 });
+  await connection;
+  const heartbeat = env.intervals[0];
+  assert.ok(heartbeat);
+
+  socket.emitClose(1008, 'AUTH_FAILED');
+
+  assert.equal(heartbeat.cleared, true);
+  assert.equal(client.getConnectionState(), 'auth_failed');
+  assert.equal(env.timers.filter(timer => !timer.cleared).length, 0);
+});
+
+environmentTest('same-token authentication failure suppresses timer, persistent, suspend, alarm, and direct retries', async (env) => {
+  const client = new WebSocketClient(undefined, TEST_AUTH_TOKEN);
+  assert.equal(typeof client.canReconnect, 'function');
+
+  const connection = client.connect().catch(error => error);
+  const socket = latestSocket();
+  socket.open();
+  socket.emitClose(1008, 'AUTH_FAILED');
+  await connection;
+  const socketCount = FakeWebSocket.instances.length;
+
+  client.handleReconnect(client.connectionGeneration);
+  client.reconnectAttempts = client.maxReconnectAttempts;
+  client.handleReconnect(client.connectionGeneration);
+  client.prepareForSuspend();
+  assert.equal(client.canReconnect(), false);
+  const directAttempt = client.connect().catch(error => error);
+  const directError = await directAttempt;
+
+  assert.match(directError.message, /authentication failed/i);
+  assert.equal(directError.message.includes(TEST_AUTH_TOKEN), false);
+  assert.equal(FakeWebSocket.instances.length, socketCount);
+  assert.equal(env.timers.filter(timer => !timer.cleared).length, 0);
+  assert.equal(env.alarms.created.length, 0);
+});
+
+environmentTest('authentication failure clears an already scheduled reconnect callback', async (env) => {
+  const client = new WebSocketClient(undefined, TEST_AUTH_TOKEN);
+  const firstConnection = client.connect();
+  const firstSocket = latestSocket();
+  firstSocket.open();
+  firstSocket.message({ type: 'welcome', protocolVersion: 2 });
+  await firstConnection;
+  firstSocket.emitClose();
+  const staleTimer = env.timers.find(timer => !timer.cleared);
+  assert.ok(staleTimer);
+
+  const reconnect = client.connect().catch(error => error);
+  const rejectedSocket = latestSocket();
+  rejectedSocket.open();
+  rejectedSocket.emitClose(1008, 'AUTH_FAILED');
+  await reconnect;
+  env.runTimer(staleTimer);
+
+  assert.equal(staleTimer.cleared, true);
+  assert.equal(FakeWebSocket.instances.length, 2);
+  assert.equal(env.timers.filter(timer => !timer.cleared).length, 0);
+});
+
+environmentTest('changing only the URL keeps the rejected token suppressed', async () => {
+  const client = new WebSocketClient(undefined, TEST_AUTH_TOKEN);
+  assert.equal(typeof client.setConfig, 'function');
+
+  const connection = client.connect().catch(error => error);
+  const socket = latestSocket();
+  socket.open();
+  socket.emitClose(1008, 'AUTH_FAILED');
+  await connection;
+  const generation = client.connectionGeneration;
+
+  assert.equal(client.setConfig('ws://127.0.0.1:9999', TEST_AUTH_TOKEN), true);
+  assert.equal(client.connectionGeneration, generation + 1);
+  assert.equal(client.getConnectionState(), 'auth_failed');
+  const retry = await client.connect().catch(error => error);
+
+  assert.match(retry.message, /authentication failed/i);
+  assert.equal(FakeWebSocket.instances.length, 1);
+});
+
+environmentTest('a different valid token permits exactly one replacement connection', async () => {
+  const client = new WebSocketClient(undefined, TEST_AUTH_TOKEN);
+  assert.equal(typeof client.setConfig, 'function');
+
+  const firstConnection = client.connect().catch(error => error);
+  const firstSocket = latestSocket();
+  firstSocket.open();
+  firstSocket.emitClose(1008, 'AUTH_FAILED');
+  await firstConnection;
+  const rejectedGeneration = client.connectionGeneration;
+
+  assert.equal(client.setConfig('ws://127.0.0.1:8765', OTHER_AUTH_TOKEN), true);
+  assert.equal(client.connectionGeneration, rejectedGeneration + 1);
+  assert.equal(client.getConnectionState(), 'idle');
+  assert.equal(client.canReconnect(), true);
+  const replacementConnection = client.connect();
+  assert.equal(FakeWebSocket.instances.length, 2);
+  const replacement = latestSocket();
+  replacement.open();
+  assert.equal(replacement.sent[0].token, OTHER_AUTH_TOKEN);
+  replacement.message({ type: 'welcome', protocolVersion: 2 });
+  await replacementConnection;
+  assert.equal(client.getConnectionState(), 'connected');
+});
+
+environmentTest('storage-equivalent configuration calls are idempotent and create no extra socket', async () => {
+  const client = new WebSocketClient('ws://localhost:8765', TEST_AUTH_TOKEN);
+  assert.equal(typeof client.setConfig, 'function');
+  const generation = client.connectionGeneration;
+
+  assert.equal(client.setConfig('ws://localhost:8765/', TEST_AUTH_TOKEN), false);
+  assert.equal(client.setConfig('ws://localhost:8765/extension', TEST_AUTH_TOKEN), false);
+  assert.equal(client.connectionGeneration, generation);
+  assert.equal(FakeWebSocket.instances.length, 0);
+
+  assert.equal(client.setConfig('ws://127.0.0.1:9999', TEST_AUTH_TOKEN), true);
+  const replacement = client.connect();
+  assert.equal(client.setConfig('ws://127.0.0.1:9999/', TEST_AUTH_TOKEN), false);
+  assert.equal(FakeWebSocket.instances.length, 1);
+  const socket = latestSocket();
+  socket.open();
+  socket.message({ type: 'welcome', protocolVersion: 2 });
+  await replacement;
+});
+
+environmentTest('invalid and noncanonical token configurations are rejected without sockets', async () => {
+  const client = new WebSocketClient(undefined, TEST_AUTH_TOKEN);
+  assert.equal(typeof client.setConfig, 'function');
+
+  assert.equal(client.setConfig('ws://127.0.0.1:9999', NONCANONICAL_AUTH_TOKEN), false);
+  assert.equal(client.setConfig('ws://127.0.0.1:9999', 'short'), false);
+  assert.equal(FakeWebSocket.instances.length, 0);
+});
+
+environmentTest('unsafe constructor configuration creates no socket and returns a secret-free error', async () => {
+  const unsafeUrl = 'ws://attacker.example:8765/extension';
+  const client = new WebSocketClient(unsafeUrl, TEST_AUTH_TOKEN);
+  const attempt = client.connect().then(
+    () => ({ resolved: true }),
+    error => ({ error })
+  );
+  const socketCount = FakeWebSocket.instances.length;
+  client.disconnect();
+  const outcome = await attempt;
+
+  assert.equal(socketCount, 0);
+  assert.equal(outcome.resolved, undefined);
+  assert.match(outcome.error.message, /loopback|websocket url|endpoint/i);
+  assert.equal(outcome.error.message.includes(TEST_AUTH_TOKEN), false);
+  assert.equal(outcome.error.message.includes(unsafeUrl), false);
+});
+
+environmentTest('unsafe setConfig invalidates the candidate and never sends its token', async () => {
+  const unsafeUrl = 'wss://127.0.0.1:8765/extension';
+  const client = new WebSocketClient('ws://127.0.0.1:8765', TEST_AUTH_TOKEN);
+
+  assert.equal(client.setConfig(unsafeUrl, OTHER_AUTH_TOKEN), false);
+  const outcome = await client.connect().then(
+    () => ({ resolved: true }),
+    error => ({ error })
+  );
+
+  assert.equal(outcome.resolved, undefined);
+  assert.match(outcome.error.message, /loopback|websocket url|endpoint/i);
+  assert.equal(outcome.error.message.includes(OTHER_AUTH_TOKEN), false);
+  assert.equal(outcome.error.message.includes(unsafeUrl), false);
+  assert.equal(FakeWebSocket.instances.length, 0);
+});
+
+environmentTest('normal closes retain exponential reconnect delays', async (env) => {
+  const client = new WebSocketClient(undefined, TEST_AUTH_TOKEN);
+  const firstConnection = client.connect();
+  const firstSocket = latestSocket();
+  firstSocket.open();
+  firstSocket.message({ type: 'welcome', protocolVersion: 2 });
+  await firstConnection;
+  firstSocket.emitClose();
+  const firstRetry = env.timers.find(timer => !timer.cleared);
+  assert.equal(firstRetry.delay, 1000);
+
+  const secondConnection = env.runTimer(firstRetry);
+  const secondSocket = latestSocket();
+  secondSocket.emitClose();
+  await secondConnection.catch(() => undefined);
+  const secondRetry = env.timers.at(-1);
+  assert.equal(secondRetry.delay, 2000);
+});
+
+environmentTest('captured logs and errors never contain the authentication token', async (env) => {
+  const client = new WebSocketClient(undefined, TEST_AUTH_TOKEN);
+  assert.equal(typeof client.getConnectionState, 'function');
+
+  const connection = client.connect().catch(error => error);
+  const socket = latestSocket();
+  socket.open();
+  socket.emitClose(1008, 'AUTH_FAILED');
+  const error = await connection;
+  await client.connect().catch(() => undefined);
+
+  const captured = JSON.stringify({
+    logs: env.logs,
+    error: { name: error.name, message: error.message }
+  });
+  assert.equal(captured.includes(TEST_AUTH_TOKEN), false);
 });

@@ -5,6 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import WebSocket from 'ws';
 import { PROTOCOL_VERSION } from '../src/protocol';
+import { TEST_AUTH_TOKEN } from './helpers/auth';
 import { isProcessRunning, stopChild } from './helpers/process-lifecycle';
 
 jest.setTimeout(30_000);
@@ -53,7 +54,8 @@ describe('built multi-process broker', () => {
     const port = await freePort();
     const errors: string[] = [];
     const broker = spawn(process.execPath, [path.join(root, 'dist/arc-tunnel-broker.js'), '--port', String(port)], {
-      cwd: root, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true
+      cwd: root, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true,
+      env: { ...process.env, ARC_TUNNEL_TOKEN: TEST_AUTH_TOKEN }
     });
     broker.stderr!.on('data', chunk => errors.push(chunk.toString()));
     let extension: WebSocket | undefined;
@@ -68,7 +70,9 @@ describe('built multi-process broker', () => {
       expect(pidBefore).toBe(broker.pid);
       extension = new WebSocket(`ws://127.0.0.1:${port}/extension`, { origin: 'chrome-extension://integration-test' });
       await new Promise<void>((resolve, reject) => extension!.once('open', resolve).once('error', reject));
-      extension.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+      extension.send(JSON.stringify({
+        type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+      }));
       const tabs = [{ tabId: 901, windowId: 91, url: 'about:blank' }, { tabId: 902, windowId: 92, url: 'about:blank' }];
       let nextWindow = 100;
       let nextTab = 1000;
@@ -87,7 +91,9 @@ describe('built multi-process broker', () => {
       for (const name of ['alpha', 'beta']) {
         const transport = new StdioClientTransport({ command: process.execPath,
           args: [path.join(root, 'dist/mcp-server.js')], cwd: root,
-          env: { ...process.env, WS_PORT: String(port) } as Record<string, string>, stderr: 'pipe' });
+          env: {
+            ...process.env, WS_PORT: String(port), ARC_TUNNEL_TOKEN: TEST_AUTH_TOKEN
+          } as Record<string, string>, stderr: 'pipe' });
         transport.stderr?.on('data', chunk => errors.push(chunk.toString()));
         const client = new Client({ name, version: '1.0.0' });
         transports.push(transport); clients.push(client);

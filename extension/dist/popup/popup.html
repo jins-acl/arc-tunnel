@@ -63,6 +63,9 @@
       color: #999;
       margin-top: 4px;
     }
+    .hint + label {
+      margin-top: 10px;
+    }
     p {
       font-size: 12px;
       color: #666;
@@ -80,6 +83,13 @@
     <label for="ws-url">MCP Server URL</label>
     <input type="text" id="ws-url" value="ws://127.0.0.1:8765" placeholder="ws://127.0.0.1:8765">
     <div class="hint">Change this if your Broker runs on a different port</div>
+    <label for="auth-token">Authentication Token</label>
+    <input
+      type="password"
+      id="auth-token"
+      autocomplete="off"
+      spellcheck="false"
+      placeholder="Paste the 43-character token">
     <button id="save-config">Save & Reconnect</button>
   </div>
 

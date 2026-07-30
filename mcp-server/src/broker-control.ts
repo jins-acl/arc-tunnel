@@ -1,13 +1,21 @@
 import { BrokerInspection, ensureBroker, getBrokerStatus, inspectBroker, stopBroker } from './broker-launcher';
-import { loadBrokerConfig } from './config';
+import { BrokerConfig, BrokerEndpointConfig, loadBrokerConfig, loadBrokerEndpointConfig } from './config';
 
 interface Output { stdout(value: string): void; stderr(value: string): void }
 interface ControlLauncher {
-  ensureBroker?: typeof ensureBroker;
-  getBrokerStatus?: typeof getBrokerStatus;
-  stopBroker?: typeof stopBroker;
-  inspectBroker?: typeof inspectBroker;
+  homeDir?: string;
+  ensureBroker?: (config: BrokerConfig) => ReturnType<typeof ensureBroker>;
+  getBrokerStatus?: (config: BrokerEndpointConfig) => ReturnType<typeof getBrokerStatus>;
+  stopBroker?: (config: BrokerEndpointConfig) => ReturnType<typeof stopBroker>;
+  inspectBroker?: (config: BrokerEndpointConfig) => ReturnType<typeof inspectBroker>;
 }
+
+const defaultLauncher: ControlLauncher = {
+  ensureBroker,
+  getBrokerStatus,
+  stopBroker,
+  inspectBroker
+};
 
 const EXIT_CODE: Record<BrokerInspection['kind'], number> = {
   healthy: 0, absent: 2, foreign: 3, incompatible: 4, 'diagnostics-unavailable': 5
@@ -48,19 +56,22 @@ function humanDiagnose(inspection: BrokerInspection): string {
 
 export async function runControl(
   argv: string[], env: Record<string, string | undefined>, output: Output,
-  launcher: ControlLauncher = { ensureBroker, getBrokerStatus, stopBroker, inspectBroker }
+  launcher: ControlLauncher = defaultLauncher
 ): Promise<number> {
   const action = argv[0] ?? 'start';
-  const config = loadBrokerConfig(argv.slice(1), env);
   if (action === 'start') {
+    const config = loadBrokerConfig(argv.slice(1), env, launcher.homeDir);
     await launcher.ensureBroker!(config);
     output.stdout(`${JSON.stringify(await launcher.getBrokerStatus!(config))}\n`);
   } else if (action === 'status') {
+    const config = loadBrokerEndpointConfig(argv.slice(1), env, launcher.homeDir);
     output.stdout(`${JSON.stringify(await launcher.getBrokerStatus!(config))}\n`);
   } else if (action === 'stop') {
+    const config = loadBrokerEndpointConfig(argv.slice(1), env, launcher.homeDir);
     await launcher.stopBroker!(config);
     output.stdout(`${JSON.stringify({ running: false, port: config.port })}\n`);
   } else if (action === 'diagnose') {
+    const config = loadBrokerEndpointConfig(argv.slice(1), env, launcher.homeDir);
     const inspection = await launcher.inspectBroker!(config);
     output.stdout(argv.includes('--json') ? `${JSON.stringify(diagnoseJson(inspection))}\n` : humanDiagnose(inspection));
     return EXIT_CODE[inspection.kind];

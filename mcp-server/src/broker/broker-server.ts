@@ -4,16 +4,19 @@ import { AddressInfo } from 'net';
 import fs from 'fs';
 import path from 'path';
 import WebSocket, { RawData, WebSocketServer } from 'ws';
+import { isValidAuthToken, verifyAuthToken } from '../auth-token';
 import { BrokerConfig } from '../config';
 import {
   AgentRequest,
   AgentResponse,
+  ConnectionRole,
   ErrorCode,
   HelloMessage,
   PROTOCOL_VERSION,
   WelcomeMessage,
   isAgentRequest,
   isBrowserEvent,
+  isHelloMessage,
   ArcTunnelError,
   toErrorInfo
 } from '../protocol';
@@ -132,6 +135,9 @@ export class BrokerServer {
   private recordingCleanupSessionId: string | null = null;
 
   constructor(private readonly config: BrokerConfig, dependencies: BrokerDependencies = {}) {
+    if (!isValidAuthToken(config.token)) {
+      throw new Error('Invalid Broker authentication token');
+    }
     this.registry = dependencies.registry ?? new SessionRegistry();
   }
 
@@ -412,8 +418,7 @@ export class BrokerServer {
   }
 
   private readonly handleAgentConnection = (ws: WebSocket): void => {
-    this.awaitHello(ws, 'agent', (hello) => {
-      if (hello.role !== 'agent') return false;
+    this.awaitHello(ws, 'agent', () => {
       const sessionId = randomUUID();
       this.registry.createSession(sessionId);
       this.agents.set(sessionId, ws);
@@ -422,30 +427,28 @@ export class BrokerServer {
 
       ws.on('message', (data) => this.handleAgentMessage(sessionId, data));
       ws.once('close', () => this.handleAgentDisconnect(sessionId));
-      return true;
     });
   };
 
   private readonly handleExtensionConnection = (ws: WebSocket, _request: http.IncomingMessage, context?: { legacy?: boolean }): void => {
-    if (context?.legacy) {
-      this.activateExtension(ws, false);
-      return;
-    }
-    this.awaitHello(ws, 'extension', (hello) => {
-      if (hello.role !== 'extension') return false;
-      this.activateExtension(ws, true);
-      return true;
+    this.awaitHello(ws, 'extension', () => {
+      this.activateExtension(ws, !context?.legacy);
     });
   };
 
   private awaitHello(
     ws: WebSocket,
-    expectedRole: 'agent' | 'extension',
-    accept: (hello: HelloMessage) => boolean
+    expectedRole: ConnectionRole,
+    accept: (hello: HelloMessage) => void
   ): void {
-    const timer = setTimeout(() => ws.close(1008, 'hello required'), 5_000);
-    ws.once('message', (data) => {
+    const cleanup = () => {
       clearTimeout(timer);
+      ws.off('message', onMessage);
+      ws.off('close', onClose);
+    };
+    const onClose = () => cleanup();
+    const onMessage = (data: RawData) => {
+      cleanup();
       let value: unknown;
       try {
         value = JSON.parse(data.toString());
@@ -453,17 +456,33 @@ export class BrokerServer {
         ws.close(1008, 'invalid hello');
         return;
       }
-      const hello = value as Partial<HelloMessage>;
+      if (!isRecord(value) || value.type !== 'hello' || value.role !== expectedRole) {
+        ws.close(1008, 'invalid hello');
+        return;
+      }
+      const hello = value as Record<string, unknown>;
       if (hello.protocolVersion !== PROTOCOL_VERSION) {
         this.sendProtocolError(ws, ErrorCode.PROTOCOL_MISMATCH);
         ws.close(1002, ErrorCode.PROTOCOL_MISMATCH);
         return;
       }
-      if (hello.type !== 'hello' || hello.role !== expectedRole || !accept(hello as HelloMessage)) {
-        ws.close(1008, 'invalid hello');
+      if (!verifyAuthToken(hello.token, this.config.token)) {
+        this.recordDiagnostic('error', 'connection', ErrorCode.AUTH_FAILED, 'WebSocket authentication failed');
+        ws.close(1008, ErrorCode.AUTH_FAILED);
+        return;
       }
-    });
-    ws.once('close', () => clearTimeout(timer));
+      if (!isHelloMessage(value)) {
+        ws.close(1008, 'invalid hello');
+        return;
+      }
+      accept(value);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      ws.close(1008, 'hello required');
+    }, 5_000);
+    ws.once('message', onMessage);
+    ws.once('close', onClose);
   }
 
   private activateExtension(ws: WebSocket, sendWelcome: boolean): void {

@@ -1,29 +1,31 @@
 import { CommandMessage, ResponseMessage, EventMessage, HelloMessage } from '../types';
+import { isValidAuthToken } from '../auth-token';
+import {
+  DEFAULT_WS_URL,
+  normalizeWebSocketUrl,
+  resolveConfiguredWebSocketUrl
+} from '../websocket-url';
 
-export const DEFAULT_WS_URL = 'ws://127.0.0.1:8765';
+export { isValidAuthToken } from '../auth-token';
+export {
+  DEFAULT_WS_URL,
+  normalizeWebSocketUrl,
+  resolveConfiguredWebSocketUrl
+} from '../websocket-url';
 const HEARTBEAT_INTERVAL_MS = 10_000;
+const AUTHENTICATION_FAILED_MESSAGE = 'Broker authentication failed';
+const INVALID_WEBSOCKET_URL_MESSAGE =
+  'Arc Tunnel WebSocket URL must use the explicit IPv4 loopback endpoint';
 
-const LEGACY_DEFAULT_URLS = new Map([
-  ['ws://localhost:8765', DEFAULT_WS_URL],
-  ['ws://localhost:8765/', DEFAULT_WS_URL],
-  ['ws://localhost:8765/extension', `${DEFAULT_WS_URL}/extension`]
-]);
-
-export function resolveConfiguredWebSocketUrl(value: unknown): string {
-  if (typeof value !== 'string') return DEFAULT_WS_URL;
-  return LEGACY_DEFAULT_URLS.get(value) ?? value;
-}
-
-export function normalizeWebSocketUrl(url: string): string {
-  const parsed = new URL(url);
-  if (parsed.pathname !== '/') return url;
-  parsed.pathname = '/extension';
-  return parsed.toString();
-}
+export type ConnectionState = 'idle' | 'connecting' | 'connected' | 'auth_failed';
 
 export class WebSocketClient {
   private ws: WebSocket | null = null;
-  private url: string;
+  private url: string | null;
+  private token: string;
+  private rejectedToken: string | null = null;
+  private authFailureHandler: ((token: string) => void) | null = null;
+  private connectionState: ConnectionState = 'idle';
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 10;
   private reconnectDelay = 1000;
@@ -38,14 +40,53 @@ export class WebSocketClient {
   private rejectConnect: ((error: Error) => void) | null = null;
   private handshakeComplete = false;
 
-  constructor(url?: string) {
-    this.url = normalizeWebSocketUrl(resolveConfiguredWebSocketUrl(url));
+  constructor(url?: string, token = '') {
+    this.url = normalizeWebSocketUrl(url);
+    this.token = this.url === null ? '' : token;
   }
 
   setUrl(url: string): void {
-    const normalizedUrl = normalizeWebSocketUrl(resolveConfiguredWebSocketUrl(url));
+    const normalizedUrl = normalizeWebSocketUrl(url);
+    if (normalizedUrl === null) {
+      this.invalidateConfig();
+      return;
+    }
     if (normalizedUrl === this.url) return;
+    this.replaceConfig(normalizedUrl, this.token, false);
+  }
 
+  setConfig(url: string, token: string): boolean {
+    const normalizedUrl = normalizeWebSocketUrl(url);
+    if (normalizedUrl === null || !isValidAuthToken(token)) {
+      this.invalidateConfig();
+      return false;
+    }
+    if (normalizedUrl === this.url && token === this.token) return false;
+
+    this.replaceConfig(normalizedUrl, token, token !== this.token);
+    return true;
+  }
+
+  setAuthFailureHandler(handler: (token: string) => void): void {
+    this.authFailureHandler = handler;
+  }
+
+  restoreRejectedToken(token: unknown): boolean {
+    if (!isValidAuthToken(token) || token !== this.token) return false;
+    this.rejectedToken = token;
+    this.disconnect();
+    return true;
+  }
+
+  getConnectionState(): ConnectionState {
+    return this.connectionState;
+  }
+
+  canReconnect(): boolean {
+    return !this.isCurrentTokenRejected();
+  }
+
+  private replaceConfig(normalizedUrl: string | null, token: string, tokenChanged: boolean): void {
     ++this.connectionGeneration;
     this.clearReconnectTimer();
     this.clearHeartbeatTimer();
@@ -54,31 +95,50 @@ export class WebSocketClient {
     const oldSocket = this.ws;
     this.ws = null;
     this.handshakeComplete = false;
-    this.rejectPendingConnect(new Error('Connection superseded by URL change'));
+    this.rejectPendingConnect(new Error('Connection superseded by configuration change'));
     oldSocket?.close();
     this.url = normalizedUrl;
+    this.token = token;
+    if (tokenChanged) this.rejectedToken = null;
+    this.connectionState = this.isCurrentTokenRejected() ? 'auth_failed' : 'idle';
     this.intentionalClose = false;
+  }
+
+  private invalidateConfig(): void {
+    if (this.url === null && this.token === '') return;
+    this.replaceConfig(null, '', true);
   }
 
   async connect(): Promise<void> {
     if (this.isConnected()) return;
     if (this.connectPromise) return this.connectPromise;
+    if (this.url === null) {
+      this.connectionState = 'idle';
+      throw new Error(INVALID_WEBSOCKET_URL_MESSAGE);
+    }
+    if (this.isCurrentTokenRejected()) {
+      this.connectionState = 'auth_failed';
+      throw new Error(AUTHENTICATION_FAILED_MESSAGE);
+    }
 
     this.clearReconnectTimer();
     this.clearHeartbeatTimer();
     const generation = ++this.connectionGeneration;
     this.intentionalClose = false;
     this.handshakeComplete = false;
+    this.connectionState = 'connecting';
+    const connectionUrl = this.url;
 
     this.connectPromise = new Promise((resolve, reject) => {
       this.rejectConnect = reject;
-      const socket = new WebSocket(this.url);
+      const socket = new WebSocket(connectionUrl);
       this.ws = socket;
 
       const resolveConnect = () => {
         if (generation !== this.connectionGeneration) return;
         this.connectPromise = null;
         this.rejectConnect = null;
+        this.connectionState = 'connected';
         resolve();
       };
 
@@ -98,6 +158,7 @@ export class WebSocketClient {
         chrome.alarms.clear('ws-reconnect');
         if (this.ws === socket) this.ws = null;
         this.handshakeComplete = false;
+        this.connectionState = 'idle';
         socket.close();
       };
 
@@ -105,7 +166,12 @@ export class WebSocketClient {
         if (generation !== this.connectionGeneration) return;
         console.log('Connected to Arc Tunnel broker');
         this.intentionalClose = false;
-        const hello: HelloMessage = { type: 'hello', role: 'extension', protocolVersion: 2 };
+        const hello: HelloMessage = {
+          type: 'hello',
+          role: 'extension',
+          protocolVersion: 2,
+          token: this.token
+        };
         socket.send(JSON.stringify(hello));
       };
 
@@ -114,12 +180,17 @@ export class WebSocketClient {
         console.error('WebSocket error');
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
+        if (event.code === 1008 && event.reason === 'AUTH_FAILED') {
+          this.enterAuthFailed(generation, socket);
+          return;
+        }
         if (generation !== this.connectionGeneration || this.intentionalClose) return;
         console.log('Disconnected from Arc Tunnel broker');
         this.clearHeartbeatTimer();
         this.ws = null;
         this.handshakeComplete = false;
+        this.connectionState = 'idle';
         rejectCurrentConnect(new Error('WebSocket closed before handshake completed'));
         this.handleReconnect(generation);
       };
@@ -167,16 +238,26 @@ export class WebSocketClient {
     this.ws = null;
     this.handshakeComplete = false;
     this.rejectPendingConnect(new Error('Connection closed intentionally'));
+    this.connectionState = this.isCurrentTokenRejected() ? 'auth_failed' : 'idle';
     socket?.close();
   }
 
   prepareForSuspend(): void {
+    if (this.isCurrentTokenRejected()) {
+      this.clearReconnectTimer();
+      this.clearHeartbeatTimer();
+      chrome.alarms.clear('ws-reconnect');
+      this.connectionState = 'auth_failed';
+      return;
+    }
+
     const generation = ++this.connectionGeneration;
     this.clearReconnectTimer();
     this.clearHeartbeatTimer();
     const socket = this.ws;
     this.ws = null;
     this.handshakeComplete = false;
+    this.connectionState = 'idle';
     this.rejectPendingConnect(new Error('Service worker suspended'));
     this.handleReconnect(generation);
     socket?.close();
@@ -205,7 +286,12 @@ export class WebSocketClient {
   }
 
   private handleReconnect(generation: number): void {
-    if (generation !== this.connectionGeneration || this.intentionalClose || this.reconnectTimer) return;
+    if (
+      generation !== this.connectionGeneration ||
+      this.intentionalClose ||
+      this.reconnectTimer ||
+      this.isCurrentTokenRejected()
+    ) return;
 
     const fastRetriesExhausted = this.reconnectAttempts >= this.maxReconnectAttempts;
     const delay = fastRetriesExhausted
@@ -221,7 +307,11 @@ export class WebSocketClient {
       : `Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
-      if (generation !== this.connectionGeneration || this.intentionalClose) return;
+      if (
+        generation !== this.connectionGeneration ||
+        this.intentionalClose ||
+        this.isCurrentTokenRejected()
+      ) return;
       try {
         await this.connect();
       } catch (error) {
@@ -274,6 +364,7 @@ export class WebSocketClient {
     this.clearHeartbeatTimer();
     this.ws = null;
     this.handshakeComplete = false;
+    this.connectionState = 'idle';
     const reconnectGeneration = ++this.connectionGeneration;
     try {
       socket.close();
@@ -295,5 +386,27 @@ export class WebSocketClient {
     this.rejectConnect = null;
     this.connectPromise = null;
     reject?.(error);
+  }
+
+  private enterAuthFailed(generation: number, socket: WebSocket): void {
+    if (generation !== this.connectionGeneration || this.ws !== socket) return;
+
+    this.clearReconnectTimer();
+    this.clearHeartbeatTimer();
+    chrome.alarms.clear('ws-reconnect');
+    this.rejectedToken = this.token;
+    this.ws = null;
+    this.handshakeComplete = false;
+    this.connectionState = 'auth_failed';
+    try {
+      this.authFailureHandler?.(this.token);
+    } catch {
+      console.error('Failed to persist Arc Tunnel authentication failure state');
+    }
+    this.rejectPendingConnect(new Error(AUTHENTICATION_FAILED_MESSAGE));
+  }
+
+  private isCurrentTokenRejected(): boolean {
+    return this.rejectedToken !== null && this.token === this.rejectedToken;
   }
 }

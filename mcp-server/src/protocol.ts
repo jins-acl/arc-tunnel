@@ -11,6 +11,7 @@ export interface HelloMessage {
   type: 'hello';
   role: ConnectionRole;
   protocolVersion: number;
+  token: string;
   clientName?: string;
 }
 
@@ -87,6 +88,7 @@ export function isHelloMessage(value: unknown): value is HelloMessage {
     && value.type === 'hello'
     && (value.role === 'agent' || value.role === 'extension')
     && value.protocolVersion === PROTOCOL_VERSION
+    && typeof value.token === 'string'
     && (value.clientName === undefined || typeof value.clientName === 'string');
 }
 

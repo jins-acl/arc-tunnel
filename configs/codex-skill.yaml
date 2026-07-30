@@ -1,5 +1,6 @@
 # Add this to your Codex skill's agents/openai.yaml.
 # The lightweight MCP client connects to or starts the shared Browser Broker.
+# Authentication is read from ~/.arc-tunnel/config.json; do not copy the token here.
 dependencies:
   tools:
     - type: "mcp"

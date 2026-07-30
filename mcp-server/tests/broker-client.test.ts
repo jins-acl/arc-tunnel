@@ -1,23 +1,39 @@
 import net from 'net';
 import { WebSocketServer } from 'ws';
 import { BrokerClient } from '../src/broker-client';
-import { PROTOCOL_VERSION } from '../src/protocol';
+import { ErrorCode, PROTOCOL_VERSION } from '../src/protocol';
+import { TEST_AUTH_TOKEN, testBrokerConfig } from './helpers/auth';
 
 describe('BrokerClient', () => {
   let server: WebSocketServer;
   let client: BrokerClient | undefined;
   let port: number;
   const requests: any[] = [];
+  const hellos: any[] = [];
   let socket: any;
+  let closeWithAuthFailure = false;
+  let connections = 0;
 
   beforeEach(async () => {
     requests.length = 0;
+    hellos.length = 0;
+    closeWithAuthFailure = false;
+    connections = 0;
     server = new WebSocketServer({ host: '127.0.0.1', port: 0, path: '/agent' });
     await new Promise<void>((resolve) => server.once('listening', resolve));
     port = (server.address() as any).port;
     server.on('connection', (ws) => {
+      connections++;
       socket = ws;
-      ws.once('message', () => ws.send(JSON.stringify({ type: 'welcome', protocolVersion: PROTOCOL_VERSION, sessionId: 'test' })));
+      ws.once('message', (raw) => {
+        const hello = JSON.parse(raw.toString());
+        hellos.push(hello);
+        if (closeWithAuthFailure) {
+          ws.close(1008, ErrorCode.AUTH_FAILED);
+          return;
+        }
+        ws.send(JSON.stringify({ type: 'welcome', protocolVersion: PROTOCOL_VERSION, sessionId: 'test' }));
+      });
       ws.on('message', (raw) => {
         const message = JSON.parse(raw.toString());
         if (message.type === 'agent_request') requests.push(message);
@@ -34,8 +50,29 @@ describe('BrokerClient', () => {
     while (requests.length < count) await new Promise((resolve) => setTimeout(resolve, 5));
   }
 
+  it('sends the configured token in its first Agent hello', async () => {
+    client = await BrokerClient.connect(testBrokerConfig(port));
+
+    expect(hellos).toEqual([expect.objectContaining({
+      type: 'hello', role: 'agent', protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+    })]);
+  });
+
+  it('maps an AUTH_FAILED policy close during handshake without retrying or disclosing the token', async () => {
+    closeWithAuthFailure = true;
+
+    const error = await BrokerClient.connect(testBrokerConfig(port)).then(
+      () => new Error('expected authentication failure'),
+      (failure) => failure
+    );
+
+    expect(error).toMatchObject({ code: 'AUTH_FAILED', message: 'Broker authentication failed' });
+    expect(error.message).not.toContain(TEST_AUTH_TOKEN);
+    expect(connections).toBe(1);
+  });
+
   it('correlates out-of-order Broker responses', async () => {
-    client = await BrokerClient.connect({ host: '127.0.0.1', port });
+    client = await BrokerClient.connect(testBrokerConfig(port));
     const first = client.call('first', {}, 1000);
     const second = client.call('second', {}, 1000);
     await waitForRequests(2);
@@ -48,7 +85,7 @@ describe('BrokerClient', () => {
   });
 
   it('rejects Broker errors and local command timeouts with their codes', async () => {
-    client = await BrokerClient.connect({ host: '127.0.0.1', port });
+    client = await BrokerClient.connect(testBrokerConfig(port));
     const rejected = client.call('rejected', {}, 1000);
     await waitForRequests(1);
     socket.send(JSON.stringify({
@@ -60,7 +97,7 @@ describe('BrokerClient', () => {
   });
 
   it('rejects pending calls when the Broker connection closes', async () => {
-    client = await BrokerClient.connect({ host: '127.0.0.1', port });
+    client = await BrokerClient.connect(testBrokerConfig(port));
     const pending = client.call('pending', {}, 1000);
     await waitForRequests(1);
     socket.close();
@@ -79,7 +116,7 @@ describe('BrokerClient', () => {
     const onUncaught = (error: unknown) => uncaught.push(error);
     process.prependListener('uncaughtException', onUncaught);
     try {
-      await expect(BrokerClient.connect({ host: '127.0.0.1', port: hangingPort }))
+      await expect(BrokerClient.connect(testBrokerConfig(hangingPort)))
         .rejects.toMatchObject({ code: 'CONNECTION_LOST' });
       await new Promise((resolve) => setTimeout(resolve, 25));
       expect(uncaught).toEqual([]);

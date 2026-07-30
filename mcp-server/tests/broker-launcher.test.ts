@@ -5,6 +5,7 @@ import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
 import { createBrokerLauncher, MAX_RESPONSE_BYTES } from '../src/broker-launcher';
+import { TEST_AUTH_TOKEN } from './helpers/auth';
 
 async function freePort(): Promise<number> {
   const server = http.createServer();
@@ -57,14 +58,69 @@ describe('broker launcher', () => {
   });
 
   it('starts one detached broker for concurrent callers', async () => {
-    const config = { host: '127.0.0.1' as const, port };
+    const config = { host: '127.0.0.1' as const, port, token: TEST_AUTH_TOKEN };
     await Promise.all([launcher.ensureBroker(config), launcher.ensureBroker(config), launcher.ensureBroker(config)]);
     await expect(launcher.getBrokerStatus(config)).resolves.toMatchObject({ running: true, protocolVersion: 2 });
     expect(fs.readFileSync(countFile, 'utf8').trim().split('\n')).toHaveLength(1);
   });
 
+  it('passes the token only through the spawned Broker environment', async () => {
+    const inheritedMarker = 'retained-parent-environment';
+    const secret = TEST_AUTH_TOKEN;
+    const previousMarker = process.env.ARC_TUNNEL_TEST_PARENT_MARKER;
+    let spawnCall: { args: string[]; options: any } | undefined;
+    let brokerArgumentConfig: unknown;
+    process.env.ARC_TUNNEL_TEST_PARENT_MARKER = inheritedMarker;
+    const spawnProcess = ((command: string, args?: readonly string[], options?: any) => {
+      spawnCall = { args: [...(args ?? [])], options };
+      return spawn(command, args, options);
+    }) as typeof spawn;
+    const credentialed = createBrokerLauncher({
+      homeDir,
+      brokerEntry: path.join(__dirname, 'fixtures', 'fake-broker.js'),
+      brokerArgs: (endpoint) => {
+        brokerArgumentConfig = endpoint;
+        return [String(port), countFile];
+      },
+      spawnProcess
+    });
+
+    try {
+      await credentialed.ensureBroker({ host: '127.0.0.1', port, token: secret });
+      const lockContents = fs.readFileSync(path.join(homeDir, '.arc-tunnel', 'broker.lock'), 'utf8');
+
+      expect(spawnCall).toMatchObject({
+        options: expect.objectContaining({
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+          env: expect.objectContaining({
+            ARC_TUNNEL_TOKEN: secret,
+            ARC_TUNNEL_TEST_PARENT_MARKER: inheritedMarker
+          })
+        })
+      });
+      expect(JSON.stringify(spawnCall?.args)).not.toContain(secret);
+      expect(brokerArgumentConfig).toEqual({ host: '127.0.0.1', port });
+      expect(lockContents).not.toContain(secret);
+      expect(fs.readFileSync(countFile, 'utf8')).not.toContain(secret);
+    } finally {
+      if (previousMarker === undefined) delete process.env.ARC_TUNNEL_TEST_PARENT_MARKER;
+      else process.env.ARC_TUNNEL_TEST_PARENT_MARKER = previousMarker;
+      await credentialed.stopBroker({ host: '127.0.0.1', port });
+    }
+  });
+
+  it('keeps read-only launcher methods endpoint-only', async () => {
+    const endpoint = { host: '127.0.0.1' as const, port };
+
+    await expect(launcher.getBrokerStatus(endpoint)).resolves.toEqual({ running: false, port });
+    await expect(launcher.inspectBroker(endpoint)).resolves.toEqual({ kind: 'absent', port });
+    await expect(launcher.stopBroker(endpoint)).resolves.toBeUndefined();
+  });
+
   it('does not delete an empty lock while its owner is starting the Broker', async () => {
-    const config = { host: '127.0.0.1' as const, port };
+    const config = { host: '127.0.0.1' as const, port, token: TEST_AUTH_TOKEN };
     const lockDir = path.join(homeDir, '.arc-tunnel');
     const lockPath = path.join(lockDir, 'broker.lock');
     fs.mkdirSync(lockDir, { recursive: true });
@@ -93,7 +149,7 @@ describe('broker launcher', () => {
     const foreign = http.createServer((_request, response) => { response.writeHead(200); response.end('foreign'); });
     await new Promise<void>((resolve) => foreign.listen(port, '127.0.0.1', resolve));
     const started = Date.now();
-    await expect(launcher.ensureBroker({ host: '127.0.0.1', port })).rejects.toMatchObject({ code: 'PORT_IN_USE' });
+    await expect(launcher.ensureBroker({ host: '127.0.0.1', port, token: TEST_AUTH_TOKEN })).rejects.toMatchObject({ code: 'PORT_IN_USE' });
     expect(Date.now() - started).toBeLessThan(1000);
     await new Promise<void>((resolve) => foreign.close(() => resolve()));
   });
@@ -234,7 +290,7 @@ describe('broker launcher', () => {
     fs.mkdirSync(lockDir, { recursive: true });
     fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, port, protocolVersion: 2 }));
     const started = Date.now();
-    const pending = bounded.ensureBroker({ host: '127.0.0.1', port })
+    const pending = bounded.ensureBroker({ host: '127.0.0.1', port, token: TEST_AUTH_TOKEN })
       .then(() => ({ code: 'STARTED' }), (error) => ({ code: error.code }));
     const outcome = await Promise.race([
       pending,
@@ -258,7 +314,7 @@ describe('broker launcher', () => {
       brokerEntry: path.join(__dirname, 'fixtures', 'fake-broker.js'),
       brokerArgs: () => [String(port), countFile]
     });
-    const outcome = await bounded.ensureBroker({ host: '127.0.0.1', port })
+    const outcome = await bounded.ensureBroker({ host: '127.0.0.1', port, token: TEST_AUTH_TOKEN })
       .then(() => ({ code: 'STARTED' }), (error) => ({ code: error.code }));
     await new Promise<void>((resolve) => foreign.close(() => resolve()));
 
@@ -286,7 +342,7 @@ describe('broker launcher', () => {
     fs.mkdirSync(lockDir, { recursive: true });
     fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, port, protocolVersion: 2 }));
     const started = Date.now();
-    const pending = bounded.ensureBroker({ host: '127.0.0.1', port })
+    const pending = bounded.ensureBroker({ host: '127.0.0.1', port, token: TEST_AUTH_TOKEN })
       .then(() => ({ code: 'STARTED' }), (error) => ({ code: error.code }));
     const outcome = await Promise.race([
       pending,
@@ -308,7 +364,7 @@ describe('broker launcher', () => {
       pid: 2147483647, port, protocolVersion: 2
     }));
 
-    await launcher.ensureBroker({ host: '127.0.0.1', port });
+    await launcher.ensureBroker({ host: '127.0.0.1', port, token: TEST_AUTH_TOKEN });
 
     const lock = JSON.parse(fs.readFileSync(path.join(lockDir, 'broker.lock'), 'utf8'));
     expect(lock).toMatchObject({ port, protocolVersion: 2 });
@@ -316,7 +372,7 @@ describe('broker launcher', () => {
   });
 
   it('stops the matching broker and removes its lock', async () => {
-    const config = { host: '127.0.0.1' as const, port };
+    const config = { host: '127.0.0.1' as const, port, token: TEST_AUTH_TOKEN };
     await launcher.ensureBroker(config);
     await launcher.stopBroker(config);
     await expect(launcher.getBrokerStatus(config)).resolves.toEqual({ running: false, port });

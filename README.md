@@ -62,6 +62,21 @@ The installer detects supported tools and updates their configuration. Review ba
 it creates beside changed files. Templates support Claude Code, Hermes, OpenClaw, Kimi,
 and Codex.
 
+运行 Arc Tunnel 需要 Node.js `>=22`。安装器会在
+`~/.arc-tunnel/config.json` 中生成认证令牌；已有的有效令牌会原样保留，不会在
+日常重跑时轮换。安装器只在首次生成令牌时显示一次；仅当没有
+`ARC_TUNNEL_TOKEN` 环境覆盖时，这个新生成的文件令牌才是应复制到扩展弹窗的
+生效令牌。模板只保留 MCP 客户端路径和 `WS_PORT`，客户端会自行读取用户级
+Arc Tunnel 配置，不要把令牌复制进 Agent 模板。
+
+With no environment override, a newly generated file token is the active popup
+credential. With a valid `ARC_TUNNEL_TOKEN` override, the installer instead labels the
+generated file token as a fallback: use the effective environment token from its
+controlled source, or unset the override and restart the Broker and every Agent client
+before using that fallback. An empty or malformed environment override blocks startup
+rather than falling back; remove or replace it before startup. The installer never
+prints the environment override value.
+
 ## Broker lifecycle and ports
 
 ```bash
@@ -78,17 +93,25 @@ The default is port `8765`. Configuration precedence is CLI `--port` → `WS_POR
 A persisted configuration has this shape:
 
 ```json
-{ "port": 9000 }
+{ "port": 8765, "token": "..." }
 ```
 
 All Agent client configurations must use the Broker's port. When using a custom port,
 set the extension popup to the same port as well. `status` reports the PID and port of a
 running Broker. `stop` removes its lifecycle state.
 
+令牌解析规则与端口规则彼此独立：`ARC_TUNNEL_TOKEN` 优先于用户级配置文件
+中的令牌，端口仍按上面的 CLI、环境变量、配置文件、默认值顺序解析。
+令牌不放在命令行参数或 WebSocket URL 中，因为这些位置容易进入进程列表、
+Shell 历史和诊断日志；自动启动的 Broker 通过继承环境接收已经解析的凭据。
+
 The read-only Operations Control Center is available at
 `http://127.0.0.1:<port>/dashboard`. Its status cards, event filters, and copied
 diagnostics expose aggregate operational state only. The dashboard and `diagnose`
 output exclude URLs, IDs, cookies, scripts, parameters, and page content.
+
+`/health`、`/dashboard` 和 `diagnose` 使用未认证的回环聚合状态接口，输出不含
+令牌、页面内容或浏览器标识；WebSocket 浏览器控制能力仍必须认证。
 
 ## Multi-Agent tab ownership
 
@@ -107,7 +130,8 @@ coordination, not security isolation.
 1. Open `chrome://extensions/` or `edge://extensions/`.
 2. Enable Developer mode and choose **Load unpacked**.
 3. Select `extension/dist/`.
-4. In the popup, verify the shared Broker port and connection state.
+4. In the popup, verify the shared Broker port and follow the effective-token guidance
+   below before saving the password field.
 
 The extension defaults to the unambiguous IPv4 loopback URL `ws://127.0.0.1:8765` and
 converts a saved root URL such as `ws://127.0.0.1:8765/` to the current
@@ -117,8 +141,34 @@ should use `/extension`.
 
 On upgrade, the extension rewrites only the former default values
 `ws://localhost:8765`, `ws://localhost:8765/`, and
-`ws://localhost:8765/extension` to their `127.0.0.1` equivalents. Other hosts, ports,
-paths, queries, and fragments remain unchanged.
+`ws://localhost:8765/extension` to their `127.0.0.1` equivalents. These three exact
+legacy `localhost` defaults are migration-only inputs; other `localhost` values and
+every non-loopback or structurally invalid URL are rejected before connection.
+
+设置了有效的 `ARC_TUNNEL_TOKEN` 时，扩展必须使用同一个生效令牌；请从设置该
+环境变量的受控来源取得它，不要改用配置文件中的令牌。另一种做法是先清除该环境变量，
+取消环境覆盖后重启 Broker 和所有 Agent 客户端，再使用
+`~/.arc-tunnel/config.json` 中的持久化令牌。不要用会把令牌打印到终端的命令
+获取它。
+
+扩展弹窗中的密码输入框默认遮蔽令牌。若状态变为 `auth_failed`，扩展不会用同一
+错误令牌持续重连，弹窗显示 `Authentication failed`。请按上述优先级取得正确的
+生效令牌，粘贴后保存。令牌不会出现在弹窗状态文字、URL、控制台或复制的诊断
+信息中。
+
+### 认证迁移
+
+从旧版本升级时按以下顺序操作：
+
+1. 拉取新源码，并按开发流程构建最新 bundle。
+2. 运行 `node scripts/install.js`。
+3. 确认生效令牌来源：若设置了有效的 `ARC_TUNNEL_TOKEN`，从其受控来源取得同一个
+   环境令牌；若未设置，则使用安装器一次性显示的新令牌或持久化文件中的现有令牌。
+   若环境覆盖为空或格式错误，须在启动前移除或替换，不能静默回退到文件令牌。
+4. 加载或重新加载 `extension/dist/`。
+5. 在扩展弹窗中的密码输入框粘贴并保存同一个生效令牌。
+6. 确认状态为 `Connected`，再运行
+   `node scripts/start.js diagnose --json` 检查聚合状态。
 
 ## Tools and features
 
@@ -161,6 +211,7 @@ all committed artifacts together.
 npm ci --prefix mcp-server
 npm ci --prefix extension
 npm run verify
+npm run audit:prod
 ```
 
 Both builds regenerate committed distribution artifacts. The MCP build creates the
@@ -184,6 +235,27 @@ browser tab. It checks pre-call console history, MCP image screenshot delivery, 
 closure. On success or failure it closes only the tab, client, and HTTP server that it
 created. It never stops the shared Broker and does not close any pre-existing tab.
 
+认证恢复需要在真实浏览器中验证：先在扩展弹窗保存一个格式有效但内容错误的
+令牌，确认弹窗显示 `Authentication failed`、状态稳定进入 `auth_failed` 且不会
+重连循环；再保存正确的生效令牌，确认恢复为 `Connected`。若有效的环境覆盖仍
+存在，这里必须使用该环境令牌；空值或格式错误的覆盖须先移除或替换。只有取消
+覆盖并重启 Broker 和 Agent 客户端后，持久化文件令牌才会生效。随后运行 D/F/C
+韧性检查：
+
+```bash
+node scripts/verify-browser-resilience.js [--port 8765]
+```
+
+多 Agent 所有权与截图隔离检查使用：
+
+```bash
+node scripts/verify-multi-agent.js [--port 8765] [--manual-tab N]
+```
+
+多 Agent 验证器要求每个 Agent 只能从自己拥有的标签页取得非空 JPEG，并确认
+对其他 Agent 标签页的截图请求返回 `TAB_NOT_OWNED`；验证日志不会输出图片的
+base64 内容。
+
 ## Security
 
 The Broker binds only `127.0.0.1`, is not exposed on the LAN, and rejects WebSocket
@@ -193,6 +265,24 @@ debugger, storage, and cookies permissions. It can access tabs, cookies, storage
 page scripts, so connect only trusted local Agent clients. `execute_script` has full page
 access. Agents share one browser profile and its cookies; tab claims coordinate work but
 are not a security boundary.
+
+The extension accepts only the `ws:` scheme with the literal host `127.0.0.1`, an
+explicit port from 1 through 65535, and path `/` or `/extension`. It rejects `wss:`,
+userinfo, queries, fragments, alternate IP spellings, non-loopback hosts, missing or
+out-of-range ports, and other paths before creating a socket. The three exact legacy
+`localhost` defaults listed above remain migration-only inputs. Consequently, the
+extension never sends the authentication token to an off-loopback destination.
+
+This static token protects against local clients that do not possess it; it is not a
+same-user sandbox. Hostile same-OS-user processes that can read the user config or
+impersonate the selected local port are outside this static-token boundary.
+
+令牌认证保护的是本地 Broker 能力边界：同一机器上未持有令牌的进程不能调用
+浏览器控制 WebSocket。它不提供 Agent 之间的 Cookie 或身份隔离；所有 Agent
+仍使用共享浏览器配置文件，共享登录态、Cookie、存储和扩展权限。优先使用
+`127.0.0.1`，避免 `localhost` 被解析到无关的 IPv6 监听器；普通 `http://`
+和 `https://` Origin 仍会被拒绝，旧根路径也仍只接受
+`chrome-extension://` Origin。
 
 ## License
 

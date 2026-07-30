@@ -12,7 +12,7 @@ async function build() {
     entryPoints: [entryPoint],
     bundle: true,
     platform: 'node',
-    target: 'node18',
+    target: 'node22',
     outfile,
     sourcemap: true,
     sourcesContent: false

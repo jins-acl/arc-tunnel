@@ -1,4 +1,8 @@
-const { waitForExpectedLocation } = require('../../scripts/verify-multi-agent.js');
+const {
+  inheritedClientEnvironment,
+  requireJpegImage,
+  waitForExpectedLocation
+} = require('../../scripts/verify-multi-agent.js');
 
 jest.setTimeout(2_000);
 
@@ -74,5 +78,48 @@ describe('live navigation condition waiting', () => {
     ]);
     expect(results.map(result => result.status)).toEqual(['rejected', 'rejected']);
     expect(Date.now() - started).toBeLessThan(250);
+  });
+});
+
+describe('multi-Agent screenshot verification', () => {
+  it('extracts a non-empty JPEG image from MCP content', () => {
+    expect(requireJpegImage({
+      content: [
+        { type: 'text', text: JSON.stringify({ format: 'jpeg' }) },
+        { type: 'image', data: 'c2VjcmV0LWltYWdl', mimeType: 'image/jpeg' }
+      ]
+    })).toEqual({
+      type: 'image',
+      data: 'c2VjcmV0LWltYWdl',
+      mimeType: 'image/jpeg'
+    });
+  });
+
+  it.each([
+    ['empty JPEG', { type: 'image', data: '', mimeType: 'image/jpeg' }],
+    ['non-JPEG', { type: 'image', data: 'c2VjcmV0LWltYWdl', mimeType: 'image/png' }]
+  ])('rejects a %s result without exposing image data', (_label, image) => {
+    let thrown: Error | undefined;
+    try {
+      requireJpegImage({ content: [image] });
+    } catch (error) {
+      thrown = error as Error;
+    }
+    expect(thrown?.message).toBe('screenshot did not return a non-empty MCP image/jpeg item');
+    expect(thrown?.message).not.toContain('c2VjcmV0LWltYWdl');
+  });
+});
+
+describe('multi-Agent client authentication', () => {
+  it('preserves inherited authentication while selecting the verifier port', () => {
+    const environment = inheritedClientEnvironment(9123, {
+      ARC_TUNNEL_TOKEN: 'inherited-authentication',
+      PATH: 'inherited-path'
+    });
+    expect(environment).toEqual({
+      ARC_TUNNEL_TOKEN: 'inherited-authentication',
+      PATH: 'inherited-path',
+      WS_PORT: '9123'
+    });
   });
 });

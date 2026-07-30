@@ -792,6 +792,10 @@ var require_receiver = __commonJS({
        *     extensions
        * @param {Boolean} [options.isServer=false] Specifies whether to operate in
        *     client or server mode
+       * @param {Number} [options.maxBufferedChunks=0] The maximum number of
+       *     buffered data chunks
+       * @param {Number} [options.maxFragments=0] The maximum number of message
+       *     fragments
        * @param {Number} [options.maxPayload=0] The maximum allowed message length
        * @param {Boolean} [options.skipUTF8Validation=false] Specifies whether or
        *     not to skip UTF-8 validation for text and close messages
@@ -802,6 +806,8 @@ var require_receiver = __commonJS({
         this._binaryType = options.binaryType || BINARY_TYPES[0];
         this._extensions = options.extensions || {};
         this._isServer = !!options.isServer;
+        this._maxBufferedChunks = options.maxBufferedChunks | 0;
+        this._maxFragments = options.maxFragments | 0;
         this._maxPayload = options.maxPayload | 0;
         this._skipUTF8Validation = !!options.skipUTF8Validation;
         this[kWebSocket] = void 0;
@@ -816,6 +822,7 @@ var require_receiver = __commonJS({
         this._opcode = 0;
         this._totalPayloadLength = 0;
         this._messageLength = 0;
+        this._numFragments = 0;
         this._fragments = [];
         this._errored = false;
         this._loop = false;
@@ -831,6 +838,18 @@ var require_receiver = __commonJS({
        */
       _write(chunk, encoding, cb) {
         if (this._opcode === 8 && this._state == GET_INFO) return cb();
+        if (this._maxBufferedChunks > 0 && this._buffers.length >= this._maxBufferedChunks) {
+          cb(
+            this.createError(
+              RangeError,
+              "Too many buffered chunks",
+              false,
+              1008,
+              "WS_ERR_TOO_MANY_BUFFERED_PARTS"
+            )
+          );
+          return;
+        }
         this._bufferedBytes += chunk.length;
         this._buffers.push(chunk);
         this.startLoop(cb);
@@ -1154,6 +1173,17 @@ var require_receiver = __commonJS({
           this.controlMessage(data, cb);
           return;
         }
+        if (this._maxFragments > 0 && ++this._numFragments > this._maxFragments) {
+          const error = this.createError(
+            RangeError,
+            "Too many message fragments",
+            false,
+            1008,
+            "WS_ERR_TOO_MANY_BUFFERED_PARTS"
+          );
+          cb(error);
+          return;
+        }
         if (this._compressed) {
           this._state = INFLATING;
           this.decompress(data, cb);
@@ -1211,6 +1241,7 @@ var require_receiver = __commonJS({
         this._totalPayloadLength = 0;
         this._messageLength = 0;
         this._fragmented = 0;
+        this._numFragments = 0;
         this._fragments = [];
         if (this._opcode === 2) {
           let data;
@@ -2395,6 +2426,10 @@ var require_websocket = __commonJS({
        *     multiple times in the same tick
        * @param {Function} [options.generateMask] The function used to generate the
        *     masking key
+       * @param {Number} [options.maxBufferedChunks=0] The maximum number of
+       *     buffered data chunks
+       * @param {Number} [options.maxFragments=0] The maximum number of message
+       *     fragments
        * @param {Number} [options.maxPayload=0] The maximum allowed message size
        * @param {Boolean} [options.skipUTF8Validation=false] Specifies whether or
        *     not to skip UTF-8 validation for text and close messages
@@ -2406,6 +2441,8 @@ var require_websocket = __commonJS({
           binaryType: this.binaryType,
           extensions: this._extensions,
           isServer: this._isServer,
+          maxBufferedChunks: options.maxBufferedChunks,
+          maxFragments: options.maxFragments,
           maxPayload: options.maxPayload,
           skipUTF8Validation: options.skipUTF8Validation
         });
@@ -2705,6 +2742,8 @@ var require_websocket = __commonJS({
         autoPong: true,
         closeTimeout: CLOSE_TIMEOUT,
         protocolVersion: protocolVersions[1],
+        maxBufferedChunks: 256 * 1024,
+        maxFragments: 16 * 1024,
         maxPayload: 100 * 1024 * 1024,
         skipUTF8Validation: false,
         perMessageDeflate: true,
@@ -2947,6 +2986,8 @@ var require_websocket = __commonJS({
         websocket.setSocket(socket, head, {
           allowSynchronousEvents: opts.allowSynchronousEvents,
           generateMask: opts.generateMask,
+          maxBufferedChunks: opts.maxBufferedChunks,
+          maxFragments: opts.maxFragments,
           maxPayload: opts.maxPayload,
           skipUTF8Validation: opts.skipUTF8Validation
         });
@@ -3289,6 +3330,10 @@ var require_websocket_server = __commonJS({
        *     called
        * @param {Function} [options.handleProtocols] A hook to handle protocols
        * @param {String} [options.host] The hostname where to bind the server
+       * @param {Number} [options.maxBufferedChunks=262144] The maximum number of
+       *     buffered data chunks
+       * @param {Number} [options.maxFragments=16384] The maximum number of message
+       *     fragments
        * @param {Number} [options.maxPayload=104857600] The maximum allowed message
        *     size
        * @param {Boolean} [options.noServer=false] Enable no server mode
@@ -3310,6 +3355,8 @@ var require_websocket_server = __commonJS({
         options = {
           allowSynchronousEvents: true,
           autoPong: true,
+          maxBufferedChunks: 256 * 1024,
+          maxFragments: 16 * 1024,
           maxPayload: 100 * 1024 * 1024,
           skipUTF8Validation: false,
           perMessageDeflate: false,
@@ -3589,6 +3636,8 @@ var require_websocket_server = __commonJS({
         socket.removeListener("error", socketOnError);
         ws.setSocket(socket, head, {
           allowSynchronousEvents: this.options.allowSynchronousEvents,
+          maxBufferedChunks: this.options.maxBufferedChunks,
+          maxFragments: this.options.maxFragments,
           maxPayload: this.options.maxPayload,
           skipUTF8Validation: this.options.skipUTF8Validation
         });
@@ -3647,7 +3696,7 @@ var require_websocket_server = __commonJS({
 });
 
 // src/broker/broker-server.ts
-var import_crypto = require("crypto");
+var import_crypto2 = require("crypto");
 var import_http = __toESM(require("http"));
 var import_fs = __toESM(require("fs"));
 var import_path = __toESM(require("path"));
@@ -3662,6 +3711,21 @@ var import_subprotocol = __toESM(require_subprotocol(), 1);
 var import_websocket = __toESM(require_websocket(), 1);
 var import_websocket_server = __toESM(require_websocket_server(), 1);
 var wrapper_default = import_websocket.default;
+
+// src/auth-token.ts
+var import_crypto = require("crypto");
+var AUTH_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+var AUTH_TOKEN_BYTES = 32;
+function isValidAuthToken(value) {
+  return typeof value === "string" && AUTH_TOKEN_PATTERN.test(value) && Buffer.from(value, "base64url").toString("base64url") === value;
+}
+function verifyAuthToken(candidate, expected) {
+  if (!isValidAuthToken(expected)) return false;
+  const candidateIsValid = isValidAuthToken(candidate);
+  const candidateBytes = candidateIsValid ? Buffer.from(candidate, "base64url") : Buffer.alloc(AUTH_TOKEN_BYTES);
+  const expectedBytes = Buffer.from(expected, "base64url");
+  return (0, import_crypto.timingSafeEqual)(candidateBytes, expectedBytes) && candidateIsValid;
+}
 
 // src/protocol.ts
 var PROTOCOL_VERSION = 2;
@@ -3694,6 +3758,9 @@ function toErrorInfo(error) {
 }
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isHelloMessage(value) {
+  return isRecord(value) && value.type === "hello" && (value.role === "agent" || value.role === "extension") && value.protocolVersion === PROTOCOL_VERSION && typeof value.token === "string" && (value.clientName === void 0 || typeof value.clientName === "string");
 }
 function isAgentRequest(value) {
   return isRecord(value) && value.type === "agent_request" && typeof value.requestId === "string" && typeof value.command === "string" && isRecord(value.params) && typeof value.timeout === "number";
@@ -4076,29 +4143,24 @@ var BrokerServer = class {
     this.recordingReservationSessionId = null;
     this.recordingCleanupSessionId = null;
     this.handleAgentConnection = (ws) => {
-      this.awaitHello(ws, "agent", (hello) => {
-        if (hello.role !== "agent") return false;
-        const sessionId = (0, import_crypto.randomUUID)();
+      this.awaitHello(ws, "agent", () => {
+        const sessionId = (0, import_crypto2.randomUUID)();
         this.registry.createSession(sessionId);
         this.agents.set(sessionId, ws);
         this.recordDiagnostic("info", "connection", "AGENT_CONNECTED", "Agent \u5DF2\u8FDE\u63A5");
         this.send(ws, { type: "welcome", protocolVersion: PROTOCOL_VERSION, sessionId });
         ws.on("message", (data) => this.handleAgentMessage(sessionId, data));
         ws.once("close", () => this.handleAgentDisconnect(sessionId));
-        return true;
       });
     };
     this.handleExtensionConnection = (ws, _request, context) => {
-      if (context?.legacy) {
-        this.activateExtension(ws, false);
-        return;
-      }
-      this.awaitHello(ws, "extension", (hello) => {
-        if (hello.role !== "extension") return false;
-        this.activateExtension(ws, true);
-        return true;
+      this.awaitHello(ws, "extension", () => {
+        this.activateExtension(ws, !context?.legacy);
       });
     };
+    if (!isValidAuthToken(config.token)) {
+      throw new Error("Invalid Broker authentication token");
+    }
     this.registry = dependencies.registry ?? new SessionRegistry();
   }
   async start() {
@@ -4362,13 +4424,22 @@ data: ${JSON.stringify(this.diagnosticsSnapshot())}
     return this.extension?.readyState === wrapper_default.OPEN;
   }
   awaitHello(ws, expectedRole, accept) {
-    const timer = setTimeout(() => ws.close(1008, "hello required"), 5e3);
-    ws.once("message", (data) => {
+    const cleanup = () => {
       clearTimeout(timer);
+      ws.off("message", onMessage);
+      ws.off("close", onClose);
+    };
+    const onClose = () => cleanup();
+    const onMessage = (data) => {
+      cleanup();
       let value;
       try {
         value = JSON.parse(data.toString());
       } catch {
+        ws.close(1008, "invalid hello");
+        return;
+      }
+      if (!isRecord2(value) || value.type !== "hello" || value.role !== expectedRole) {
         ws.close(1008, "invalid hello");
         return;
       }
@@ -4378,11 +4449,23 @@ data: ${JSON.stringify(this.diagnosticsSnapshot())}
         ws.close(1002, "PROTOCOL_MISMATCH" /* PROTOCOL_MISMATCH */);
         return;
       }
-      if (hello.type !== "hello" || hello.role !== expectedRole || !accept(hello)) {
-        ws.close(1008, "invalid hello");
+      if (!verifyAuthToken(hello.token, this.config.token)) {
+        this.recordDiagnostic("error", "connection", "AUTH_FAILED" /* AUTH_FAILED */, "WebSocket authentication failed");
+        ws.close(1008, "AUTH_FAILED" /* AUTH_FAILED */);
+        return;
       }
-    });
-    ws.once("close", () => clearTimeout(timer));
+      if (!isHelloMessage(value)) {
+        ws.close(1008, "invalid hello");
+        return;
+      }
+      accept(value);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      ws.close(1008, "hello required");
+    }, 5e3);
+    ws.once("message", onMessage);
+    ws.once("close", onClose);
   }
   activateExtension(ws, sendWelcome) {
     if (this.extension && this.extension !== ws) {
@@ -4618,7 +4701,7 @@ data: ${JSON.stringify(this.diagnosticsSnapshot())}
     if (!this.extension || this.extension.readyState !== wrapper_default.OPEN) {
       return Promise.reject(new ArcTunnelError("EXTENSION_DISCONNECTED" /* EXTENSION_DISCONNECTED */, "EXTENSION_DISCONNECTED" /* EXTENSION_DISCONNECTED */));
     }
-    const extensionCommandId = (0, import_crypto.randomUUID)();
+    const extensionCommandId = (0, import_crypto2.randomUUID)();
     const timeout = Math.max(0, request.timeout);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -4906,19 +4989,27 @@ function resolveBrokerConfig(options) {
     port: parsePort(raw)
   };
 }
-function loadBrokerConfig(argv, env, homeDir = import_os.default.homedir()) {
+function loadFileConfig(homeDir) {
   const configPath = import_path2.default.join(homeDir, ".arc-tunnel", "config.json");
-  let fileConfig = null;
   try {
     const raw = import_fs2.default.readFileSync(configPath, "utf8");
-    fileConfig = JSON.parse(raw);
+    return JSON.parse(raw);
   } catch (error) {
     const nodeError = error;
     if (nodeError.code !== "ENOENT") {
       throw new Error(`Invalid Arc Tunnel config: ${configPath}`);
     }
+    return null;
   }
-  return resolveBrokerConfig({ argv, env, fileConfig });
+}
+function loadBrokerConfig(argv, env, homeDir = import_os.default.homedir()) {
+  const fileConfig = loadFileConfig(homeDir);
+  const endpoint = resolveBrokerConfig({ argv, env, fileConfig });
+  const token = env.ARC_TUNNEL_TOKEN ?? fileConfig?.token;
+  if (!isValidAuthToken(token)) {
+    throw new Error("Arc Tunnel authentication token is missing or invalid. Run node scripts/install.js to configure it.");
+  }
+  return { ...endpoint, token };
 }
 
 // src/broker-entry.ts

@@ -3,7 +3,7 @@ import fs from 'fs';
 import http from 'http';
 import os from 'os';
 import path from 'path';
-import { BrokerConfig } from './config';
+import { BrokerConfig, BrokerEndpointConfig } from './config';
 import { ArcTunnelError, ErrorCode, PROTOCOL_VERSION } from './protocol';
 import { DiagnosticsSnapshot } from './broker/diagnostics-store';
 
@@ -32,7 +32,7 @@ export type BrokerInspection =
 interface LauncherOptions {
   homeDir?: string;
   brokerEntry?: string;
-  brokerArgs?: (config: BrokerConfig) => string[];
+  brokerArgs?: (config: BrokerEndpointConfig) => string[];
   startupTimeout?: number;
   spawnProcess?: typeof spawn;
 }
@@ -42,12 +42,12 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
   const arcDir = path.join(homeDir, '.arc-tunnel');
   const lockPath = path.join(arcDir, 'broker.lock');
   const brokerEntry = options.brokerEntry ?? path.resolve(__dirname, '../dist/arc-tunnel-broker.js');
-  const brokerArgs = options.brokerArgs ?? ((config: BrokerConfig) => ['--port', String(config.port)]);
+  const brokerArgs = options.brokerArgs ?? ((config: BrokerEndpointConfig) => ['--port', String(config.port)]);
   const startupTimeout = options.startupTimeout ?? 5_000;
   const spawnProcess = options.spawnProcess ?? spawn;
   const starting = new Map<number, Promise<void>>();
 
-  async function probe(config: BrokerConfig, deadline = Date.now() + Math.min(250, startupTimeout)): Promise<Probe> {
+  async function probe(config: BrokerEndpointConfig, deadline = Date.now() + Math.min(250, startupTimeout)): Promise<Probe> {
     return new Promise((resolve) => {
       let settled = false;
       let connected = false;
@@ -123,7 +123,7 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
     }
   }
 
-  async function waitForBroker(config: BrokerConfig, deadline: number): Promise<void> {
+  async function waitForBroker(config: BrokerEndpointConfig, deadline: number): Promise<void> {
     while (Date.now() < deadline) {
       const result = await probe(config, deadline);
       if (result.kind === 'arc') return;
@@ -182,8 +182,11 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
         ownedLockRaw = JSON.stringify({ pid: process.pid, port: config.port, protocolVersion: PROTOCOL_VERSION });
         fs.writeFileSync(fd, ownedLockRaw);
         fs.closeSync(fd);
-        child = spawnProcess(process.execPath, [brokerEntry, ...brokerArgs(config)], {
-          detached: true, stdio: 'ignore', windowsHide: true
+        child = spawnProcess(process.execPath, [brokerEntry, ...brokerArgs({ host: config.host, port: config.port })], {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+          env: { ...process.env, ARC_TUNNEL_TOKEN: config.token }
         });
         child.unref();
         if (typeof child.pid !== 'number') throw new Error('Broker process did not provide a pid');
@@ -207,13 +210,13 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
     return promise;
   }
 
-  async function getBrokerStatus(config: BrokerConfig): Promise<BrokerStatus> {
+  async function getBrokerStatus(config: BrokerEndpointConfig): Promise<BrokerStatus> {
     const result = await probe(config);
     if (result.kind !== 'arc') return { running: false, port: config.port };
     return { running: true, port: config.port, protocolVersion: result.health.protocolVersion, pid: result.health.pid };
   }
 
-  function requestJson(config: BrokerConfig, requestPath: string): Promise<JsonResult> {
+  function requestJson(config: BrokerEndpointConfig, requestPath: string): Promise<JsonResult> {
     return new Promise((resolve) => {
       let settled = false;
       let response: http.IncomingMessage | undefined;
@@ -289,7 +292,7 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
       && validRecentError;
   }
 
-  async function inspectBroker(config: BrokerConfig): Promise<BrokerInspection> {
+  async function inspectBroker(config: BrokerEndpointConfig): Promise<BrokerInspection> {
     const healthResult = await requestJson(config, '/health');
     if (healthResult.kind === 'absent') return { kind: 'absent', port: config.port };
     if (healthResult.kind !== 'ok' || !isRecord(healthResult.value)) {
@@ -313,7 +316,7 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
       diagnostics: status.value };
   }
 
-  async function stopBroker(config: BrokerConfig): Promise<void> {
+  async function stopBroker(config: BrokerEndpointConfig): Promise<void> {
     const deadline = Date.now() + startupTimeout;
     let result = await probe(config, deadline);
     while (result.kind === 'foreign' && result.transient && Date.now() < deadline) {
@@ -351,7 +354,7 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
     await removeStoppedLock(config, deadline, false);
   }
 
-  async function removeStoppedLock(config: BrokerConfig, deadline: number, waitForProcess: boolean): Promise<void> {
+  async function removeStoppedLock(config: BrokerEndpointConfig, deadline: number, waitForProcess: boolean): Promise<void> {
     const snapshot = readLockSnapshot();
     if (!snapshot) return;
     if (!snapshot.lock) {
