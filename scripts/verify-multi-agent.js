@@ -5,6 +5,7 @@ const path = require('path');
 const readline = require('readline/promises');
 const { Client } = require('../mcp-server/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js');
 const { StdioClientTransport } = require('../mcp-server/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/stdio.js');
+const { parseToolResult } = require('./parse-tool-result.js');
 
 const root = path.resolve(__dirname, '..');
 const args = process.argv.slice(2);
@@ -12,11 +13,17 @@ const valueAfter = flag => { const index = args.indexOf(flag); return index >= 0
 const port = Number(valueAfter('--port') || process.env.WS_PORT || 8765);
 const waitMs = Number(valueAfter('--release-wait-ms') || 31_000);
 
-function textResult(result) {
-  const text = result.content?.find(item => item.type === 'text')?.text;
-  const value = text ? JSON.parse(text) : undefined;
-  if (result.isError) throw Object.assign(new Error(value?.error || 'Tool failed'), value);
-  return value;
+function requireJpegImage(result) {
+  const parsed = parseToolResult(result);
+  const jpeg = parsed.images.find(item =>
+    item?.mimeType === 'image/jpeg' && typeof item.data === 'string' && item.data.length > 0
+  );
+  if (!jpeg) throw new Error('screenshot did not return a non-empty MCP image/jpeg item');
+  return jpeg;
+}
+
+function inheritedClientEnvironment(selectedPort, environment = process.env) {
+  return { ...environment, WS_PORT: String(selectedPort) };
 }
 
 async function connect(name, peers) {
@@ -24,7 +31,7 @@ async function connect(name, peers) {
     command: process.execPath,
     args: [path.join(root, 'mcp-server/dist/mcp-server.js')],
     cwd: path.join(root, 'mcp-server'),
-    env: { ...process.env, WS_PORT: String(port) },
+    env: inheritedClientEnvironment(port),
     stderr: 'pipe'
   });
   transport.stderr.on('data', chunk => process.stderr.write(`[${name}] ${chunk}`));
@@ -36,7 +43,15 @@ async function connect(name, peers) {
 }
 
 async function call(peer, name, arguments_ = {}) {
-  return textResult(await peer.client.callTool({ name, arguments: arguments_ }));
+  return parseToolResult(await peer.client.callTool({ name, arguments: arguments_ })).value;
+}
+
+async function screenshot(peer, tabId) {
+  const result = await peer.client.callTool({
+    name: 'screenshot',
+    arguments: { tabId, format: 'jpeg', quality: 70, maxWidth: 800 }
+  });
+  return requireJpegImage(result);
 }
 
 function isTransientNavigationError(error) {
@@ -87,7 +102,7 @@ async function waitForExpectedLocation(peer, tabId, expectedUrl, deadline = Date
 
 async function main() {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`Invalid port: ${port}`);
-  console.log(`Arc Tunnel multi-agent verification on ws://localhost:${port}`);
+  console.log(`Arc Tunnel multi-agent verification on ws://127.0.0.1:${port}`);
   const peers = [];
   let alpha;
   let beta;
@@ -104,7 +119,7 @@ async function main() {
       ]);
     } catch (error) {
       if (error.code === 'EXTENSION_DISCONNECTED') {
-        throw new Error(`Extension is not connected to ws://localhost:${port}. Load extension/dist, set the popup URL to this port, connect it, then rerun.`);
+        throw new Error(`Extension is not connected to ws://127.0.0.1:${port}. Load extension/dist, set the popup URL to this port, connect it, then rerun.`);
       }
       throw error;
     }
@@ -130,6 +145,19 @@ async function main() {
       throw new Error(`Navigation crossover or wrong URL: ${JSON.stringify(locations)}`);
     }
     console.log(`PASS concurrent navigation verified alpha=${locations[0]} beta=${locations[1]}`);
+
+    await Promise.all([
+      screenshot(alpha, alphaTab.tabId),
+      screenshot(beta, betaTab.tabId)
+    ]);
+    console.log('PASS each Agent received a non-empty JPEG screenshot from its owned tab');
+    try {
+      await screenshot(beta, alphaTab.tabId);
+      throw new Error('Foreign screenshot unexpectedly succeeded');
+    } catch (error) {
+      if (error.code !== 'TAB_NOT_OWNED') throw error;
+    }
+    console.log('PASS foreign-owned screenshot returned TAB_NOT_OWNED');
 
     let manualTab = Number(valueAfter('--manual-tab'));
     if (!Number.isSafeInteger(manualTab)) {
@@ -201,7 +229,7 @@ async function main() {
   if (cleanupErrors.length) throw Object.assign(new Error('Client cleanup failed'), { cleanupErrors });
 }
 
-module.exports = { waitForExpectedLocation };
+module.exports = { inheritedClientEnvironment, requireJpegImage, waitForExpectedLocation };
 
 if (require.main === module) {
   main().catch(error => { console.error(`FAIL: ${error.message}`); process.exitCode = 1; });

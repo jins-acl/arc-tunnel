@@ -1,7 +1,7 @@
 # Arc Tunnel Lightweight Authentication Hardening Design
 
 **Date:** 2026-07-30  
-**Status:** Awaiting written-spec review  
+**Status:** Approved
 **Target branch:** `codex/arc-tunnel-lightweight-auth-hardening`
 
 ## 1. Goal

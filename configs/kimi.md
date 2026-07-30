@@ -17,4 +17,6 @@ as Claude Code where MCP configuration is supported.
 ```
 
 Use the same `WS_PORT` for every Agent and configure the extension popup to connect to
-that port. See the project README for Broker lifecycle and tab ownership behavior.
+that port. Authentication is read from `~/.arc-tunnel/config.json`; do not put the
+token in this Agent configuration. See the project README for Broker lifecycle and tab
+ownership behavior.

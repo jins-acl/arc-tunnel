@@ -1,6 +1,7 @@
 mcp_servers:
   arc-tunnel:
     # Lightweight MCP client that connects to or starts the shared Browser Broker.
+    # Authentication is read from ~/.arc-tunnel/config.json; do not copy the token here.
     command: "node"
     args:
       - "{{REPO_PATH}}/mcp-server/dist/mcp-server.js"

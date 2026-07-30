@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Deterministic Task 8 documentation and template assertions. */
+/** Deterministic repository documentation and template assertions. */
 
 const fs = require('fs');
 
@@ -69,6 +69,50 @@ for (const file of docs) {
   }
 }
 
+const readme = read('README.md');
+for (const text of [
+  '{ "port": 8765, "token": "..." }',
+  '`ARC_TUNNEL_TOKEN` 优先于用户级配置文件',
+  '令牌不放在命令行参数或 WebSocket URL 中',
+  '安装器只在首次生成令牌时显示一次',
+  '扩展弹窗中的密码输入框',
+  '`auth_failed`',
+  'Node.js `>=22`',
+  'npm run audit:prod',
+  '本地 Broker 能力边界',
+  '共享浏览器配置文件',
+  'node scripts/verify-multi-agent.js'
+]) {
+  if (!readme.includes(text)) throw new Error(`README.md is missing authentication guidance: ${text}`);
+}
+
+const agents = read('AGENTS.md');
+for (const text of [
+  '{ "port": 8765, "token": "..." }',
+  '`ARC_TUNNEL_TOKEN` takes precedence over the file token',
+  'Node.js `>=22`',
+  'npm run audit:prod',
+  'local Broker capability boundary'
+]) {
+  if (!agents.includes(text)) throw new Error(`AGENTS.md is missing authentication guidance: ${text}`);
+}
+
+const forbiddenCredentialExamples = [
+  [/\bnode\b[^\r\n]*\s--token(?:\s|=)/, 'token-bearing CLI example'],
+  [/wss?:\/\/[^\s"'`<>]*[?&#][^\s"'`<>]*token=/i, 'token-bearing WebSocket URL example']
+];
+for (const file of [
+  'README.md',
+  'AGENTS.md',
+  'docs/superpowers/specs/2026-07-30-arc-tunnel-lightweight-auth-hardening-design.md',
+  ...fs.readdirSync('configs').map(name => `configs/${name}`)
+]) {
+  const content = read(file);
+  for (const [pattern, label] of forbiddenCredentialExamples) {
+    if (pattern.test(content)) throw new Error(`${file} contains a forbidden ${label}`);
+  }
+}
+
 if (!read('AGENTS.md').includes('mcp-server/dist/arc-tunnel-control.js')) {
   throw new Error('AGENTS.md is missing the committed lifecycle artifact');
 }
@@ -86,6 +130,15 @@ for (const file of [
   const content = read(file);
   for (const text of ['command', 'mcp-server/dist/mcp-server.js', 'WS_PORT', '8765']) {
     if (!content.includes(text)) throw new Error(`${file} is missing invariant: ${text}`);
+  }
+  if (!content.includes('~/.arc-tunnel/config.json')) {
+    throw new Error(`${file} must explain that authentication is read from the user-level Arc Tunnel config`);
+  }
+  if (/(?:^|["'\s])ARC_TUNNEL_TOKEN(?:["'\s:]|$)/m.test(content)) {
+    throw new Error(`${file} must not embed an authentication token environment variable`);
+  }
+  if (/(?:^|["'\s])token["']?\s*:/im.test(content)) {
+    throw new Error(`${file} must not embed an authentication token field`);
   }
 }
 
