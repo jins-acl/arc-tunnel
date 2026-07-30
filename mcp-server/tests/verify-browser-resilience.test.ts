@@ -1,5 +1,6 @@
 const {
   assertFailFastTiming,
+  cleanupVerifierResources,
   closeHttpServer,
   parseToolResult
 } = require('../../scripts/verify-browser-resilience.js');
@@ -76,10 +77,17 @@ describe('browser resilience verifier helpers', () => {
       activeRequest.on('error', () => {});
       await requestStarted;
 
-      await expect(Promise.race([
-        closeHttpServer(server),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('HTTP cleanup remained blocked')), 1_000))
-      ])).resolves.toBeUndefined();
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await expect(Promise.race([
+          closeHttpServer(server),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('HTTP cleanup remained blocked')), 1_000);
+          })
+        ])).resolves.toBeUndefined();
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     } finally {
       request?.destroy();
       if (server.listening) {
@@ -87,6 +95,100 @@ describe('browser resilience verifier helpers', () => {
           server.close(() => resolve());
           server.closeAllConnections?.();
         });
+      }
+    }
+  });
+
+  it('destroys tracked real keep-alive sockets when closeAllConnections is unavailable', async () => {
+    let markRequestStarted!: () => void;
+    let markSocketClosed!: () => void;
+    const requestStarted = new Promise<void>(resolve => { markRequestStarted = resolve; });
+    const socketClosed = new Promise<void>(resolve => { markSocketClosed = resolve; });
+    const trackedSockets = new Set<import('node:net').Socket>();
+    const server = http.createServer(
+      (_request: import('node:http').IncomingMessage, _response: import('node:http').ServerResponse) => markRequestStarted()
+    );
+    let trackedSocket: import('node:net').Socket | undefined;
+    let request: import('node:http').ClientRequest | undefined;
+    const agent = new http.Agent({ keepAlive: true });
+
+    server.on('connection', (socket: import('node:net').Socket) => {
+      trackedSocket = socket;
+      trackedSockets.add(socket);
+      socket.once('close', () => {
+        trackedSockets.delete(socket);
+        markSocketClosed();
+      });
+    });
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Test server did not expose a port');
+
+      const activeRequest = http.get(`http://127.0.0.1:${address.port}/`, { agent });
+      request = activeRequest;
+      activeRequest.on('error', () => {});
+      await requestStarted;
+
+      Object.defineProperty(server, 'closeAllConnections', {
+        configurable: true,
+        value: undefined
+      });
+
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          closeHttpServer(server, trackedSockets),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('Compatibility cleanup remained blocked')), 1_000);
+          })
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+
+      await socketClosed;
+      expect(trackedSocket).toBeDefined();
+      expect(trackedSocket!.destroyed).toBe(true);
+      expect(trackedSockets.size).toBe(0);
+    } finally {
+      request?.destroy();
+      agent.destroy();
+      if (server.listening) {
+        await new Promise<void>(resolve => server.close(() => resolve()));
+      }
+    }
+  });
+
+  it('preserves non-benign close errors through verifier cleanup aggregation', async () => {
+    const server = http.createServer();
+    const injectedError = { code: 'EIO' };
+    const originalClose = server.close.bind(server);
+    const cleanupErrors: unknown[] = [];
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      server.close = ((callback?: (error?: Error) => void) => {
+        callback?.(injectedError as unknown as Error);
+        return server;
+      }) as typeof server.close;
+
+      await expect(closeHttpServer(server)).rejects.toBe(injectedError);
+
+      await cleanupVerifierResources({ server, serverSockets: new Set() }, cleanupErrors);
+      expect(cleanupErrors).toHaveLength(1);
+      expect(cleanupErrors[0]).toBe(injectedError);
+    } finally {
+      server.close = originalClose;
+      if (server.listening) {
+        await new Promise<void>(resolve => server.close(() => resolve()));
       }
     }
   });
