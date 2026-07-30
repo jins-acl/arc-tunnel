@@ -1,7 +1,13 @@
 import { CommandMessage, ResponseMessage, EventMessage, HelloMessage } from '../types';
+import { isValidAuthToken } from '../auth-token';
+
+export { isValidAuthToken } from '../auth-token';
 
 export const DEFAULT_WS_URL = 'ws://127.0.0.1:8765';
 const HEARTBEAT_INTERVAL_MS = 10_000;
+const AUTHENTICATION_FAILED_MESSAGE = 'Broker authentication failed';
+
+export type ConnectionState = 'idle' | 'connecting' | 'connected' | 'auth_failed';
 
 const LEGACY_DEFAULT_URLS = new Map([
   ['ws://localhost:8765', DEFAULT_WS_URL],
@@ -24,6 +30,9 @@ export function normalizeWebSocketUrl(url: string): string {
 export class WebSocketClient {
   private ws: WebSocket | null = null;
   private url: string;
+  private token: string;
+  private rejectedToken: string | null = null;
+  private connectionState: ConnectionState = 'idle';
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 10;
   private reconnectDelay = 1000;
@@ -38,14 +47,35 @@ export class WebSocketClient {
   private rejectConnect: ((error: Error) => void) | null = null;
   private handshakeComplete = false;
 
-  constructor(url?: string) {
+  constructor(url?: string, token = '') {
     this.url = normalizeWebSocketUrl(resolveConfiguredWebSocketUrl(url));
+    this.token = token;
   }
 
   setUrl(url: string): void {
     const normalizedUrl = normalizeWebSocketUrl(resolveConfiguredWebSocketUrl(url));
     if (normalizedUrl === this.url) return;
+    this.replaceConfig(normalizedUrl, this.token, false);
+  }
 
+  setConfig(url: string, token: string): boolean {
+    if (!isValidAuthToken(token)) return false;
+    const normalizedUrl = normalizeWebSocketUrl(resolveConfiguredWebSocketUrl(url));
+    if (normalizedUrl === this.url && token === this.token) return false;
+
+    this.replaceConfig(normalizedUrl, token, token !== this.token);
+    return true;
+  }
+
+  getConnectionState(): ConnectionState {
+    return this.connectionState;
+  }
+
+  canReconnect(): boolean {
+    return !this.isCurrentTokenRejected();
+  }
+
+  private replaceConfig(normalizedUrl: string, token: string, tokenChanged: boolean): void {
     ++this.connectionGeneration;
     this.clearReconnectTimer();
     this.clearHeartbeatTimer();
@@ -54,21 +84,29 @@ export class WebSocketClient {
     const oldSocket = this.ws;
     this.ws = null;
     this.handshakeComplete = false;
-    this.rejectPendingConnect(new Error('Connection superseded by URL change'));
+    this.rejectPendingConnect(new Error('Connection superseded by configuration change'));
     oldSocket?.close();
     this.url = normalizedUrl;
+    this.token = token;
+    if (tokenChanged) this.rejectedToken = null;
+    this.connectionState = this.isCurrentTokenRejected() ? 'auth_failed' : 'idle';
     this.intentionalClose = false;
   }
 
   async connect(): Promise<void> {
     if (this.isConnected()) return;
     if (this.connectPromise) return this.connectPromise;
+    if (this.isCurrentTokenRejected()) {
+      this.connectionState = 'auth_failed';
+      throw new Error(AUTHENTICATION_FAILED_MESSAGE);
+    }
 
     this.clearReconnectTimer();
     this.clearHeartbeatTimer();
     const generation = ++this.connectionGeneration;
     this.intentionalClose = false;
     this.handshakeComplete = false;
+    this.connectionState = 'connecting';
 
     this.connectPromise = new Promise((resolve, reject) => {
       this.rejectConnect = reject;
@@ -79,6 +117,7 @@ export class WebSocketClient {
         if (generation !== this.connectionGeneration) return;
         this.connectPromise = null;
         this.rejectConnect = null;
+        this.connectionState = 'connected';
         resolve();
       };
 
@@ -98,6 +137,7 @@ export class WebSocketClient {
         chrome.alarms.clear('ws-reconnect');
         if (this.ws === socket) this.ws = null;
         this.handshakeComplete = false;
+        this.connectionState = 'idle';
         socket.close();
       };
 
@@ -105,7 +145,12 @@ export class WebSocketClient {
         if (generation !== this.connectionGeneration) return;
         console.log('Connected to Arc Tunnel broker');
         this.intentionalClose = false;
-        const hello: HelloMessage = { type: 'hello', role: 'extension', protocolVersion: 2 };
+        const hello: HelloMessage = {
+          type: 'hello',
+          role: 'extension',
+          protocolVersion: 2,
+          token: this.token
+        };
         socket.send(JSON.stringify(hello));
       };
 
@@ -114,12 +159,17 @@ export class WebSocketClient {
         console.error('WebSocket error');
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
+        if (event.code === 1008 && event.reason === 'AUTH_FAILED') {
+          this.enterAuthFailed(generation, socket);
+          return;
+        }
         if (generation !== this.connectionGeneration || this.intentionalClose) return;
         console.log('Disconnected from Arc Tunnel broker');
         this.clearHeartbeatTimer();
         this.ws = null;
         this.handshakeComplete = false;
+        this.connectionState = 'idle';
         rejectCurrentConnect(new Error('WebSocket closed before handshake completed'));
         this.handleReconnect(generation);
       };
@@ -167,16 +217,26 @@ export class WebSocketClient {
     this.ws = null;
     this.handshakeComplete = false;
     this.rejectPendingConnect(new Error('Connection closed intentionally'));
+    this.connectionState = this.isCurrentTokenRejected() ? 'auth_failed' : 'idle';
     socket?.close();
   }
 
   prepareForSuspend(): void {
+    if (this.isCurrentTokenRejected()) {
+      this.clearReconnectTimer();
+      this.clearHeartbeatTimer();
+      chrome.alarms.clear('ws-reconnect');
+      this.connectionState = 'auth_failed';
+      return;
+    }
+
     const generation = ++this.connectionGeneration;
     this.clearReconnectTimer();
     this.clearHeartbeatTimer();
     const socket = this.ws;
     this.ws = null;
     this.handshakeComplete = false;
+    this.connectionState = 'idle';
     this.rejectPendingConnect(new Error('Service worker suspended'));
     this.handleReconnect(generation);
     socket?.close();
@@ -205,7 +265,12 @@ export class WebSocketClient {
   }
 
   private handleReconnect(generation: number): void {
-    if (generation !== this.connectionGeneration || this.intentionalClose || this.reconnectTimer) return;
+    if (
+      generation !== this.connectionGeneration ||
+      this.intentionalClose ||
+      this.reconnectTimer ||
+      this.isCurrentTokenRejected()
+    ) return;
 
     const fastRetriesExhausted = this.reconnectAttempts >= this.maxReconnectAttempts;
     const delay = fastRetriesExhausted
@@ -221,7 +286,11 @@ export class WebSocketClient {
       : `Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
-      if (generation !== this.connectionGeneration || this.intentionalClose) return;
+      if (
+        generation !== this.connectionGeneration ||
+        this.intentionalClose ||
+        this.isCurrentTokenRejected()
+      ) return;
       try {
         await this.connect();
       } catch (error) {
@@ -274,6 +343,7 @@ export class WebSocketClient {
     this.clearHeartbeatTimer();
     this.ws = null;
     this.handshakeComplete = false;
+    this.connectionState = 'idle';
     const reconnectGeneration = ++this.connectionGeneration;
     try {
       socket.close();
@@ -295,5 +365,22 @@ export class WebSocketClient {
     this.rejectConnect = null;
     this.connectPromise = null;
     reject?.(error);
+  }
+
+  private enterAuthFailed(generation: number, socket: WebSocket): void {
+    if (generation !== this.connectionGeneration || this.ws !== socket) return;
+
+    this.clearReconnectTimer();
+    this.clearHeartbeatTimer();
+    chrome.alarms.clear('ws-reconnect');
+    this.rejectedToken = this.token;
+    this.ws = null;
+    this.handshakeComplete = false;
+    this.connectionState = 'auth_failed';
+    this.rejectPendingConnect(new Error(AUTHENTICATION_FAILED_MESSAGE));
+  }
+
+  private isCurrentTokenRejected(): boolean {
+    return this.rejectedToken !== null && this.token === this.rejectedToken;
   }
 }

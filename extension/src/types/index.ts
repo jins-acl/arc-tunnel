@@ -28,6 +28,7 @@ export interface HelloMessage {
   type: 'hello';
   role: 'extension';
   protocolVersion: 2;
+  token: string;
 }
 
 export interface ErrorInfo {
