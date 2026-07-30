@@ -3,7 +3,7 @@ import fs from 'fs';
 import http from 'http';
 import os from 'os';
 import path from 'path';
-import { BrokerEndpointConfig } from './config';
+import { BrokerConfig, BrokerEndpointConfig } from './config';
 import { ArcTunnelError, ErrorCode, PROTOCOL_VERSION } from './protocol';
 import { DiagnosticsSnapshot } from './broker/diagnostics-store';
 
@@ -134,7 +134,7 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
     throw new ArcTunnelError(ErrorCode.CONNECTION_LOST, `Broker did not become healthy within ${startupTimeout}ms`);
   }
 
-  async function waitForLockOwner(config: BrokerEndpointConfig, deadline: number): Promise<void> {
+  async function waitForLockOwner(config: BrokerConfig, deadline: number): Promise<void> {
     while (Date.now() < deadline) {
       const current = await probe(config, deadline);
       if (current.kind === 'arc') return;
@@ -162,7 +162,7 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
     throw new ArcTunnelError(ErrorCode.CONNECTION_LOST, `Broker lock did not become healthy within ${startupTimeout}ms`);
   }
 
-  async function launch(config: BrokerEndpointConfig, deadline = Date.now() + startupTimeout): Promise<void> {
+  async function launch(config: BrokerConfig, deadline = Date.now() + startupTimeout): Promise<void> {
     while (true) {
       const current = await probe(config, deadline);
       if (current.kind === 'arc') return;
@@ -182,8 +182,11 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
         ownedLockRaw = JSON.stringify({ pid: process.pid, port: config.port, protocolVersion: PROTOCOL_VERSION });
         fs.writeFileSync(fd, ownedLockRaw);
         fs.closeSync(fd);
-        child = spawnProcess(process.execPath, [brokerEntry, ...brokerArgs(config)], {
-          detached: true, stdio: 'ignore', windowsHide: true
+        child = spawnProcess(process.execPath, [brokerEntry, ...brokerArgs({ host: config.host, port: config.port })], {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+          env: { ...process.env, ARC_TUNNEL_TOKEN: config.token }
         });
         child.unref();
         if (typeof child.pid !== 'number') throw new Error('Broker process did not provide a pid');
@@ -199,7 +202,7 @@ export function createBrokerLauncher(options: LauncherOptions = {}) {
     }
   }
 
-  async function ensureBroker(config: BrokerEndpointConfig): Promise<void> {
+  async function ensureBroker(config: BrokerConfig): Promise<void> {
     const existing = starting.get(config.port);
     if (existing) return existing;
     const promise = launch(config).finally(() => starting.delete(config.port));

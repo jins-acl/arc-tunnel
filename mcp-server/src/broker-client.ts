@@ -63,7 +63,13 @@ export class BrokerClient {
       const onError = () => {
         if (!settled) fail(new ArcTunnelError(ErrorCode.CONNECTION_LOST, 'Unable to connect to Broker'));
       };
-      const onClose = () => fail(new ArcTunnelError(ErrorCode.CONNECTION_LOST, 'Broker closed during handshake'));
+      const onClose = (code: number, reason: Buffer) => {
+        if (code === 1008 && reason.toString() === ErrorCode.AUTH_FAILED) {
+          fail(new ArcTunnelError(ErrorCode.AUTH_FAILED, 'Broker authentication failed'));
+          return;
+        }
+        fail(new ArcTunnelError(ErrorCode.CONNECTION_LOST, 'Broker closed during handshake'));
+      };
       const timer = setTimeout(() => fail(new ArcTunnelError(ErrorCode.CONNECTION_LOST, 'Broker handshake timed out')), 5_000);
       ws.once('open', onOpen);
       ws.once('message', onMessage);
