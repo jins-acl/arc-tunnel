@@ -43,10 +43,11 @@ same custom port.
 
 Run `node scripts/install.js` to generate a missing token or migrate a legacy port-only
 file. The installer preserves a valid existing token and prints a newly generated token
-once so it can be pasted into the extension popup. Agent templates must not contain the
-token: the lightweight client reads the user-level config. Authentication has no
-credential command-line flag and never puts a token in a WebSocket URL, avoiding
-exposure through process listings, shell history, and URL logging.
+once. That generated file token is the popup token only when `ARC_TUNNEL_TOKEN` is not
+set. Agent templates must not contain the token: the lightweight client reads the
+user-level config. Authentication has no credential command-line flag and never puts a
+token in a WebSocket URL, avoiding exposure through process listings, shell history,
+and URL logging.
 
 ## Broker lifecycle
 
@@ -93,10 +94,14 @@ unauthenticated; browser-control WebSocket capabilities require the token.
 Load `extension/dist/` unpacked in Chrome/Edge Developer mode. The popup defaults to
 `ws://127.0.0.1:8765`; change it whenever the Broker uses a custom port. Using the
 explicit IPv4 loopback avoids `localhost` resolving to an unrelated IPv6 listener.
-Paste the installer-provided token into the popup password field and Save. If the popup
-shows `auth_failed`, copy the correct token from your own
-`~/.arc-tunnel/config.json`, save it, and confirm the state returns to `Connected`;
-the extension does not retry the same rejected credential.
+When `ARC_TUNNEL_TOKEN` is set, the extension must use that same effective token,
+obtained from the controlled source that set the environment; the persisted file token
+does not override it. Alternatively, unset the environment override, restart the Broker
+and every Agent client, then use the token from `~/.arc-tunnel/config.json`. Paste the
+effective token into the popup password field and Save. If the popup shows
+`Authentication failed` (`auth_failed`), save the correct effective token and confirm
+the state returns to `Connected`; the extension does not retry the same rejected
+credential. Never use a command that prints the token.
 
 Root extension URLs are normalized to `/extension`. The legacy `/` path is accepted only
 with a `chrome-extension://` Origin. The Broker rejects ordinary `http://` and `https://`
@@ -122,15 +127,19 @@ disconnected, ensure all client `WS_PORT` values and the popup port match, reloa
 current `extension/dist/`, and rebuild all bundles together on protocol mismatch. Never
 stop an unknown process occupying a selected port.
 
-For migration, pull and build the source, run `node scripts/install.js`, copy a token
-only if the installer displays a newly generated one, reload `extension/dist/`, paste
-the token into the popup and Save, then confirm `Connected` and run
-`node scripts/start.js diagnose --json`.
+For migration, pull and build the source, run `node scripts/install.js`, determine the
+effective source (`ARC_TUNNEL_TOKEN` when set, otherwise the persisted token), reload
+`extension/dist/`, paste and Save the same effective token, then confirm `Connected`
+and run `node scripts/start.js diagnose --json`. An installer-displayed token is the
+effective token only when there is no environment override.
 
 Real-browser authentication recovery must prove that a valid-format but incorrect popup
-token reaches stable `auth_failed` without a reconnect loop, then that saving the
-correct token reaches `Connected`. The tracked MCP-client verifiers inherit environment
-and file authentication without printing credentials.
+token reaches `Authentication failed` (`auth_failed`) without a reconnect loop, then
+that saving the correct effective token reaches `Connected`. If the environment
+override remains set, recovery must use that environment token; the persisted token
+becomes effective only after unsetting the override and restarting the Broker and every
+Agent client. The tracked MCP-client verifiers inherit environment and file
+authentication without printing credentials.
 
 For the repeatable frozen-page D/F/C check, run:
 

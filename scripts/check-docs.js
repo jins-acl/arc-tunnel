@@ -5,6 +5,61 @@ const fs = require('fs');
 
 const read = (file) => fs.readFileSync(file, 'utf8');
 const parsePackage = (file) => JSON.parse(read(file));
+const assertOrdered = (label, content, markers) => {
+  const normalized = content.replace(/\s+/g, ' ');
+  let offset = -1;
+  for (const marker of markers) {
+    const next = normalized.indexOf(marker.replace(/\s+/g, ' '), offset + 1);
+    if (next < 0) throw new Error(`${label} is missing ordered migration step: ${marker}`);
+    if (next <= offset) throw new Error(`${label} has migration steps out of order: ${marker}`);
+    offset = next;
+  }
+};
+const fencedBlocks = content =>
+  [...content.matchAll(/```[^\r\n]*\r?\n([\s\S]*?)```/g)].map(match => match[1]);
+const hasStandaloneTokenFlag = content =>
+  /(?:^|[\s"',\[\]])--token(?=$|[\s="',\[\]])/m.test(content);
+const yamlBlock = (content, key) => {
+  const lines = content.split(/\r?\n/);
+  const start = lines.findIndex(line => new RegExp(`^(\\s*)${key}:\\s*$`).test(line));
+  if (start < 0) throw new Error(`YAML template is missing ${key}`);
+  const indent = lines[start].match(/^\s*/)[0].length;
+  const block = [];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.trim() && line.match(/^\s*/)[0].length <= indent) break;
+    block.push(line);
+  }
+  return block;
+};
+const assertSafeTemplateShape = (file, args, envKeys) => {
+  if (!Array.isArray(args) || args.some(value => typeof value !== 'string')) {
+    throw new Error(`${file} must contain a string args list`);
+  }
+  if (args.some(value => value.includes('--token'))) {
+    throw new Error(`${file} must not place a token flag in args`);
+  }
+  if (envKeys.some(key => /token/i.test(key))) {
+    throw new Error(`${file} must not place a token key in env`);
+  }
+};
+const assertSafeWebSocketUrls = (file, content) => {
+  for (const match of content.matchAll(/wss?:\/\/[^\s"'`<>),]+/gi)) {
+    const raw = match[0].replace(/[.;:]+$/, '');
+    let url;
+    try {
+      url = new URL(raw);
+    } catch {
+      throw new Error(`${file} contains an invalid WebSocket URL example`);
+    }
+    const location = `${url.pathname}${url.search}${url.hash}`;
+    if (url.username || url.password
+      || /(?:^|[/?#&;])(?:token|auth(?:entication)?|credential)(?:[=/:~-]|$)/i.test(location)
+      || /(?:^|[/?#&;=:@])[A-Za-z0-9_-]{43}(?=$|[/?#&;=:@])/.test(location)) {
+      throw new Error(`${file} contains a credential-bearing WebSocket URL example`);
+    }
+  }
+};
 const root = parsePackage('package.json');
 const mcp = parsePackage('mcp-server/package.json');
 const extension = parsePackage('extension/package.json');
@@ -81,6 +136,12 @@ for (const text of [
   'npm run audit:prod',
   '本地 Broker 能力边界',
   '共享浏览器配置文件',
+  'node scripts/install.js',
+  'Authentication failed',
+  '正确的生效令牌',
+  '`ARC_TUNNEL_TOKEN` 已设置时，扩展必须使用同一个生效令牌',
+  '取消环境覆盖后重启 Broker 和所有 Agent 客户端',
+  'node scripts/verify-browser-resilience.js',
   'node scripts/verify-multi-agent.js'
 ]) {
   if (!readme.includes(text)) throw new Error(`README.md is missing authentication guidance: ${text}`);
@@ -92,25 +153,63 @@ for (const text of [
   '`ARC_TUNNEL_TOKEN` takes precedence over the file token',
   'Node.js `>=22`',
   'npm run audit:prod',
-  'local Broker capability boundary'
+  'local Broker capability boundary',
+  'node scripts/install.js',
+  'Authentication failed',
+  'correct effective token',
+  'When `ARC_TUNNEL_TOKEN` is set, the extension must use that same effective token',
+  'node scripts/verify-browser-resilience.js',
+  'node scripts/verify-multi-agent.js'
 ]) {
   if (!agents.includes(text)) throw new Error(`AGENTS.md is missing authentication guidance: ${text}`);
 }
+if (!/unset the environment override, restart the Broker\s+and every Agent client/.test(agents)) {
+  throw new Error('AGENTS.md is missing restart guidance after unsetting the environment override');
+}
 
-const forbiddenCredentialExamples = [
-  [/\bnode\b[^\r\n]*\s--token(?:\s|=)/, 'token-bearing CLI example'],
-  [/wss?:\/\/[^\s"'`<>]*[?&#][^\s"'`<>]*token=/i, 'token-bearing WebSocket URL example']
-];
-for (const file of [
-  'README.md',
-  'AGENTS.md',
-  'docs/superpowers/specs/2026-07-30-arc-tunnel-lightweight-auth-hardening-design.md',
-  ...fs.readdirSync('configs').map(name => `configs/${name}`)
+const readmeMigration = readme.slice(readme.indexOf('### 认证迁移'));
+assertOrdered('README.md', readmeMigration, [
+  'node scripts/install.js',
+  '重新加载 `extension/dist/`',
+  '粘贴并保存同一个生效令牌',
+  '`Connected`',
+  'node scripts/start.js diagnose --json'
+]);
+const agentsMigration = agents.slice(agents.indexOf('For migration,'));
+assertOrdered('AGENTS.md', agentsMigration, [
+  'node scripts/install.js',
+  'reload `extension/dist/`',
+  'paste and Save the same effective token',
+  '`Connected`',
+  'node scripts/start.js diagnose --json'
+]);
+assertOrdered('README.md authentication recovery', readme.slice(readme.indexOf('认证恢复需要')), [
+  '格式有效但内容错误',
+  'Authentication failed',
+  '正确的生效令牌',
+  '`Connected`'
+]);
+assertOrdered('AGENTS.md authentication recovery', agents.slice(agents.indexOf('Real-browser authentication recovery')), [
+  'valid-format but incorrect',
+  'Authentication failed',
+  'correct effective token',
+  '`Connected`'
+]);
+
+for (const [file, content] of [
+  ['README.md', readme],
+  ['AGENTS.md', agents],
+  ['configs/kimi.md', read('configs/kimi.md')]
 ]) {
-  const content = read(file);
-  for (const [pattern, label] of forbiddenCredentialExamples) {
-    if (pattern.test(content)) throw new Error(`${file} contains a forbidden ${label}`);
+  for (const block of fencedBlocks(content)) {
+    if (hasStandaloneTokenFlag(block)) {
+      throw new Error(`${file} contains a token flag in a fenced command/config example`);
+    }
   }
+}
+
+for (const file of ['README.md', 'AGENTS.md', ...fs.readdirSync('configs').map(name => `configs/${name}`)]) {
+  assertSafeWebSocketUrls(file, read(file));
 }
 
 if (!read('AGENTS.md').includes('mcp-server/dist/arc-tunnel-control.js')) {
@@ -120,13 +219,14 @@ if (!read('extension/src/background/tab-manager.ts').includes('idleDetachDelayMs
   throw new Error('Documented debugger detach grace differs from source');
 }
 
-for (const file of [
+const configFiles = [
   'configs/claude-code.json',
   'configs/hermes.yaml',
   'configs/openclaw.json',
   'configs/codex-skill.yaml',
   'configs/kimi.md'
-]) {
+];
+for (const file of configFiles) {
   const content = read(file);
   for (const text of ['command', 'mcp-server/dist/mcp-server.js', 'WS_PORT', '8765']) {
     if (!content.includes(text)) throw new Error(`${file} is missing invariant: ${text}`);
@@ -140,6 +240,38 @@ for (const file of [
   if (/(?:^|["'\s])token["']?\s*:/im.test(content)) {
     throw new Error(`${file} must not embed an authentication token field`);
   }
+}
+
+for (const file of ['configs/claude-code.json', 'configs/openclaw.json']) {
+  const server = JSON.parse(read(file)).mcpServers?.['arc-tunnel'];
+  assertSafeTemplateShape(file, server?.args, Object.keys(server?.env || {}));
+}
+for (const file of ['configs/hermes.yaml', 'configs/codex-skill.yaml']) {
+  const content = read(file);
+  const args = yamlBlock(content, 'args')
+    .map(line => line.match(/^\s*-\s*["']?([^"']+)["']?\s*$/)?.[1])
+    .filter(Boolean);
+  const envKeys = yamlBlock(content, 'env')
+    .map(line => line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/)?.[1])
+    .filter(Boolean);
+  assertSafeTemplateShape(file, args, envKeys);
+}
+const kimiJsonBlock = fencedBlocks(read('configs/kimi.md'))
+  .map(block => {
+    try { return JSON.parse(block); } catch { return null; }
+  })
+  .find(value => value?.mcpServers?.['arc-tunnel']);
+if (!kimiJsonBlock) throw new Error('configs/kimi.md must contain a parseable MCP JSON template');
+const kimiServer = kimiJsonBlock.mcpServers['arc-tunnel'];
+assertSafeTemplateShape('configs/kimi.md', kimiServer.args, Object.keys(kimiServer.env || {}));
+
+const design = read('docs/superpowers/specs/2026-07-30-arc-tunnel-lightweight-auth-hardening-design.md');
+if (!design.includes('**Status:** Approved')) throw new Error('Authentication design status must be Approved');
+if (!/自己拥有的标签页取得非空 JPEG[\s\S]*对其他 Agent 标签页的截图请求返回 `TAB_NOT_OWNED`/.test(readme)) {
+  throw new Error('README.md must require owned JPEG content and foreign TAB_NOT_OWNED');
+}
+if (!/non-empty JPEG image content from its owned tab,\s+while a foreign\s+screenshot returns `TAB_NOT_OWNED`/.test(agents)) {
+  throw new Error('AGENTS.md must require owned JPEG content and foreign TAB_NOT_OWNED');
 }
 
 console.log('Repository documentation, packaging, and config assertions passed.');

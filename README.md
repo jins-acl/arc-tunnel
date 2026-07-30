@@ -64,9 +64,10 @@ and Codex.
 
 运行 Arc Tunnel 需要 Node.js `>=22`。安装器会在
 `~/.arc-tunnel/config.json` 中生成认证令牌；已有的有效令牌会原样保留，不会在
-日常重跑时轮换。安装器只在首次生成令牌时显示一次，供你复制到扩展弹窗。模板
-只保留 MCP 客户端路径和 `WS_PORT`，客户端会自行读取用户级 Arc Tunnel 配置，
-不要把令牌复制进 Agent 模板。
+日常重跑时轮换。安装器只在首次生成令牌时显示一次；仅当没有
+`ARC_TUNNEL_TOKEN` 环境覆盖时，这个新生成的文件令牌才是应复制到扩展弹窗的
+生效令牌。模板只保留 MCP 客户端路径和 `WS_PORT`，客户端会自行读取用户级
+Arc Tunnel 配置，不要把令牌复制进 Agent 模板。
 
 ## Broker lifecycle and ports
 
@@ -121,8 +122,8 @@ coordination, not security isolation.
 1. Open `chrome://extensions/` or `edge://extensions/`.
 2. Enable Developer mode and choose **Load unpacked**.
 3. Select `extension/dist/`.
-4. In the popup, verify the shared Broker port, paste the token into the password field,
-   save, and confirm the connection state.
+4. In the popup, verify the shared Broker port and follow the effective-token guidance
+   below before saving the password field.
 
 The extension defaults to the unambiguous IPv4 loopback URL `ws://127.0.0.1:8765` and
 converts a saved root URL such as `ws://127.0.0.1:8765/` to the current
@@ -135,9 +136,16 @@ On upgrade, the extension rewrites only the former default values
 `ws://localhost:8765/extension` to their `127.0.0.1` equivalents. Other hosts, ports,
 paths, queries, and fragments remain unchanged.
 
+`ARC_TUNNEL_TOKEN` 已设置时，扩展必须使用同一个生效令牌；请从设置该环境变量的
+受控来源取得它，不要改用配置文件中的令牌。另一种做法是先清除该环境变量，
+取消环境覆盖后重启 Broker 和所有 Agent 客户端，再使用
+`~/.arc-tunnel/config.json` 中的持久化令牌。不要用会把令牌打印到终端的命令
+获取它。
+
 扩展弹窗中的密码输入框默认遮蔽令牌。若状态变为 `auth_failed`，扩展不会用同一
-错误令牌持续重连；请从自己的 `~/.arc-tunnel/config.json` 重新复制正确令牌，
-粘贴后保存。令牌不会出现在弹窗状态文字、URL、控制台或复制的诊断信息中。
+错误令牌持续重连，弹窗显示 `Authentication failed`。请按上述优先级取得正确的
+生效令牌，粘贴后保存。令牌不会出现在弹窗状态文字、URL、控制台或复制的诊断
+信息中。
 
 ### 认证迁移
 
@@ -145,9 +153,10 @@ paths, queries, and fragments remain unchanged.
 
 1. 拉取新源码，并按开发流程构建最新 bundle。
 2. 运行 `node scripts/install.js`。
-3. 若安装器显示新生成的令牌，立即复制；这是一次性显示。
+3. 确认生效令牌来源：若设置了 `ARC_TUNNEL_TOKEN`，沿用同一个环境令牌；否则
+   使用安装器一次性显示的新令牌或持久化文件中的现有令牌。
 4. 加载或重新加载 `extension/dist/`。
-5. 在扩展弹窗中的密码输入框粘贴令牌并保存。
+5. 在扩展弹窗中的密码输入框粘贴并保存同一个生效令牌。
 6. 确认状态为 `Connected`，再运行
    `node scripts/start.js diagnose --json` 检查聚合状态。
 
@@ -217,8 +226,10 @@ closure. On success or failure it closes only the tab, client, and HTTP server t
 created. It never stops the shared Broker and does not close any pre-existing tab.
 
 认证恢复需要在真实浏览器中验证：先在扩展弹窗保存一个格式有效但内容错误的
-令牌，确认稳定进入 `auth_failed` 且不会重连循环；再保存配置文件中的正确令牌，
-确认恢复为 `Connected`。随后运行 D/F/C 韧性检查：
+令牌，确认弹窗显示 `Authentication failed`、状态稳定进入 `auth_failed` 且不会
+重连循环；再保存正确的生效令牌，确认恢复为 `Connected`。若环境覆盖仍存在，
+这里必须使用该环境令牌；只有取消覆盖并重启 Broker 和 Agent 客户端后，持久化
+文件令牌才会生效。随后运行 D/F/C 韧性检查：
 
 ```bash
 node scripts/verify-browser-resilience.js [--port 8765]
