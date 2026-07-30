@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import { BrokerServer } from '../src/broker/broker-server';
 import { ErrorCode, PROTOCOL_VERSION } from '../src/protocol';
+import { TEST_AUTH_TOKEN, testBrokerConfig } from './helpers/auth';
 
 type Message = Record<string, any>;
 
@@ -25,7 +26,9 @@ async function connect(port: number, path: '/agent' | '/extension', role: 'agent
     socket.once('error', reject);
   });
   const welcome = nextMessage(ws);
-  ws.send(JSON.stringify({ type: 'hello', role, protocolVersion: PROTOCOL_VERSION }));
+  ws.send(JSON.stringify({
+    type: 'hello', role, protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+  }));
   (ws as any).welcome = await welcome;
   return ws;
 }
@@ -73,7 +76,7 @@ describe('Broker ownership', () => {
   beforeEach(async () => {
     commands.splice(0);
     tabs.splice(0, tabs.length, ...initialTabs);
-    broker = new BrokerServer({ host: '127.0.0.1', port: 0 });
+    broker = new BrokerServer(testBrokerConfig());
     await broker.start();
     const port = broker.address().port;
     extension = await connect(port, '/extension', 'extension');
@@ -410,7 +413,9 @@ describe('Broker ownership', () => {
       }
     });
     const welcome = nextMessage(extension);
-    extension.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    extension.send(JSON.stringify({
+      type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+    }));
     await welcome;
 
     const visible = await alpha.call('list_tabs');
@@ -420,7 +425,7 @@ describe('Broker ownership', () => {
   });
 
   it('starts synchronized tabs unclaimed in a fresh broker process', async () => {
-    const fresh = new BrokerServer({ host: '127.0.0.1', port: 0 });
+    const fresh = new BrokerServer(testBrokerConfig());
     await fresh.start();
     const freshExtension = await connect(fresh.address().port, '/extension', 'extension');
     freshExtension.on('message', data => {
@@ -491,7 +496,9 @@ describe('Broker ownership', () => {
       extension.send(JSON.stringify({ id: command.id, type: 'response', success: true, result }));
     });
     const welcome = nextMessage(extension);
-    extension.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    extension.send(JSON.stringify({
+      type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+    }));
     await welcome;
     await expect(alpha.call('start_recording', { tabId: 101 }))
       .resolves.toEqual({ recordingId: 'after-disconnect' });

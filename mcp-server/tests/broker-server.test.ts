@@ -2,6 +2,11 @@ import WebSocket from 'ws';
 import { BrokerServer } from '../src/broker/broker-server';
 import { SessionRegistry } from '../src/broker/session-registry';
 import { ErrorCode, PROTOCOL_VERSION } from '../src/protocol';
+import {
+  OTHER_AUTH_TOKEN,
+  TEST_AUTH_TOKEN,
+  testBrokerConfig
+} from './helpers/auth';
 
 type JsonMessage = Record<string, any>;
 
@@ -31,10 +36,18 @@ function nextMessage(ws: WebSocket): Promise<JsonMessage> {
   });
 }
 
+function nextClose(ws: WebSocket): Promise<{ code: number; reason: string }> {
+  return new Promise(resolve => ws.once('close', (code, reason) => {
+    resolve({ code, reason: reason.toString() });
+  }));
+}
+
 async function connectRole(port: number, path: '/agent' | '/extension', role: 'agent' | 'extension') {
   const ws = await openWs(port, path, role === 'extension' ? 'chrome-extension://test' : undefined);
   const welcome = nextMessage(ws);
-  ws.send(JSON.stringify({ type: 'hello', role, protocolVersion: PROTOCOL_VERSION }));
+  ws.send(JSON.stringify({
+    type: 'hello', role, protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+  }));
   return { ws, welcome: await welcome };
 }
 
@@ -57,8 +70,14 @@ describe('BrokerServer', () => {
   const sockets: WebSocket[] = [];
 
   beforeEach(async () => {
-    broker = new BrokerServer({ host: '127.0.0.1', port: 0 });
+    broker = new BrokerServer(testBrokerConfig());
     await broker.start();
+  });
+
+  it('rejects an invalid configured token before startup', () => {
+    expect(() => new BrokerServer({
+      host: '127.0.0.1', port: 0, token: 'invalid'
+    })).toThrow('Invalid Broker authentication token');
   });
 
   afterEach(async () => {
@@ -84,7 +103,14 @@ describe('BrokerServer', () => {
 
     const legacy = await openWs(port, '/', 'chrome-extension://legacy');
     sockets.push(legacy);
+    const messages: JsonMessage[] = [];
+    legacy.on('message', data => messages.push(JSON.parse(data.toString())));
+    legacy.send(JSON.stringify({
+      type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+    }));
+    await waitUntil(() => broker.isExtensionConnected());
     expect(broker.isExtensionConnected()).toBe(true);
+    expect(messages).toEqual([]);
   });
 
   it('welcomes matching roles and rejects a protocol mismatch', async () => {
@@ -104,6 +130,91 @@ describe('BrokerServer', () => {
     const rejection = nextMessage(incompatible);
     incompatible.send(JSON.stringify({ type: 'hello', role: 'agent', protocolVersion: 999 }));
     await expect(rejection).resolves.toMatchObject({ error: { code: ErrorCode.PROTOCOL_MISMATCH } });
+  });
+
+  it('rejects the wrong route role before authentication', async () => {
+    const ws = await openWs(broker.address().port, '/agent');
+    sockets.push(ws);
+    const closed = nextClose(ws);
+    ws.send(JSON.stringify({
+      type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION
+    }));
+
+    await expect(closed).resolves.toEqual({ code: 1008, reason: 'invalid hello' });
+  });
+
+  it.each([
+    ['Agent', '/agent', 'agent', undefined, undefined],
+    ['Agent', '/agent', 'agent', 42, undefined],
+    ['Agent', '/agent', 'agent', 'malformed', undefined],
+    ['Agent', '/agent', 'agent', OTHER_AUTH_TOKEN, undefined],
+    ['extension', '/extension', 'extension', undefined, 'chrome-extension://test'],
+    ['extension', '/extension', 'extension', 42, 'chrome-extension://test'],
+    ['extension', '/extension', 'extension', 'malformed', 'chrome-extension://test'],
+    ['extension', '/extension', 'extension', OTHER_AUTH_TOKEN, 'chrome-extension://test'],
+    ['legacy extension', '/', 'extension', undefined, 'chrome-extension://legacy'],
+    ['legacy extension', '/', 'extension', 42, 'chrome-extension://legacy'],
+    ['legacy extension', '/', 'extension', 'malformed', 'chrome-extension://legacy'],
+    ['legacy extension', '/', 'extension', OTHER_AUTH_TOKEN, 'chrome-extension://legacy']
+  ] as const)(
+    'rejects %s authentication with an indistinguishable close and no welcome: %#',
+    async (_label, path, role, token, origin) => {
+      const ws = await openWs(broker.address().port, path, origin);
+      sockets.push(ws);
+      const messages: JsonMessage[] = [];
+      ws.on('message', data => messages.push(JSON.parse(data.toString())));
+      const closed = nextClose(ws);
+      ws.send(JSON.stringify({
+        type: 'hello', role, protocolVersion: PROTOCOL_VERSION,
+        ...(token === undefined ? {} : { token })
+      }));
+
+      await expect(closed).resolves.toEqual({ code: 1008, reason: 'AUTH_FAILED' });
+      expect(messages).toEqual([]);
+    }
+  );
+
+  it('does not create Agent state when authentication fails', async () => {
+    const registry = new SessionRegistry();
+    await broker.stop();
+    broker = new BrokerServer(testBrokerConfig(), { registry });
+    await broker.start();
+    const ws = await openWs(broker.address().port, '/agent');
+    sockets.push(ws);
+    const closed = nextClose(ws);
+    ws.send(JSON.stringify({
+      type: 'hello', role: 'agent', protocolVersion: PROTOCOL_VERSION, token: OTHER_AUTH_TOKEN
+    }));
+
+    await closed;
+    expect(registry.diagnosticsCounts()).toEqual({ connected: 0, grace: 0, claimedTabs: 0 });
+  });
+
+  it('does not mutate or replace Extension state when authentication fails', async () => {
+    const valid = await connectRole(broker.address().port, '/extension', 'extension');
+    sockets.push(valid.ws);
+    const extensionBefore = (broker as any).extension;
+    const statusBefore = await fetch(`http://127.0.0.1:${broker.address().port}/api/status`)
+      .then(response => response.json() as any);
+    const rejected = await openWs(
+      broker.address().port, '/extension', 'chrome-extension://rejected'
+    );
+    sockets.push(rejected);
+    const messages: JsonMessage[] = [];
+    rejected.on('message', data => messages.push(JSON.parse(data.toString())));
+    const closed = nextClose(rejected);
+    rejected.send(JSON.stringify({
+      type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION, token: OTHER_AUTH_TOKEN
+    }));
+
+    await expect(closed).resolves.toEqual({ code: 1008, reason: 'AUTH_FAILED' });
+    const statusAfter = await fetch(`http://127.0.0.1:${broker.address().port}/api/status`)
+      .then(response => response.json() as any);
+    expect(messages).toEqual([]);
+    expect(broker.isExtensionConnected()).toBe(true);
+    expect((broker as any).extension).toBe(extensionBefore);
+    expect(statusAfter.extension).toEqual(statusBefore.extension);
+    expect(statusAfter.recovery.inventorySync).toBe('idle');
   });
 
   it('closes a versioned path when hello is not received within five seconds', async () => {
@@ -237,7 +348,7 @@ describe('BrokerServer', () => {
   it('ignores events and responses from a replaced extension socket', async () => {
     const registry = new SessionRegistry();
     await broker.stop();
-    broker = new BrokerServer({ host: '127.0.0.1', port: 0 }, { registry });
+    broker = new BrokerServer(testBrokerConfig(), { registry });
     await broker.start();
     const port = broker.address().port;
     const first = await connectRole(port, '/extension', 'extension');
@@ -259,7 +370,7 @@ describe('BrokerServer', () => {
   it('treats No active recording as idempotent disconnect cleanup success', async () => {
     const registry = new SessionRegistry();
     await broker.stop();
-    broker = new BrokerServer({ host: '127.0.0.1', port: 0 }, { registry });
+    broker = new BrokerServer(testBrokerConfig(), { registry });
     await broker.start();
     const port = broker.address().port;
     const extension = await connectRole(port, '/extension', 'extension');
@@ -284,7 +395,7 @@ describe('BrokerServer', () => {
   it('retries genuine recording cleanup failure before reconnect inventory sync', async () => {
     const registry = new SessionRegistry();
     await broker.stop();
-    broker = new BrokerServer({ host: '127.0.0.1', port: 0 }, { registry });
+    broker = new BrokerServer(testBrokerConfig(), { registry });
     await broker.start();
     const port = broker.address().port;
     const first = await connectRole(port, '/extension', 'extension');
@@ -304,7 +415,9 @@ describe('BrokerServer', () => {
     sockets.push(replacement);
     const received: JsonMessage[] = [];
     replacement.on('message', data => received.push(JSON.parse(data.toString())));
-    replacement.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    replacement.send(JSON.stringify({
+      type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+    }));
     await waitUntil(() => received.length >= 2);
     expect(received[0]).toEqual({ type: 'welcome', protocolVersion: PROTOCOL_VERSION });
     const retry = received[1];
@@ -319,7 +432,7 @@ describe('BrokerServer', () => {
   it('fences disconnected recording cleanup by extension generation', async () => {
     const registry = new SessionRegistry();
     await broker.stop();
-    broker = new BrokerServer({ host: '127.0.0.1', port: 0 }, { registry });
+    broker = new BrokerServer(testBrokerConfig(), { registry });
     await broker.start();
     const port = broker.address().port;
     const first = await connectRole(port, '/extension', 'extension');
@@ -336,7 +449,9 @@ describe('BrokerServer', () => {
     sockets.push(replacement);
     const received: JsonMessage[] = [];
     replacement.on('message', data => received.push(JSON.parse(data.toString())));
-    replacement.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    replacement.send(JSON.stringify({
+      type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+    }));
     await waitUntil(() => received.some(message => message.command === 'stop_recording'));
 
     expect(registry.activeRecordingId(alpha.welcome.sessionId)).toBe('recording-alpha');
@@ -356,7 +471,7 @@ describe('BrokerServer', () => {
   it('cleans up an uncertain in-flight start before replacement inventory sync', async () => {
     const registry = new SessionRegistry();
     await broker.stop();
-    broker = new BrokerServer({ host: '127.0.0.1', port: 0 }, { registry });
+    broker = new BrokerServer(testBrokerConfig(), { registry });
     await broker.start();
     const port = broker.address().port;
     const first = await connectRole(port, '/extension', 'extension');
@@ -375,7 +490,9 @@ describe('BrokerServer', () => {
     sockets.push(replacement);
     const received: JsonMessage[] = [];
     replacement.on('message', data => received.push(JSON.parse(data.toString())));
-    replacement.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    replacement.send(JSON.stringify({
+      type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+    }));
     await waitUntil(() => received.length >= 2);
 
     expect(received[1].command).toBe('stop_recording');
@@ -395,7 +512,9 @@ describe('BrokerServer', () => {
     sockets.push(replacement);
     const received: JsonMessage[] = [];
     replacement.on('message', data => received.push(JSON.parse(data.toString())));
-    replacement.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    replacement.send(JSON.stringify({
+      type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+    }));
     await waitUntil(() => received.some(message => message.command === 'list_tabs'));
     expect(received.some(message => message.command === 'list_tabs')).toBe(true);
 
@@ -416,7 +535,9 @@ describe('BrokerServer', () => {
     sockets.push(secondWs);
     const secondMessages: JsonMessage[] = [];
     secondWs.on('message', data => secondMessages.push(JSON.parse(data.toString())));
-    secondWs.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    secondWs.send(JSON.stringify({
+      type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+    }));
     await waitUntil(() => secondMessages.some(message => message.command === 'list_tabs'));
     const secondSync = secondMessages.find(message => message.command === 'list_tabs')!;
     expect(secondSync.command).toBe('list_tabs');
@@ -425,7 +546,9 @@ describe('BrokerServer', () => {
     sockets.push(thirdWs);
     const thirdMessages: JsonMessage[] = [];
     thirdWs.on('message', data => thirdMessages.push(JSON.parse(data.toString())));
-    thirdWs.send(JSON.stringify({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION }));
+    thirdWs.send(JSON.stringify({
+      type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+    }));
     await waitUntil(() => thirdMessages.some(message => message.command === 'list_tabs'));
     const thirdSync = thirdMessages.find(message => message.command === 'list_tabs')!;
     expect(thirdSync.command).toBe('list_tabs');
@@ -466,7 +589,7 @@ describe('BrokerServer', () => {
   it('releases tab ownership 30 seconds after an Agent disconnects', async () => {
     const registry = new SessionRegistry();
     await broker.stop();
-    broker = new BrokerServer({ host: '127.0.0.1', port: 0 }, { registry });
+    broker = new BrokerServer(testBrokerConfig(), { registry });
     await broker.start();
     const agent = await connectRole(broker.address().port, '/agent', 'agent');
     sockets.push(agent.ws);
@@ -497,7 +620,7 @@ describe('BrokerServer', () => {
   it('rejects matching work with TAB_CLOSED when a tab is removed', async () => {
     const registry = new SessionRegistry();
     await broker.stop();
-    broker = new BrokerServer({ host: '127.0.0.1', port: 0 }, { registry });
+    broker = new BrokerServer(testBrokerConfig(), { registry });
     await broker.start();
     const port = broker.address().port;
     const extension = await connectRole(port, '/extension', 'extension');
@@ -533,7 +656,7 @@ describe('BrokerServer', () => {
   it('rejects matching work with TAB_CLOSED when a window is removed', async () => {
     const registry = new SessionRegistry();
     await broker.stop();
-    broker = new BrokerServer({ host: '127.0.0.1', port: 0 }, { registry });
+    broker = new BrokerServer(testBrokerConfig(), { registry });
     await broker.start();
     const port = broker.address().port;
     const extension = await connectRole(port, '/extension', 'extension');

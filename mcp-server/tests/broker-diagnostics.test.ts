@@ -2,6 +2,11 @@ import http from 'http';
 import WebSocket from 'ws';
 import { BrokerServer } from '../src/broker/broker-server';
 import { PROTOCOL_VERSION } from '../src/protocol';
+import {
+  OTHER_AUTH_TOKEN,
+  TEST_AUTH_TOKEN,
+  testBrokerConfig
+} from './helpers/auth';
 
 interface SseEvent { id?: string; event?: string; data?: unknown }
 
@@ -11,7 +16,9 @@ function connect(port: number, role: 'agent' | 'extension'): Promise<WebSocket> 
       ? { origin: 'chrome-extension://diagnostics-test' } : undefined);
     ws.once('error', reject);
     ws.once('open', () => {
-      ws.send(JSON.stringify({ type: 'hello', role, protocolVersion: PROTOCOL_VERSION }));
+      ws.send(JSON.stringify({
+        type: 'hello', role, protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+      }));
       ws.once('message', () => resolve(ws));
     });
   });
@@ -68,7 +75,7 @@ describe('Broker diagnostics API', () => {
   let broker: BrokerServer;
 
   beforeEach(async () => {
-    broker = new BrokerServer({ host: '127.0.0.1', port: 0 });
+    broker = new BrokerServer(testBrokerConfig());
     await broker.start();
   });
 
@@ -97,6 +104,40 @@ describe('Broker diagnostics API', () => {
   it('keeps the health response exactly compatible', async () => {
     const response = await fetch(`http://127.0.0.1:${broker.address().port}/health`);
     expect(Object.keys(await response.json() as object).sort()).toEqual(['name', 'pid', 'port', 'protocolVersion']);
+  });
+
+  it('does not disclose a rejected token in diagnostics, dashboard, recent errors, or output', async () => {
+    const stderr = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const stdout = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      const ws = new WebSocket(`ws://127.0.0.1:${broker.address().port}/agent`);
+      await new Promise<void>((resolve, reject) => ws.once('open', resolve).once('error', reject));
+      const closed = new Promise<void>(resolve => ws.once('close', () => resolve()));
+      ws.send(JSON.stringify({
+        type: 'hello', role: 'agent', protocolVersion: PROTOCOL_VERSION, token: OTHER_AUTH_TOKEN
+      }));
+      await closed;
+
+      const status = await fetch(`http://127.0.0.1:${broker.address().port}/api/status`).then(r => r.text());
+      const dashboard = await fetch(`http://127.0.0.1:${broker.address().port}/dashboard`).then(r => r.text());
+      const events = JSON.stringify((broker as any).diagnostics.eventsAfter(0).events);
+      const recentError = JSON.stringify(
+        await fetch(`http://127.0.0.1:${broker.address().port}/api/status`).then(r => r.json() as any)
+      );
+      const output = JSON.stringify([
+        ...stderr.mock.calls,
+        ...stdout.mock.calls
+      ]);
+
+      expect([status, dashboard, events, recentError, output].join('\n')).not.toContain(OTHER_AUTH_TOKEN);
+      expect(JSON.parse(status).recentError).toMatchObject({
+        code: 'AUTH_FAILED',
+        summary: 'WebSocket authentication failed'
+      });
+    } finally {
+      stderr.mockRestore();
+      stdout.mockRestore();
+    }
   });
 
   it('tracks extension generation and agent grace with identifier-free Chinese lifecycle summaries', async () => {

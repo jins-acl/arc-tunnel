@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import WebSocket, { RawData } from 'ws';
-import { BrokerEndpointConfig } from './config';
+import { BrokerConfig } from './config';
 import {
   AgentRequest, AgentResponse, ArcTunnelError, ErrorCode, HelloMessage,
   PROTOCOL_VERSION, isAgentResponse, isWelcomeMessage
@@ -22,7 +22,7 @@ export class BrokerClient {
     ws.once('error', () => this.rejectPending(ErrorCode.CONNECTION_LOST));
   }
 
-  static async connect(config: BrokerEndpointConfig): Promise<BrokerClient> {
+  static async connect(config: BrokerConfig): Promise<BrokerClient> {
     const ws = new WebSocket(`ws://127.0.0.1:${config.port}/agent`);
     await new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -43,7 +43,8 @@ export class BrokerClient {
         reject(error);
       };
       const onOpen = () => ws.send(JSON.stringify({
-        type: 'hello', role: 'agent', protocolVersion: PROTOCOL_VERSION, clientName: 'arc-tunnel-mcp'
+        type: 'hello', role: 'agent', protocolVersion: PROTOCOL_VERSION,
+        token: config.token, clientName: 'arc-tunnel-mcp'
       } satisfies HelloMessage));
       const onMessage = (data: RawData) => {
         let message: unknown;

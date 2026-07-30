@@ -2,6 +2,7 @@ import net from 'net';
 import { WebSocketServer } from 'ws';
 import { BrokerClient } from '../src/broker-client';
 import { PROTOCOL_VERSION } from '../src/protocol';
+import { testBrokerConfig } from './helpers/auth';
 
 describe('BrokerClient', () => {
   let server: WebSocketServer;
@@ -35,7 +36,7 @@ describe('BrokerClient', () => {
   }
 
   it('correlates out-of-order Broker responses', async () => {
-    client = await BrokerClient.connect({ host: '127.0.0.1', port });
+    client = await BrokerClient.connect(testBrokerConfig(port));
     const first = client.call('first', {}, 1000);
     const second = client.call('second', {}, 1000);
     await waitForRequests(2);
@@ -48,7 +49,7 @@ describe('BrokerClient', () => {
   });
 
   it('rejects Broker errors and local command timeouts with their codes', async () => {
-    client = await BrokerClient.connect({ host: '127.0.0.1', port });
+    client = await BrokerClient.connect(testBrokerConfig(port));
     const rejected = client.call('rejected', {}, 1000);
     await waitForRequests(1);
     socket.send(JSON.stringify({
@@ -60,7 +61,7 @@ describe('BrokerClient', () => {
   });
 
   it('rejects pending calls when the Broker connection closes', async () => {
-    client = await BrokerClient.connect({ host: '127.0.0.1', port });
+    client = await BrokerClient.connect(testBrokerConfig(port));
     const pending = client.call('pending', {}, 1000);
     await waitForRequests(1);
     socket.close();
@@ -79,7 +80,7 @@ describe('BrokerClient', () => {
     const onUncaught = (error: unknown) => uncaught.push(error);
     process.prependListener('uncaughtException', onUncaught);
     try {
-      await expect(BrokerClient.connect({ host: '127.0.0.1', port: hangingPort }))
+      await expect(BrokerClient.connect(testBrokerConfig(hangingPort)))
         .rejects.toMatchObject({ code: 'CONNECTION_LOST' });
       await new Promise((resolve) => setTimeout(resolve, 25));
       expect(uncaught).toEqual([]);

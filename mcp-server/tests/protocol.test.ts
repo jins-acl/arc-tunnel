@@ -9,12 +9,25 @@ import {
   isWelcomeMessage,
   toErrorInfo
 } from '../src/protocol';
+import { TEST_AUTH_TOKEN } from './helpers/auth';
 
 describe('protocol guards', () => {
-  it('accepts the current extension and agent hello messages', () => {
-    expect(isHelloMessage({ type: 'hello', role: 'agent', protocolVersion: PROTOCOL_VERSION })).toBe(true);
-    expect(isHelloMessage({ type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION })).toBe(true);
-    expect(isHelloMessage({ type: 'hello', role: 'agent', protocolVersion: 999 })).toBe(false);
+  it('requires a string token in current extension and agent hello messages', () => {
+    expect(isHelloMessage({
+      type: 'hello', role: 'agent', protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+    })).toBe(true);
+    expect(isHelloMessage({
+      type: 'hello', role: 'extension', protocolVersion: PROTOCOL_VERSION, token: TEST_AUTH_TOKEN
+    })).toBe(true);
+    expect(isHelloMessage({
+      type: 'hello', role: 'agent', protocolVersion: PROTOCOL_VERSION
+    })).toBe(false);
+    expect(isHelloMessage({
+      type: 'hello', role: 'agent', protocolVersion: PROTOCOL_VERSION, token: 42
+    })).toBe(false);
+    expect(isHelloMessage({
+      type: 'hello', role: 'agent', protocolVersion: 999, token: TEST_AUTH_TOKEN
+    })).toBe(false);
   });
 
   it('accepts exact welcome envelopes', () => {
