@@ -194,6 +194,17 @@ for (const invalidToken of ['short', NONCANONICAL_AUTH_TOKEN]) {
   });
 }
 
+popupTest('rejects a canonical token with surrounding whitespace without echoing it', (environment) => {
+  const whitespaceToken = ` ${TEST_AUTH_TOKEN} `;
+  environment.elements['auth-token'].value = whitespaceToken;
+  environment.elements['save-config'].dispatch('click');
+
+  assert.equal(environment.storageSets.length, 0);
+  assert.match(environment.elements.status.textContent, /token/i);
+  assert.equal(environment.elements.status.textContent.includes(whitespaceToken), false);
+  assert.equal(environment.elements.status.textContent.includes(TEST_AUTH_TOKEN), false);
+});
+
 popupTest('saves a valid URL and token in one atomic storage write', (environment) => {
   environment.elements['ws-url'].value = ' ws://127.0.0.1:9000 ';
   environment.elements['auth-token'].value = OTHER_AUTH_TOKEN;

@@ -43,7 +43,7 @@ function saveConfig(
   statusEl: HTMLElement
 ) {
   const url = urlInput.value.trim();
-  const authToken = tokenInput.value.trim();
+  const authToken = tokenInput.value;
   if (!url) {
     statusEl.textContent = 'Status: URL cannot be empty';
     statusEl.className = 'status disconnected';

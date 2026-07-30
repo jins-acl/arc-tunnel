@@ -32,6 +32,7 @@ const lightweightController = new LightweightController();
 bindConsoleCaptureCleanup(tabManager, consoleCapture);
 let initializationComplete = false;
 let pendingConfig: StoredConnectionConfig | null = null;
+let initializationPatch: Partial<StoredConnectionConfig> = {};
 const commandHandler = new CommandHandler(
   tabManager,
   debuggerController,
@@ -70,11 +71,11 @@ async function loadConfig(): Promise<StoredConnectionConfig> {
 // Connect to MCP server
 async function initialize() {
   const loadedConfig = await loadConfig();
-  if (pendingConfig === null) pendingConfig = loadedConfig;
+  pendingConfig = { ...loadedConfig, ...initializationPatch };
   await tabManager.syncExistingTabs();
 
   initializationComplete = true;
-  const config = pendingConfig ?? loadedConfig;
+  const config = pendingConfig;
   wsClient.setConfig(config.wsUrl, config.authToken);
   await connectClient();
 }
@@ -97,20 +98,27 @@ chrome.storage.onChanged.addListener((changes, area) => {
     (!changes.arc_tunnel_ws_url && !changes.authToken)
   ) return;
 
-  const previousConfig = pendingConfig ?? {
-    wsUrl: resolveConfiguredWebSocketUrl(undefined),
-    authToken: ''
-  };
-  const nextConfig: StoredConnectionConfig = {
-    wsUrl: changes.arc_tunnel_ws_url
-      ? resolveConfiguredWebSocketUrl(changes.arc_tunnel_ws_url.newValue)
-      : previousConfig.wsUrl,
-    authToken: changes.authToken
-      ? (typeof changes.authToken.newValue === 'string' ? changes.authToken.newValue : '')
-      : previousConfig.authToken
-  };
+  const patch: Partial<StoredConnectionConfig> = {};
+  if (changes.arc_tunnel_ws_url) {
+    patch.wsUrl = resolveConfiguredWebSocketUrl(changes.arc_tunnel_ws_url.newValue);
+  }
+  if (changes.authToken) {
+    patch.authToken = typeof changes.authToken.newValue === 'string'
+      ? changes.authToken.newValue
+      : '';
+  }
+
+  if (!initializationComplete) {
+    initializationPatch = { ...initializationPatch, ...patch };
+    if (pendingConfig !== null) {
+      pendingConfig = { ...pendingConfig, ...patch };
+    }
+    return;
+  }
+
+  if (pendingConfig === null) return;
+  const nextConfig = { ...pendingConfig, ...patch };
   pendingConfig = nextConfig;
-  if (!initializationComplete) return;
 
   wsClient.setConfig(nextConfig.wsUrl, nextConfig.authToken);
   void connectClient();

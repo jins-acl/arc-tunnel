@@ -32,6 +32,13 @@ async function flushMicrotasks() {
   await Promise.resolve();
 }
 
+async function waitForMicrotasks(predicate) {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+}
+
 function bundleServiceWorker() {
   return esbuild.buildSync({
     entryPoints: [path.join(__dirname, '..', 'src', 'background', 'service-worker.ts')],
@@ -47,6 +54,7 @@ function setupServiceWorker({
     arc_tunnel_ws_url: 'ws://127.0.0.1:8765',
     authToken: TEST_AUTH_TOKEN
   },
+  storageGetPromise,
   tabsPromise = Promise.resolve([])
 } = {}) {
   const originals = {
@@ -105,6 +113,7 @@ function setupServiceWorker({
       local: {
         async get(keys) {
           storageGets.push(keys);
+          if (storageGetPromise) return storageGetPromise;
           return { ...storedValues };
         },
         async set(value) {
@@ -222,6 +231,58 @@ test('startup waits for tab synchronization and applies the latest complete conf
     environment.restore();
   }
 });
+
+for (const raceCase of [
+  {
+    name: 'an early token-only change merges with the eventually loaded custom URL',
+    changes: {
+      authToken: {
+        oldValue: TEST_AUTH_TOKEN,
+        newValue: OTHER_AUTH_TOKEN
+      }
+    },
+    expectedUrl: 'ws://127.0.0.1:9100/extension',
+    expectedToken: OTHER_AUTH_TOKEN
+  },
+  {
+    name: 'an early URL-only change merges with the eventually loaded stored token',
+    changes: {
+      arc_tunnel_ws_url: {
+        oldValue: 'ws://127.0.0.1:9100',
+        newValue: 'ws://127.0.0.1:9200'
+      }
+    },
+    expectedUrl: 'ws://127.0.0.1:9200/extension',
+    expectedToken: TEST_AUTH_TOKEN
+  }
+]) {
+  test(raceCase.name, { concurrency: false }, async () => {
+    const storageReady = deferred();
+    const environment = setupServiceWorker({
+      storageGetPromise: storageReady.promise
+    });
+    try {
+      environment.storageChanged.emit(raceCase.changes, 'local');
+      assert.equal(environment.FakeWebSocket.instances.length, 0);
+
+      storageReady.resolve({
+        arc_tunnel_ws_url: 'ws://127.0.0.1:9100',
+        authToken: TEST_AUTH_TOKEN
+      });
+      await waitForMicrotasks(
+        () => environment.FakeWebSocket.instances.length === 1
+      );
+
+      assert.equal(environment.FakeWebSocket.instances.length, 1);
+      const socket = environment.FakeWebSocket.instances[0];
+      assert.equal(socket.url, raceCase.expectedUrl);
+      socket.open();
+      assert.equal(socket.sent[0].token, raceCase.expectedToken);
+    } finally {
+      environment.restore();
+    }
+  });
+}
 
 environmentTest('one two-key storage event creates one replacement connection', async (environment) => {
   await flushMicrotasks();
