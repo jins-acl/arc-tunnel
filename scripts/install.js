@@ -48,7 +48,10 @@ function isValidAuthToken(value) {
 }
 
 function isValidPort(value) {
-  return Number.isInteger(value) && value >= 1 && value <= 65535;
+  if (Number.isInteger(value)) return value >= 1 && value <= 65535;
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return false;
+  const port = Number(value);
+  return port >= 1 && port <= 65535;
 }
 
 function writeConfigAtomically(configPath, contents, dependencies = {}) {
@@ -77,6 +80,14 @@ function ensureBrokerAuthConfig(homeDir, dependencies = {}) {
   const fileSystem = dependencies.fs || fs;
   const randomBytes = dependencies.randomBytes || crypto.randomBytes;
   const output = dependencies.log || log;
+  const outputWarning = dependencies.warn || warn;
+  const environment = dependencies.env || process.env;
+  const hasEnvironmentOverride = Object.prototype.hasOwnProperty.call(
+    environment,
+    'ARC_TUNNEL_TOKEN'
+  ) && environment.ARC_TUNNEL_TOKEN !== undefined;
+  const environmentTokenIsValid = hasEnvironmentOverride
+    && isValidAuthToken(environment.ARC_TUNNEL_TOKEN);
   const configPath = path.join(homeDir, '.arc-tunnel', 'config.json');
   let existingConfig = null;
 
@@ -98,6 +109,12 @@ function ensureBrokerAuthConfig(homeDir, dependencies = {}) {
   const token = existingConfig && existingConfig.token;
 
   if (isValidAuthToken(token)) {
+    if (environmentTokenIsValid) {
+      output('ARC_TUNNEL_TOKEN is active. Use the same effective environment token from its controlled source in the browser extension popup.');
+      output('To use the persisted file token instead, unset ARC_TUNNEL_TOKEN and restart the Broker and every Agent client.');
+    } else if (hasEnvironmentOverride) {
+      outputWarning('ARC_TUNNEL_TOKEN is present but invalid. Remove or replace it before Broker startup; Arc Tunnel will not fall back to the file token while the override remains set.');
+    }
     return { configPath, token, generated: false };
   }
 
@@ -106,7 +123,16 @@ function ensureBrokerAuthConfig(homeDir, dependencies = {}) {
     fs: fileSystem,
     randomBytes
   });
-  output(`Generated Broker authentication token. Paste it into the browser extension popup: ${generatedToken}`);
+  if (environmentTokenIsValid) {
+    output(`Generated fallback file token: ${generatedToken}`);
+    output('ARC_TUNNEL_TOKEN is active. Use the same effective environment token from its controlled source in the browser extension popup.');
+    output('To use the generated file token instead, unset ARC_TUNNEL_TOKEN and restart the Broker and every Agent client.');
+  } else if (hasEnvironmentOverride) {
+    output(`Generated fallback file token: ${generatedToken}`);
+    outputWarning('ARC_TUNNEL_TOKEN is present but invalid. Remove or replace it before Broker startup; Arc Tunnel will not fall back to the file token while the override remains set.');
+  } else {
+    output(`Generated Broker authentication token. Paste it into the browser extension popup: ${generatedToken}`);
+  }
   return { configPath, token: generatedToken, generated: true };
 }
 

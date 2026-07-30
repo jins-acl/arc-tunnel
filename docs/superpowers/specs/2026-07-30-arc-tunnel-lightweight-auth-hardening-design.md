@@ -57,6 +57,14 @@ The following remain separate follow-up projects:
 ## 3. Global Constraints
 
 - The Broker continues to bind only `127.0.0.1`.
+- The extension accepts only the `ws:` scheme with the literal host
+  `127.0.0.1`, an explicit port from 1 through 65535, and path `/` or
+  `/extension`. The three exact former defaults—`ws://localhost:8765`,
+  `ws://localhost:8765/`, and `ws://localhost:8765/extension`—are accepted only
+  as migration inputs to their `127.0.0.1` equivalents. Every other scheme,
+  host spelling, port, path, userinfo, query, or fragment is rejected before a
+  socket is created. The extension never sends the authentication token to an
+  off-loopback destination.
 - Ordinary `http://` and `https://` WebSocket Origins remain rejected.
 - The legacy root extension route continues to require a
   `chrome-extension://` Origin.
@@ -69,13 +77,19 @@ The following remain separate follow-up projects:
 - A valid token is exactly 32 random bytes encoded without padding as 43
   base64url characters matching `^[A-Za-z0-9_-]{43}$`.
 - Missing or invalid authentication never falls back to unauthenticated mode.
-- Tokens never appear in logs, diagnostics, dashboard content, event streams,
+- Except for the generated file token's explicit one-time installer display,
+  tokens never appear in logs, diagnostics, dashboard content, event streams,
   URLs, process arguments, error messages, or copied operational reports.
 - Existing tab ownership, one-window-per-Agent behavior, heartbeat timing,
   debugger timeouts, and command deadlines remain unchanged.
 - Committed MCP and extension bundles must be rebuilt and deterministic.
 - Existing user-owned untracked smoke and probe scripts must not be staged,
   modified, or deleted.
+
+The static token rejects local clients that do not possess it; it does not
+claim to sandbox a compromised user account. Hostile same-OS-user processes
+that can read the user config or impersonate the selected local port are
+outside this static-token boundary.
 
 ## 4. Configuration and Token Lifecycle
 
@@ -116,13 +130,15 @@ temporary file is cleaned up on the handled failure path.
 
 ### 4.4 Startup behavior
 
-The Broker and Agent client resolve the token from:
+The Broker and Agent client select the token from:
 
-1. `ARC_TUNNEL_TOKEN`, when present and valid;
-2. `~/.arc-tunnel/config.json`.
+1. `ARC_TUNNEL_TOKEN`, whenever it is present;
+2. `~/.arc-tunnel/config.json`, only when the environment override is absent.
 
-If neither provides a valid token, startup fails before opening the Broker or
-Agent WebSocket and prints a non-secret instruction to run:
+The selected token must be valid. An empty or malformed environment override
+does not fall back to the persisted token. If the selected source does not
+provide a valid token, startup fails before opening the Broker or Agent
+WebSocket and prints a non-secret instruction to run:
 
 ```bash
 node scripts/install.js
@@ -133,12 +149,24 @@ launchers. It is never written back to disk.
 
 ### 4.5 Installation output
 
-When installation generates a new token, the installer prints it once with a
-clear instruction to paste it into the extension popup. Routine reruns that
-preserve an existing token do not print the token.
+When installation generates a new token without an environment override, the
+installer prints it once with a clear instruction to paste it into the
+extension popup. With a valid `ARC_TUNNEL_TOKEN` override, the generated file
+token is printed once but labeled as a fallback, not the active popup
+credential. The effective environment token must come from its controlled
+source; the installer never prints the environment override value. To make the
+file fallback effective, the user must unset the environment override and
+restart the Broker and all Agent clients before using it.
 
-Users who need to recover the token read their own
-`~/.arc-tunnel/config.json`. No `--show-token` command is added.
+An empty or malformed environment override blocks startup without falling
+back. The installer warns the user to remove or replace the override before
+startup without echoing its value or presenting the generated file token as
+the active popup credential. Routine reruns that preserve an existing token do
+not print that token.
+
+Without an environment override, users who need to recover the token read
+their own `~/.arc-tunnel/config.json`. With a valid override, they obtain the
+effective token from its controlled source. No `--show-token` command is added.
 
 ## 5. Protocol Authentication
 
@@ -234,9 +262,13 @@ Other disconnects retain the current retry and suspend behavior.
 ### 6.3 Service worker and alarm
 
 The Service Worker passes the stored token into the WebSocket client before
-connecting. Alarm handlers respect `auth_failed`; they may read refreshed
-storage, but they reconnect only when the token value has changed to a valid
-credential.
+connecting. On `AUTH_FAILED`, it stores a rejection marker keyed to the current
+token in `chrome.storage.session`. A new worker loads that marker before any
+connection attempt: a marker matching the stored token restores `auth_failed`
+and creates no socket, while a different valid token clears the stale marker
+and permits exactly one connection. Marker writes and removals are ordered so a
+rapid token change cannot erase a reselected rejection. Alarm handlers respect
+the restored state and do not reconnect the same rejected credential.
 
 ## 7. Agent, Launcher, and Broker Lifecycle
 
@@ -325,10 +357,16 @@ Migration instructions are:
 
 1. pull/build the new source;
 2. run `node scripts/install.js`;
-3. copy the newly generated token when the installer displays it;
-4. load or reload `extension/dist/`;
-5. paste the token in the popup and Save;
-6. verify `Connected` and `node scripts/start.js diagnose --json`.
+3. determine the effective token source: `ARC_TUNNEL_TOKEN` when present,
+   otherwise the persisted token;
+4. obtain an effective environment token from its controlled source, or unset
+   the override and restart the Broker and all Agent clients before using the
+   persisted fallback;
+5. if an empty or malformed override is present, remove or replace it before
+   startup rather than expecting fallback;
+6. load or reload `extension/dist/`;
+7. paste and Save the effective token;
+8. verify `Connected` and `node scripts/start.js diagnose --json`.
 
 The documentation explicitly states that token authentication protects the
 local Broker capability boundary but does not isolate cookies or browser

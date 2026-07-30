@@ -211,7 +211,39 @@ popupTest('saves a valid URL and token in one atomic storage write', (environmen
   environment.elements['save-config'].dispatch('click');
 
   assert.deepEqual(environment.storageSets, [{
-    arc_tunnel_ws_url: 'ws://127.0.0.1:9000',
+    arc_tunnel_ws_url: 'ws://127.0.0.1:9000/extension',
+    authToken: OTHER_AUTH_TOKEN
+  }]);
+});
+
+for (const unsafeUrl of [
+  'ws://localhost:9000',
+  'ws://127.0.0.1',
+  'wss://127.0.0.1:9000',
+  'ws://example.test:9000',
+  'ws://user:password@127.0.0.1:9000',
+  'ws://127.0.0.1:9000/custom',
+  'ws://127.0.0.1:9000?token=not-a-secret',
+  'ws://127.0.0.1:9000/#fragment'
+]) {
+  popupTest(`rejects unsafe endpoint ${JSON.stringify(unsafeUrl)} without writing storage`, (environment) => {
+    environment.elements['ws-url'].value = unsafeUrl;
+    environment.elements['auth-token'].value = OTHER_AUTH_TOKEN;
+    environment.elements['save-config'].dispatch('click');
+
+    assert.equal(environment.storageSets.length, 0);
+    assert.match(environment.elements.status.textContent, /127\.0\.0\.1|loopback|WebSocket URL/i);
+    assert.equal(environment.elements.status.textContent.includes(OTHER_AUTH_TOKEN), false);
+  });
+}
+
+popupTest('migrates only the supported legacy localhost default before saving', (environment) => {
+  environment.elements['ws-url'].value = 'ws://localhost:8765';
+  environment.elements['auth-token'].value = OTHER_AUTH_TOKEN;
+  environment.elements['save-config'].dispatch('click');
+
+  assert.deepEqual(environment.storageSets, [{
+    arc_tunnel_ws_url: 'ws://127.0.0.1:8765/extension',
     authToken: OTHER_AUTH_TOKEN
   }]);
 });
@@ -241,11 +273,11 @@ popupTest('Enter from either input follows the same atomic save path', (environm
 
   assert.deepEqual(environment.storageSets, [
     {
-      arc_tunnel_ws_url: 'ws://127.0.0.1:9000',
+      arc_tunnel_ws_url: 'ws://127.0.0.1:9000/extension',
       authToken: OTHER_AUTH_TOKEN
     },
     {
-      arc_tunnel_ws_url: 'ws://127.0.0.1:9000',
+      arc_tunnel_ws_url: 'ws://127.0.0.1:9000/extension',
       authToken: OTHER_AUTH_TOKEN
     }
   ]);

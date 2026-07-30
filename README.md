@@ -69,6 +69,14 @@ and Codex.
 生效令牌。模板只保留 MCP 客户端路径和 `WS_PORT`，客户端会自行读取用户级
 Arc Tunnel 配置，不要把令牌复制进 Agent 模板。
 
+With no environment override, a newly generated file token is the active popup
+credential. With a valid `ARC_TUNNEL_TOKEN` override, the installer instead labels the
+generated file token as a fallback: use the effective environment token from its
+controlled source, or unset the override and restart the Broker and every Agent client
+before using that fallback. An empty or malformed environment override blocks startup
+rather than falling back; remove or replace it before startup. The installer never
+prints the environment override value.
+
 ## Broker lifecycle and ports
 
 ```bash
@@ -133,11 +141,12 @@ should use `/extension`.
 
 On upgrade, the extension rewrites only the former default values
 `ws://localhost:8765`, `ws://localhost:8765/`, and
-`ws://localhost:8765/extension` to their `127.0.0.1` equivalents. Other hosts, ports,
-paths, queries, and fragments remain unchanged.
+`ws://localhost:8765/extension` to their `127.0.0.1` equivalents. These three exact
+legacy `localhost` defaults are migration-only inputs; other `localhost` values and
+every non-loopback or structurally invalid URL are rejected before connection.
 
-`ARC_TUNNEL_TOKEN` 已设置时，扩展必须使用同一个生效令牌；请从设置该环境变量的
-受控来源取得它，不要改用配置文件中的令牌。另一种做法是先清除该环境变量，
+设置了有效的 `ARC_TUNNEL_TOKEN` 时，扩展必须使用同一个生效令牌；请从设置该
+环境变量的受控来源取得它，不要改用配置文件中的令牌。另一种做法是先清除该环境变量，
 取消环境覆盖后重启 Broker 和所有 Agent 客户端，再使用
 `~/.arc-tunnel/config.json` 中的持久化令牌。不要用会把令牌打印到终端的命令
 获取它。
@@ -153,8 +162,9 @@ paths, queries, and fragments remain unchanged.
 
 1. 拉取新源码，并按开发流程构建最新 bundle。
 2. 运行 `node scripts/install.js`。
-3. 确认生效令牌来源：若设置了 `ARC_TUNNEL_TOKEN`，沿用同一个环境令牌；否则
-   使用安装器一次性显示的新令牌或持久化文件中的现有令牌。
+3. 确认生效令牌来源：若设置了有效的 `ARC_TUNNEL_TOKEN`，从其受控来源取得同一个
+   环境令牌；若未设置，则使用安装器一次性显示的新令牌或持久化文件中的现有令牌。
+   若环境覆盖为空或格式错误，须在启动前移除或替换，不能静默回退到文件令牌。
 4. 加载或重新加载 `extension/dist/`。
 5. 在扩展弹窗中的密码输入框粘贴并保存同一个生效令牌。
 6. 确认状态为 `Connected`，再运行
@@ -227,9 +237,10 @@ created. It never stops the shared Broker and does not close any pre-existing ta
 
 认证恢复需要在真实浏览器中验证：先在扩展弹窗保存一个格式有效但内容错误的
 令牌，确认弹窗显示 `Authentication failed`、状态稳定进入 `auth_failed` 且不会
-重连循环；再保存正确的生效令牌，确认恢复为 `Connected`。若环境覆盖仍存在，
-这里必须使用该环境令牌；只有取消覆盖并重启 Broker 和 Agent 客户端后，持久化
-文件令牌才会生效。随后运行 D/F/C 韧性检查：
+重连循环；再保存正确的生效令牌，确认恢复为 `Connected`。若有效的环境覆盖仍
+存在，这里必须使用该环境令牌；空值或格式错误的覆盖须先移除或替换。只有取消
+覆盖并重启 Broker 和 Agent 客户端后，持久化文件令牌才会生效。随后运行 D/F/C
+韧性检查：
 
 ```bash
 node scripts/verify-browser-resilience.js [--port 8765]
@@ -254,6 +265,17 @@ debugger, storage, and cookies permissions. It can access tabs, cookies, storage
 page scripts, so connect only trusted local Agent clients. `execute_script` has full page
 access. Agents share one browser profile and its cookies; tab claims coordinate work but
 are not a security boundary.
+
+The extension accepts only the `ws:` scheme with the literal host `127.0.0.1`, an
+explicit port from 1 through 65535, and path `/` or `/extension`. It rejects `wss:`,
+userinfo, queries, fragments, alternate IP spellings, non-loopback hosts, missing or
+out-of-range ports, and other paths before creating a socket. The three exact legacy
+`localhost` defaults listed above remain migration-only inputs. Consequently, the
+extension never sends the authentication token to an off-loopback destination.
+
+This static token protects against local clients that do not possess it; it is not a
+same-user sandbox. Hostile same-OS-user processes that can read the user config or
+impersonate the selected local port are outside this static-token boundary.
 
 令牌认证保护的是本地 Broker 能力边界：同一机器上未持有令牌的进程不能调用
 浏览器控制 WebSocket。它不提供 Agent 之间的 Cookie 或身份隔离；所有 Agent

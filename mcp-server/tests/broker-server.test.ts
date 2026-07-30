@@ -176,6 +176,25 @@ describe('BrokerServer', () => {
     }
   );
 
+  it('rejects a canonical valid-format wrong Agent token with AUTH_FAILED', async () => {
+    expect(Buffer.from(OTHER_AUTH_TOKEN, 'base64url').toString('base64url')).toBe(OTHER_AUTH_TOKEN);
+
+    const ws = await openWs(broker.address().port, '/agent');
+    sockets.push(ws);
+    const messages: JsonMessage[] = [];
+    ws.on('message', data => messages.push(JSON.parse(data.toString())));
+    const closed = nextClose(ws);
+    ws.send(JSON.stringify({
+      type: 'hello',
+      role: 'agent',
+      protocolVersion: PROTOCOL_VERSION,
+      token: OTHER_AUTH_TOKEN
+    }));
+
+    await expect(closed).resolves.toEqual({ code: 1008, reason: 'AUTH_FAILED' });
+    expect(messages).toEqual([]);
+  });
+
   it('does not create Agent state when authentication fails', async () => {
     const registry = new SessionRegistry();
     await broker.stop();

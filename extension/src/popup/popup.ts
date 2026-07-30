@@ -1,5 +1,6 @@
 // extension/src/popup/popup.ts
 import { isValidAuthToken } from '../auth-token';
+import { normalizeWebSocketUrl } from '../websocket-url';
 
 const STORAGE_KEYS = ['arc_tunnel_ws_url', 'authToken'] as const;
 
@@ -49,13 +50,20 @@ function saveConfig(
     statusEl.className = 'status disconnected';
     return;
   }
+  const normalizedUrl = normalizeWebSocketUrl(url);
+  if (normalizedUrl === null) {
+    statusEl.textContent =
+      'Status: WebSocket URL must be ws://127.0.0.1:<port> with an optional /extension path';
+    statusEl.className = 'status disconnected';
+    return;
+  }
   if (!isValidAuthToken(authToken)) {
     statusEl.textContent = 'Status: Authentication token must be a valid 43-character token';
     statusEl.className = 'status disconnected';
     return;
   }
 
-  chrome.storage.local.set({ arc_tunnel_ws_url: url, authToken }, () => {
+  chrome.storage.local.set({ arc_tunnel_ws_url: normalizedUrl, authToken }, () => {
     statusEl.textContent = 'Status: Saved — reconnecting...';
     statusEl.className = 'status disconnected';
     // The background script will detect the storage change and reconnect

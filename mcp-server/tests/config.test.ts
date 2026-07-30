@@ -28,6 +28,12 @@ describe('resolveBrokerConfig', () => {
 });
 
 describe('authentication token', () => {
+  it('uses a canonical distinct token fixture for wrong-token coverage', () => {
+    expect(Buffer.from(OTHER_AUTH_TOKEN, 'base64url').toString('base64url')).toBe(OTHER_AUTH_TOKEN);
+    expect(isValidAuthToken(OTHER_AUTH_TOKEN)).toBe(true);
+    expect(verifyAuthToken(OTHER_AUTH_TOKEN, TEST_AUTH_TOKEN)).toBe(false);
+  });
+
   it.each([
     ['a valid base64url token', TEST_AUTH_TOKEN, true],
     ['a 42-character token', 'A'.repeat(42), false],

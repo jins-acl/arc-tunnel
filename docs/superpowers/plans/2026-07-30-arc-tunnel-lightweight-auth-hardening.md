@@ -14,8 +14,16 @@
 - [ ] Preserve every pre-existing untracked smoke/probe file; never stage, modify, delete, or clean them.
 - [ ] Follow RED → GREEN TDD for each production behavior change.
 - [ ] Keep protocol version `2`, loopback binding, Origin restrictions, tab ownership, heartbeat timing, debugger deadlines, and command deadlines unchanged.
-- [ ] Never put a token in URLs, CLI arguments, lock files, logs, diagnostics, dashboard content, events, errors, screenshots, or review output.
+- [ ] Except for the generated file token's explicit one-time installer display, never put a token in URLs, CLI arguments, lock files, logs, diagnostics, dashboard content, events, errors, screenshots, or review output.
 - [ ] Use `ARC_TUNNEL_TOKEN` only for process-to-process configuration; never persist an environment override.
+- [ ] Enforce the strict extension URL boundary before socket creation: `ws:`,
+  literal host `127.0.0.1`, explicit port 1–65535, and path `/` or
+  `/extension`; retain only `ws://localhost:8765`, `ws://localhost:8765/`,
+  and `ws://localhost:8765/extension` as migration inputs and never send the
+  token off-loopback.
+- [ ] State the static-token threat limit explicitly: hostile same-OS-user
+  processes that can read the user config or impersonate the selected local
+  port are outside this boundary.
 - [ ] After each implementation task, run an independent specification-compliance review and then an independent code-quality review. Resolve findings and repeat the affected review before starting the next task.
 - [ ] Commit only the files belonging to the current task. Use the commit message specified by that task unless a review fix requires a separate `fix:` commit.
 - [ ] Do not merge, push `master`, close Issue #17, or claim completion until all automated and real-browser release gates pass.
@@ -96,7 +104,7 @@ Validate `expected` before comparison so `timingSafeEqual` always receives two 3
 
 ```ts
 export const TEST_AUTH_TOKEN = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
-export const OTHER_AUTH_TOKEN = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
+export const OTHER_AUTH_TOKEN = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA';
 export const testBrokerConfig = (port = 0) => ({
   host: '127.0.0.1' as const,
   port,
@@ -175,6 +183,15 @@ and return:
 
 Call token setup after committed bundles have been checked but before Agent detection, so installations with no auto-detected Agent still receive a Broker token.
 
+Installer output must follow the effective credential source. With no
+environment override, a generated file token is printed once with the popup
+instruction. With a valid environment override, the generated file token is
+printed once and labeled as fallback while the effective environment token
+must come from its controlled source; the override value is never printed. An
+empty or malformed environment override must warn that startup is blocked and
+that the user must remove or replace it before startup, without disclosing its
+value or silently falling back to the file token.
+
 ### TDD steps
 
 - [ ] Add RED installer tests for:
@@ -188,7 +205,15 @@ Call token setup after committed bundles have been checked but before Agent dete
   - injected rename failure preserving the previous bytes and removing the temporary file;
   - `generated: true` only for a newly generated token.
 - [ ] Capture installer output in a focused test or injected logger and prove:
-  - a newly generated token is printed exactly once with the popup instruction;
+  - with no environment override, a newly generated token is printed exactly
+    once with the popup instruction;
+  - a valid environment override makes the generated file token fallback-only,
+    identifies the effective environment token's controlled source, and
+    explains that using the file fallback requires unsetting the override and
+    restarting the Broker and every Agent client;
+  - an empty or malformed environment override warns to remove or replace it
+    before startup, never echoes its value, and never presents the file token
+    as the active popup credential;
   - a preserved token is not printed;
   - no routine summary or error duplicates the token.
 - [ ] Run RED:
@@ -767,10 +792,18 @@ Document:
 - persisted `{ "port": 8765, "token": "..." }`;
 - `ARC_TUNNEL_TOKEN` → file token precedence and unchanged port precedence;
 - why there is no `--token` and no token in a URL;
-- installer generation/preservation and one-time display;
+- installer generation/preservation and one-time display, including that a
+  generated file token is fallback when a valid environment override is
+  effective and that an invalid environment override blocks startup;
 - extension password field and `auth_failed` recovery;
 - migration steps in the approved design;
-- `127.0.0.1` versus `localhost` and existing Origin restrictions;
+- the strict extension URL boundary and why the extension never sends a token
+  off-loopback: literal `127.0.0.1`, explicit port, `/` or `/extension`, plus
+  only the three exact legacy `localhost` migration inputs;
+- the threat-model exclusion: hostile same-OS-user processes that can read the
+  user config or impersonate the selected local port are outside the
+  static-token boundary;
+- existing Origin restrictions;
 - aggregate unauthenticated health/dashboard/diagnose endpoints;
 - local capability protection versus shared cookies/profile state;
 - `npm run audit:prod`;
@@ -792,6 +825,9 @@ from its own tab, and prove a foreign-owned screenshot request returns
 ### TDD and verification steps
 
 - [ ] Add RED documentation checks for the token key, installer command, extension migration step, Node 22, audit command, security boundary, and absence of token-bearing URL/CLI examples.
+- [ ] Make the documentation checks reject non-loopback extension URLs,
+  off-loopback token transmission guidance, config-only recovery under an
+  environment override, and omission of the same-user threat-model exclusion.
 - [ ] Add/update script tests so tracked smoke and multi-Agent helpers send authenticated hellos or inherit authenticated config.
 - [ ] Add a focused verifier-helper test for extracting MCP image content and rejecting an empty/non-JPEG result without logging the base64 payload.
 - [ ] Run RED:
@@ -876,7 +912,7 @@ npm run audit:prod
 - [ ] Search generated bundles and tracked source for the known test tokens and credential leaks:
 
 ```powershell
-rg -n "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" mcp-server/dist extension/dist README.md AGENTS.md configs scripts
+rg -n "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA" mcp-server/dist extension/dist README.md AGENTS.md configs scripts
 ```
 
 Expected: no matches outside test sources.
@@ -931,7 +967,11 @@ node scripts/start.js status
 - [ ] Save a deliberately wrong but valid-format token in the extension popup.
 - [ ] Confirm the popup reaches `Authentication failed`, remains stable for at least two reconnect-alarm intervals, and the Service Worker does not create repeated WebSocket generations.
 - [ ] Confirm `node scripts/start.js diagnose --json` exposes only aggregate disconnected state and does not contain the wrong token.
-- [ ] Restore the exact token from the user's `~/.arc-tunnel/config.json`, Save once, and confirm exactly one reconnect generation reaches `Connected`.
+- [ ] Restore the effective token and Save once. With a valid
+  `ARC_TUNNEL_TOKEN` override, obtain it from the controlled source that set
+  the environment. To use the persisted token instead, unset the override and
+  restart the Broker and every Agent client before copying the persisted token.
+  Confirm exactly one reconnect generation reaches `Connected`.
 - [ ] Confirm a newly launched lightweight MCP client authenticates without manual per-client token entry.
 
 ### Real browser regression verification

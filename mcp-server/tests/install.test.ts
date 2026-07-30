@@ -69,6 +69,27 @@ describe('installer broker authentication configuration', () => {
     expect(JSON.parse(fs.readFileSync(configPath(), 'utf8'))).toEqual({ port: 9123, token: result.token });
   });
 
+  it('migrates a decimal-string port-only configuration without changing its value', () => {
+    writeConfig('{"port":"9123"}');
+
+    const result = ensureConfig();
+
+    expect(result.generated).toBe(true);
+    expect(JSON.parse(fs.readFileSync(configPath(), 'utf8'))).toEqual({ port: '9123', token: result.token });
+  });
+
+  it.each([0, 65536, '0', '65536', '8.5', ' 9123', null])(
+    'replaces invalid persisted port %p with the default',
+    (port) => {
+      writeConfig(JSON.stringify({ port }));
+
+      const result = ensureConfig();
+
+      expect(JSON.parse(fs.readFileSync(configPath(), 'utf8')))
+        .toEqual({ port: 8765, token: result.token });
+    }
+  );
+
   it('preserves an existing valid token exactly', () => {
     const original = `{"port":9123,"token":"${VALID_TOKEN}"}`;
     writeConfig(original);
@@ -99,6 +120,15 @@ describe('installer broker authentication configuration', () => {
     expect(result.generated).toBe(true);
     expect(result.token).not.toBe('not-a-valid-token');
     expect(JSON.parse(fs.readFileSync(configPath(), 'utf8'))).toEqual({ port: 9123, token: result.token });
+  });
+
+  it('replaces an invalid token without changing a decimal-string custom port', () => {
+    writeConfig('{"port":"9123","token":"not-a-valid-token"}');
+
+    const result = ensureConfig();
+
+    expect(result.generated).toBe(true);
+    expect(JSON.parse(fs.readFileSync(configPath(), 'utf8'))).toEqual({ port: '9123', token: result.token });
   });
 
   it('rejects malformed configuration without overwriting its bytes', () => {
@@ -156,6 +186,87 @@ describe('installer broker authentication configuration', () => {
     expect(output).toContain(result.token);
     expect(output.match(new RegExp(result.token, 'g'))).toHaveLength(1);
     expect(output).toMatch(/browser extension popup/i);
+  });
+
+  it('labels a generated file token as fallback when a valid environment token is effective', () => {
+    const messages: string[] = [];
+    const warnings: string[] = [];
+    const environmentToken = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA';
+    const result = installer.ensureBrokerAuthConfig(homeDir, {
+      env: { ARC_TUNNEL_TOKEN: environmentToken },
+      log: (message: string) => messages.push(message),
+      warn: (message: string) => warnings.push(message)
+    });
+    const output = [...messages, ...warnings].join('\n');
+
+    expect(result.generated).toBe(true);
+    expect(output).toContain(result.token);
+    expect(output.match(new RegExp(result.token, 'g'))).toHaveLength(1);
+    expect(output).toMatch(/fallback/i);
+    expect(output).toMatch(/effective environment token/i);
+    expect(output).toMatch(/controlled source/i);
+    expect(output).toMatch(/unset.+restart/i);
+    expect(output).not.toContain(environmentToken);
+    expect(output).not.toMatch(new RegExp(`paste[^\\n]*${result.token}`, 'i'));
+  });
+
+  it.each([
+    ['empty', ''],
+    ['malformed', 'not-a-valid-token']
+  ])('warns that a present %s environment override blocks startup without leaking it', (_label, environmentToken) => {
+    const messages: string[] = [];
+    const warnings: string[] = [];
+    const result = installer.ensureBrokerAuthConfig(homeDir, {
+      env: { ARC_TUNNEL_TOKEN: environmentToken },
+      log: (message: string) => messages.push(message),
+      warn: (message: string) => warnings.push(message)
+    });
+    const output = [...messages, ...warnings].join('\n');
+
+    expect(result.generated).toBe(true);
+    expect(warnings.join('\n')).toMatch(/ARC_TUNNEL_TOKEN/i);
+    expect(warnings.join('\n')).toMatch(/remove|replace/i);
+    expect(warnings.join('\n')).toMatch(/before (?:Broker )?startup/i);
+    if (environmentToken) expect(output).not.toContain(environmentToken);
+    expect(output).not.toMatch(new RegExp(`paste[^\\n]*${result.token}`, 'i'));
+  });
+
+  it('reports a valid environment override as effective without printing either preserved secret', () => {
+    const environmentToken = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA';
+    writeConfig(`{"token":"${VALID_TOKEN}"}`);
+    const messages: string[] = [];
+
+    const result = installer.ensureBrokerAuthConfig(homeDir, {
+      env: { ARC_TUNNEL_TOKEN: environmentToken },
+      log: (message: string) => messages.push(message)
+    });
+    const output = messages.join('\n');
+
+    expect(result.generated).toBe(false);
+    expect(output).toMatch(/effective environment token/i);
+    expect(output).toMatch(/controlled source/i);
+    expect(output).toMatch(/unset.+restart/i);
+    expect(output).not.toContain(environmentToken);
+    expect(output).not.toContain(VALID_TOKEN);
+  });
+
+  it('warns about an invalid present environment override even when the file token is valid', () => {
+    const environmentToken = 'still-not-a-valid-token';
+    writeConfig(`{"token":"${VALID_TOKEN}"}`);
+    const warnings: string[] = [];
+
+    const result = installer.ensureBrokerAuthConfig(homeDir, {
+      env: { ARC_TUNNEL_TOKEN: environmentToken },
+      warn: (message: string) => warnings.push(message)
+    });
+    const output = warnings.join('\n');
+
+    expect(result.generated).toBe(false);
+    expect(output).toMatch(/ARC_TUNNEL_TOKEN/i);
+    expect(output).toMatch(/remove|replace/i);
+    expect(output).toMatch(/before (?:Broker )?startup/i);
+    expect(output).not.toContain(environmentToken);
+    expect(output).not.toContain(VALID_TOKEN);
   });
 
   it('does not print a preserved token', () => {
