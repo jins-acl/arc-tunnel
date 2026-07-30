@@ -4,7 +4,9 @@ export const AUTH_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 export const AUTH_TOKEN_BYTES = 32;
 
 export function isValidAuthToken(value: unknown): value is string {
-  return typeof value === 'string' && AUTH_TOKEN_PATTERN.test(value);
+  return typeof value === 'string'
+    && AUTH_TOKEN_PATTERN.test(value)
+    && Buffer.from(value, 'base64url').toString('base64url') === value;
 }
 
 export function verifyAuthToken(candidate: unknown, expected: string): boolean {

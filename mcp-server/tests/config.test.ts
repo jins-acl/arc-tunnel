@@ -7,6 +7,12 @@ import { loadBrokerConfig, loadBrokerEndpointConfig, resolveBrokerConfig } from 
 import { ArcTunnelError, ErrorCode, toErrorInfo } from '../src/protocol';
 import { OTHER_AUTH_TOKEN, TEST_AUTH_TOKEN } from './helpers/auth';
 
+const NONCANONICAL_AUTH_TOKENS = [
+  'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB',
+  'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC',
+  'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD'
+] as const;
+
 describe('resolveBrokerConfig', () => {
   it('uses CLI, env, file, default precedence', () => {
     expect(resolveBrokerConfig({ argv: ['--port', '9100'], env: { WS_PORT: '9000' }, fileConfig: { port: 8900 } }).port).toBe(9100);
@@ -41,6 +47,11 @@ describe('authentication token', () => {
     ['an invalid expected token', TEST_AUTH_TOKEN, 'A'.repeat(42), false]
   ])('verifies %s without accepting it', (_description, candidate, expected, result) => {
     expect(verifyAuthToken(candidate, expected)).toBe(result);
+  });
+
+  it.each(NONCANONICAL_AUTH_TOKENS)('rejects noncanonical alias %s', (candidate) => {
+    expect(isValidAuthToken(candidate)).toBe(false);
+    expect(verifyAuthToken(candidate, TEST_AUTH_TOKEN)).toBe(false);
   });
 });
 

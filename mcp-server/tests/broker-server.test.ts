@@ -10,6 +10,8 @@ import {
 
 type JsonMessage = Record<string, any>;
 
+const NONCANONICAL_AUTH_TOKEN = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB';
+
 function openWs(port: number, path: string, origin?: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, origin ? { origin } : undefined);
@@ -187,6 +189,26 @@ describe('BrokerServer', () => {
     }));
 
     await closed;
+    expect(registry.diagnosticsCounts()).toEqual({ connected: 0, grace: 0, claimedTabs: 0 });
+  });
+
+  it('rejects a noncanonical token alias before creating Agent state', async () => {
+    const registry = new SessionRegistry();
+    await broker.stop();
+    broker = new BrokerServer(testBrokerConfig(), { registry });
+    await broker.start();
+    const ws = await openWs(broker.address().port, '/agent');
+    sockets.push(ws);
+    const messages: JsonMessage[] = [];
+    ws.on('message', data => messages.push(JSON.parse(data.toString())));
+    const closed = nextClose(ws);
+    ws.send(JSON.stringify({
+      type: 'hello', role: 'agent', protocolVersion: PROTOCOL_VERSION,
+      token: NONCANONICAL_AUTH_TOKEN
+    }));
+
+    await expect(closed).resolves.toEqual({ code: 1008, reason: 'AUTH_FAILED' });
+    expect(messages).toEqual([]);
     expect(registry.diagnosticsCounts()).toEqual({ connected: 0, grace: 0, claimedTabs: 0 });
   });
 
