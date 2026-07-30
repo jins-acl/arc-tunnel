@@ -202,10 +202,11 @@ function createBrokerLauncher(options = {}) {
         ownedLockRaw = JSON.stringify({ pid: process.pid, port: config.port, protocolVersion: PROTOCOL_VERSION });
         import_fs.default.writeFileSync(fd, ownedLockRaw);
         import_fs.default.closeSync(fd);
-        child = spawnProcess(process.execPath, [brokerEntry, ...brokerArgs(config)], {
+        child = spawnProcess(process.execPath, [brokerEntry, ...brokerArgs({ host: config.host, port: config.port })], {
           detached: true,
           stdio: "ignore",
-          windowsHide: true
+          windowsHide: true,
+          env: { ...process.env, ARC_TUNNEL_TOKEN: config.token }
         });
         child.unref();
         if (typeof child.pid !== "number") throw new Error("Broker process did not provide a pid");
@@ -405,6 +406,14 @@ var inspectBroker = defaultLauncher.inspectBroker;
 var import_fs2 = __toESM(require("fs"));
 var import_os2 = __toESM(require("os"));
 var import_path2 = __toESM(require("path"));
+
+// src/auth-token.ts
+var AUTH_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+function isValidAuthToken(value) {
+  return typeof value === "string" && AUTH_TOKEN_PATTERN.test(value) && Buffer.from(value, "base64url").toString("base64url") === value;
+}
+
+// src/config.ts
 function parsePort(value) {
   const text = String(value);
   if (!/^\d+$/.test(text)) {
@@ -424,22 +433,39 @@ function resolveBrokerConfig(options) {
     port: parsePort(raw)
   };
 }
-function loadBrokerConfig(argv, env, homeDir = import_os2.default.homedir()) {
+function loadFileConfig(homeDir) {
   const configPath = import_path2.default.join(homeDir, ".arc-tunnel", "config.json");
-  let fileConfig = null;
   try {
     const raw = import_fs2.default.readFileSync(configPath, "utf8");
-    fileConfig = JSON.parse(raw);
+    return JSON.parse(raw);
   } catch (error) {
     const nodeError = error;
     if (nodeError.code !== "ENOENT") {
       throw new Error(`Invalid Arc Tunnel config: ${configPath}`);
     }
+    return null;
   }
-  return resolveBrokerConfig({ argv, env, fileConfig });
+}
+function loadBrokerEndpointConfig(argv, env, homeDir = import_os2.default.homedir()) {
+  return resolveBrokerConfig({ argv, env, fileConfig: loadFileConfig(homeDir) });
+}
+function loadBrokerConfig(argv, env, homeDir = import_os2.default.homedir()) {
+  const fileConfig = loadFileConfig(homeDir);
+  const endpoint = resolveBrokerConfig({ argv, env, fileConfig });
+  const token = env.ARC_TUNNEL_TOKEN ?? fileConfig?.token;
+  if (!isValidAuthToken(token)) {
+    throw new Error("Arc Tunnel authentication token is missing or invalid. Run node scripts/install.js to configure it.");
+  }
+  return { ...endpoint, token };
 }
 
 // src/broker-control.ts
+var defaultLauncher2 = {
+  ensureBroker,
+  getBrokerStatus,
+  stopBroker,
+  inspectBroker
+};
 var EXIT_CODE = {
   healthy: 0,
   absent: 2,
@@ -477,21 +503,24 @@ function humanDiagnose(inspection) {
   return `${lines.join("\n")}
 `;
 }
-async function runControl(argv, env, output, launcher = { ensureBroker, getBrokerStatus, stopBroker, inspectBroker }) {
+async function runControl(argv, env, output, launcher = defaultLauncher2) {
   const action = argv[0] ?? "start";
-  const config = loadBrokerConfig(argv.slice(1), env);
   if (action === "start") {
+    const config = loadBrokerConfig(argv.slice(1), env);
     await launcher.ensureBroker(config);
     output.stdout(`${JSON.stringify(await launcher.getBrokerStatus(config))}
 `);
   } else if (action === "status") {
+    const config = loadBrokerEndpointConfig(argv.slice(1), env);
     output.stdout(`${JSON.stringify(await launcher.getBrokerStatus(config))}
 `);
   } else if (action === "stop") {
+    const config = loadBrokerEndpointConfig(argv.slice(1), env);
     await launcher.stopBroker(config);
     output.stdout(`${JSON.stringify({ running: false, port: config.port })}
 `);
   } else if (action === "diagnose") {
+    const config = loadBrokerEndpointConfig(argv.slice(1), env);
     const inspection = await launcher.inspectBroker(config);
     output.stdout(argv.includes("--json") ? `${JSON.stringify(diagnoseJson(inspection))}
 ` : humanDiagnose(inspection));
