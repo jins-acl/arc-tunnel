@@ -120,6 +120,22 @@ describe('installer broker authentication configuration', () => {
     expect(temporaryFiles()).toEqual([]);
   });
 
+  it('preserves previous configuration bytes and removes the temporary file when final permission setup fails', () => {
+    const original = '{"port":9123,"token":"old"}';
+    writeConfig(original);
+    const failingFs = {
+      ...fs,
+      chmodSync: () => { throw new Error('chmod failed'); }
+    };
+
+    expect(() => installer.writeConfigAtomically(configPath(), '{"port":8765}', {
+      fs: failingFs,
+      randomBytes: () => Buffer.from('unique')
+    })).toThrow('chmod failed');
+    expect(fs.readFileSync(configPath(), 'utf8')).toBe(original);
+    expect(temporaryFiles()).toEqual([]);
+  });
+
   it('prints a newly generated token once with the browser extension popup instruction', () => {
     const messages: string[] = [];
     const result = installer.ensureBrokerAuthConfig(homeDir, { log: (message: string) => messages.push(message) });

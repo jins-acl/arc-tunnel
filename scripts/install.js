@@ -54,22 +54,18 @@ function writeConfigAtomically(configPath, contents, dependencies = {}) {
   const randomBytes = dependencies.randomBytes || crypto.randomBytes;
   const configDir = path.dirname(configPath);
   const temporaryPath = `${configPath}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
-  let renamed = false;
 
   fileSystem.mkdirSync(configDir, { recursive: true });
 
   try {
     fileSystem.writeFileSync(temporaryPath, contents, { encoding: 'utf8', mode: 0o600 });
+    fileSystem.chmodSync(temporaryPath, 0o600);
     fileSystem.renameSync(temporaryPath, configPath);
-    renamed = true;
-    fileSystem.chmodSync(configPath, 0o600);
   } catch (error) {
-    if (!renamed) {
-      try {
-        fileSystem.unlinkSync(temporaryPath);
-      } catch (cleanupError) {
-        if (cleanupError.code !== 'ENOENT') throw error;
-      }
+    try {
+      fileSystem.unlinkSync(temporaryPath);
+    } catch (cleanupError) {
+      if (cleanupError.code !== 'ENOENT') throw error;
     }
     throw error;
   }
