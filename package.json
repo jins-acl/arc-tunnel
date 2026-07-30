@@ -4,6 +4,9 @@
   "private": true,
   "description": "Local multi-Agent browser automation through one shared Broker",
   "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/jins-acl/arc-tunnel.git"
@@ -14,6 +17,7 @@
     "build": "npm --prefix mcp-server run build && npm --prefix extension run build",
     "test:integration": "npm --prefix mcp-server run test:integration",
     "check:docs": "node scripts/check-docs.js",
+    "audit:prod": "npm --prefix mcp-server audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org && npm --prefix extension audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org",
     "verify": "npm test && npm run typecheck && npm run build && npm run test:integration && npm run check:docs"
   }
 }
