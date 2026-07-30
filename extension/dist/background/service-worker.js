@@ -19,35 +19,51 @@ var init_auth_token = __esm({
   }
 });
 
-// src/background/websocket-client.ts
+// src/websocket-url.ts
 function resolveConfiguredWebSocketUrl(value) {
-  if (typeof value !== "string") return DEFAULT_WS_URL;
+  if (value === void 0) return DEFAULT_WS_URL;
+  if (typeof value !== "string") return "";
   return LEGACY_DEFAULT_URLS.get(value) ?? value;
 }
-function normalizeWebSocketUrl(url) {
-  const parsed = new URL(url);
-  if (parsed.pathname !== "/") return url;
-  parsed.pathname = "/extension";
-  return parsed.toString();
+function normalizeWebSocketUrl(value) {
+  const resolved = resolveConfiguredWebSocketUrl(value);
+  const match = LOOPBACK_ENDPOINT_PATTERN.exec(resolved);
+  if (!match) return null;
+  const port = Number(match[1]);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return `ws://127.0.0.1:${port}/extension`;
 }
-var DEFAULT_WS_URL, HEARTBEAT_INTERVAL_MS, AUTHENTICATION_FAILED_MESSAGE, LEGACY_DEFAULT_URLS, WebSocketClient;
-var init_websocket_client = __esm({
-  "src/background/websocket-client.ts"() {
+var DEFAULT_WS_URL, LEGACY_DEFAULT_URLS, LOOPBACK_ENDPOINT_PATTERN;
+var init_websocket_url = __esm({
+  "src/websocket-url.ts"() {
     "use strict";
-    init_auth_token();
-    init_auth_token();
     DEFAULT_WS_URL = "ws://127.0.0.1:8765";
-    HEARTBEAT_INTERVAL_MS = 1e4;
-    AUTHENTICATION_FAILED_MESSAGE = "Broker authentication failed";
     LEGACY_DEFAULT_URLS = /* @__PURE__ */ new Map([
       ["ws://localhost:8765", DEFAULT_WS_URL],
       ["ws://localhost:8765/", DEFAULT_WS_URL],
       ["ws://localhost:8765/extension", `${DEFAULT_WS_URL}/extension`]
     ]);
+    LOOPBACK_ENDPOINT_PATTERN = /^ws:\/\/127\.0\.0\.1:([0-9]+)(?:\/(?:extension)?)?$/;
+  }
+});
+
+// src/background/websocket-client.ts
+var HEARTBEAT_INTERVAL_MS, AUTHENTICATION_FAILED_MESSAGE, INVALID_WEBSOCKET_URL_MESSAGE, WebSocketClient;
+var init_websocket_client = __esm({
+  "src/background/websocket-client.ts"() {
+    "use strict";
+    init_auth_token();
+    init_websocket_url();
+    init_auth_token();
+    init_websocket_url();
+    HEARTBEAT_INTERVAL_MS = 1e4;
+    AUTHENTICATION_FAILED_MESSAGE = "Broker authentication failed";
+    INVALID_WEBSOCKET_URL_MESSAGE = "Arc Tunnel WebSocket URL must use the explicit IPv4 loopback endpoint";
     WebSocketClient = class {
       constructor(url, token = "") {
         this.ws = null;
         this.rejectedToken = null;
+        this.authFailureHandler = null;
         this.connectionState = "idle";
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 10;
@@ -62,19 +78,35 @@ var init_websocket_client = __esm({
         this.connectPromise = null;
         this.rejectConnect = null;
         this.handshakeComplete = false;
-        this.url = normalizeWebSocketUrl(resolveConfiguredWebSocketUrl(url));
-        this.token = token;
+        this.url = normalizeWebSocketUrl(url);
+        this.token = this.url === null ? "" : token;
       }
       setUrl(url) {
-        const normalizedUrl = normalizeWebSocketUrl(resolveConfiguredWebSocketUrl(url));
+        const normalizedUrl = normalizeWebSocketUrl(url);
+        if (normalizedUrl === null) {
+          this.invalidateConfig();
+          return;
+        }
         if (normalizedUrl === this.url) return;
         this.replaceConfig(normalizedUrl, this.token, false);
       }
       setConfig(url, token) {
-        if (!isValidAuthToken(token)) return false;
-        const normalizedUrl = normalizeWebSocketUrl(resolveConfiguredWebSocketUrl(url));
+        const normalizedUrl = normalizeWebSocketUrl(url);
+        if (normalizedUrl === null || !isValidAuthToken(token)) {
+          this.invalidateConfig();
+          return false;
+        }
         if (normalizedUrl === this.url && token === this.token) return false;
         this.replaceConfig(normalizedUrl, token, token !== this.token);
+        return true;
+      }
+      setAuthFailureHandler(handler) {
+        this.authFailureHandler = handler;
+      }
+      restoreRejectedToken(token) {
+        if (!isValidAuthToken(token) || token !== this.token) return false;
+        this.rejectedToken = token;
+        this.disconnect();
         return true;
       }
       getConnectionState() {
@@ -100,9 +132,17 @@ var init_websocket_client = __esm({
         this.connectionState = this.isCurrentTokenRejected() ? "auth_failed" : "idle";
         this.intentionalClose = false;
       }
+      invalidateConfig() {
+        if (this.url === null && this.token === "") return;
+        this.replaceConfig(null, "", true);
+      }
       async connect() {
         if (this.isConnected()) return;
         if (this.connectPromise) return this.connectPromise;
+        if (this.url === null) {
+          this.connectionState = "idle";
+          throw new Error(INVALID_WEBSOCKET_URL_MESSAGE);
+        }
         if (this.isCurrentTokenRejected()) {
           this.connectionState = "auth_failed";
           throw new Error(AUTHENTICATION_FAILED_MESSAGE);
@@ -113,9 +153,10 @@ var init_websocket_client = __esm({
         this.intentionalClose = false;
         this.handshakeComplete = false;
         this.connectionState = "connecting";
+        const connectionUrl = this.url;
         this.connectPromise = new Promise((resolve, reject) => {
           this.rejectConnect = reject;
-          const socket = new WebSocket(this.url);
+          const socket = new WebSocket(connectionUrl);
           this.ws = socket;
           const resolveConnect = () => {
             if (generation !== this.connectionGeneration) return;
@@ -331,6 +372,11 @@ var init_websocket_client = __esm({
         this.ws = null;
         this.handshakeComplete = false;
         this.connectionState = "auth_failed";
+        try {
+          this.authFailureHandler?.(this.token);
+        } catch {
+          console.error("Failed to persist Arc Tunnel authentication failure state");
+        }
         this.rejectPendingConnect(new Error(AUTHENTICATION_FAILED_MESSAGE));
       }
       isCurrentTokenRejected() {
@@ -2599,6 +2645,8 @@ var init_lifecycle_cleanup = __esm({
 var require_service_worker = __commonJS({
   "src/background/service-worker.ts"() {
     init_websocket_client();
+    init_auth_token();
+    init_websocket_url();
     init_tab_manager();
     init_debugger_controller();
     init_recording_engine();
@@ -2610,6 +2658,7 @@ var require_service_worker = __commonJS({
     init_lightweight_controller();
     init_lifecycle_cleanup();
     var STORAGE_KEYS = ["arc_tunnel_ws_url", "authToken"];
+    var REJECTED_AUTH_TOKEN_KEY = "arc_tunnel_rejected_auth_token";
     var wsClient = new WebSocketClient();
     var tabManager = new TabManager();
     var debuggerController = new DebuggerController();
@@ -2623,6 +2672,10 @@ var require_service_worker = __commonJS({
     var initializationComplete = false;
     var pendingConfig = null;
     var initializationPatch = {};
+    var activeConfigValid = false;
+    var configApplicationGeneration = 0;
+    var persistedRejectedToken = null;
+    var rejectionMarkerUpdate = Promise.resolve();
     var commandHandler = new CommandHandler(
       tabManager,
       debuggerController,
@@ -2633,17 +2686,44 @@ var require_service_worker = __commonJS({
       storageManager,
       lightweightController
     );
+    function queueRejectedTokenWrite(token) {
+      persistedRejectedToken = token;
+      rejectionMarkerUpdate = rejectionMarkerUpdate.catch(() => void 0).then(() => chrome.storage.session.set({
+        [REJECTED_AUTH_TOKEN_KEY]: token
+      })).catch(() => {
+        console.error("Failed to persist Arc Tunnel authentication failure state");
+      });
+    }
+    async function clearRejectedTokenMarker() {
+      persistedRejectedToken = null;
+      rejectionMarkerUpdate = rejectionMarkerUpdate.catch(() => void 0).then(() => chrome.storage.session.remove([REJECTED_AUTH_TOKEN_KEY])).catch(() => {
+        console.error("Failed to clear Arc Tunnel authentication failure state");
+      });
+      await rejectionMarkerUpdate;
+    }
+    async function loadRejectedTokenMarker() {
+      try {
+        const result = await chrome.storage.session.get([REJECTED_AUTH_TOKEN_KEY]);
+        const token = result[REJECTED_AUTH_TOKEN_KEY];
+        return isValidAuthToken(token) ? token : null;
+      } catch {
+        return null;
+      }
+    }
+    wsClient.setAuthFailureHandler(queueRejectedTokenWrite);
     async function loadConfig() {
       try {
         const result = await chrome.storage.local.get([...STORAGE_KEYS]);
         const savedUrl = result.arc_tunnel_ws_url;
+        const resolvedUrl = resolveConfiguredWebSocketUrl(savedUrl);
+        const normalizedUrl = normalizeWebSocketUrl(resolvedUrl);
         const config = {
-          wsUrl: resolveConfiguredWebSocketUrl(savedUrl),
+          wsUrl: normalizedUrl ?? resolvedUrl,
           authToken: typeof result.authToken === "string" ? result.authToken : ""
         };
-        if (typeof savedUrl === "string" && savedUrl !== config.wsUrl) {
+        if (typeof savedUrl === "string" && savedUrl !== resolvedUrl && normalizedUrl !== null && savedUrl !== normalizedUrl) {
           await chrome.storage.local.set({
-            arc_tunnel_ws_url: config.wsUrl,
+            arc_tunnel_ws_url: normalizedUrl,
             authToken: config.authToken
           });
         }
@@ -2655,17 +2735,40 @@ var require_service_worker = __commonJS({
         };
       }
     }
+    async function applyConnectionConfig(config) {
+      const applicationGeneration = ++configApplicationGeneration;
+      const normalizedUrl = normalizeWebSocketUrl(config.wsUrl);
+      const tokenIsValid = isValidAuthToken(config.authToken);
+      activeConfigValid = normalizedUrl !== null && tokenIsValid;
+      if (tokenIsValid && persistedRejectedToken !== null && persistedRejectedToken !== config.authToken) {
+        await clearRejectedTokenMarker();
+        if (applicationGeneration !== configApplicationGeneration) return;
+      }
+      wsClient.setConfig(config.wsUrl, config.authToken);
+      if (!activeConfigValid) return;
+      if (persistedRejectedToken === config.authToken || !wsClient.canReconnect()) {
+        if (persistedRejectedToken !== config.authToken) {
+          queueRejectedTokenWrite(config.authToken);
+        }
+        wsClient.restoreRejectedToken(config.authToken);
+        return;
+      }
+      await connectClient();
+    }
     async function initialize() {
-      const loadedConfig = await loadConfig();
+      const [loadedConfig, rejectedToken] = await Promise.all([
+        loadConfig(),
+        loadRejectedTokenMarker()
+      ]);
+      persistedRejectedToken = rejectedToken;
       pendingConfig = { ...loadedConfig, ...initializationPatch };
       await tabManager.syncExistingTabs();
       initializationComplete = true;
       const config = pendingConfig;
-      wsClient.setConfig(config.wsUrl, config.authToken);
-      await connectClient();
+      await applyConnectionConfig(config);
     }
     async function connectClient() {
-      if (!initializationComplete) return;
+      if (!initializationComplete || !activeConfigValid) return;
       try {
         await wsClient.connect();
         console.log("Arc Tunnel extension initialized");
@@ -2692,8 +2795,7 @@ var require_service_worker = __commonJS({
       if (pendingConfig === null) return;
       const nextConfig = { ...pendingConfig, ...patch };
       pendingConfig = nextConfig;
-      wsClient.setConfig(nextConfig.wsUrl, nextConfig.authToken);
-      void connectClient();
+      void applyConnectionConfig(nextConfig);
     });
     wsClient.onCommand(async (command) => {
       console.log("Received command:", command.command);
@@ -2719,7 +2821,7 @@ var require_service_worker = __commonJS({
           wsClient.sendEvent({ type: "event", event: "heartbeat", data: {}, timestamp: Date.now() });
         }
       } else if (alarm.name === "ws-reconnect") {
-        if (initializationComplete && !wsClient.isConnected() && wsClient.canReconnect()) {
+        if (initializationComplete && activeConfigValid && !wsClient.isConnected() && wsClient.canReconnect()) {
           console.log("[alarm] SW wakeup \u2014 attempting reconnect");
           void connectClient();
         }

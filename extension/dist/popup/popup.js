@@ -21,10 +21,39 @@
     }
   });
 
+  // src/websocket-url.ts
+  function resolveConfiguredWebSocketUrl(value) {
+    if (value === void 0) return DEFAULT_WS_URL;
+    if (typeof value !== "string") return "";
+    return LEGACY_DEFAULT_URLS.get(value) ?? value;
+  }
+  function normalizeWebSocketUrl(value) {
+    const resolved = resolveConfiguredWebSocketUrl(value);
+    const match = LOOPBACK_ENDPOINT_PATTERN.exec(resolved);
+    if (!match) return null;
+    const port = Number(match[1]);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+    return `ws://127.0.0.1:${port}/extension`;
+  }
+  var DEFAULT_WS_URL, LEGACY_DEFAULT_URLS, LOOPBACK_ENDPOINT_PATTERN;
+  var init_websocket_url = __esm({
+    "src/websocket-url.ts"() {
+      "use strict";
+      DEFAULT_WS_URL = "ws://127.0.0.1:8765";
+      LEGACY_DEFAULT_URLS = /* @__PURE__ */ new Map([
+        ["ws://localhost:8765", DEFAULT_WS_URL],
+        ["ws://localhost:8765/", DEFAULT_WS_URL],
+        ["ws://localhost:8765/extension", `${DEFAULT_WS_URL}/extension`]
+      ]);
+      LOOPBACK_ENDPOINT_PATTERN = /^ws:\/\/127\.0\.0\.1:([0-9]+)(?:\/(?:extension)?)?$/;
+    }
+  });
+
   // src/popup/popup.ts
   var require_popup = __commonJS({
     "src/popup/popup.ts"() {
       init_auth_token();
+      init_websocket_url();
       var STORAGE_KEYS = ["arc_tunnel_ws_url", "authToken"];
       function checkStatus(statusEl) {
         try {
@@ -66,12 +95,18 @@
           statusEl.className = "status disconnected";
           return;
         }
+        const normalizedUrl = normalizeWebSocketUrl(url);
+        if (normalizedUrl === null) {
+          statusEl.textContent = "Status: WebSocket URL must be ws://127.0.0.1:<port> with an optional /extension path";
+          statusEl.className = "status disconnected";
+          return;
+        }
         if (!isValidAuthToken(authToken)) {
           statusEl.textContent = "Status: Authentication token must be a valid 43-character token";
           statusEl.className = "status disconnected";
           return;
         }
-        chrome.storage.local.set({ arc_tunnel_ws_url: url, authToken }, () => {
+        chrome.storage.local.set({ arc_tunnel_ws_url: normalizedUrl, authToken }, () => {
           statusEl.textContent = "Status: Saved \u2014 reconnecting...";
           statusEl.className = "status disconnected";
           setTimeout(() => checkStatus(statusEl), 2e3);
