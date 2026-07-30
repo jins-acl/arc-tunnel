@@ -3,13 +3,14 @@ import { BrokerConfig, BrokerEndpointConfig, loadBrokerConfig, loadBrokerEndpoin
 
 interface Output { stdout(value: string): void; stderr(value: string): void }
 interface ControlLauncher {
+  homeDir?: string;
   ensureBroker?: (config: BrokerConfig) => ReturnType<typeof ensureBroker>;
   getBrokerStatus?: (config: BrokerEndpointConfig) => ReturnType<typeof getBrokerStatus>;
   stopBroker?: (config: BrokerEndpointConfig) => ReturnType<typeof stopBroker>;
   inspectBroker?: (config: BrokerEndpointConfig) => ReturnType<typeof inspectBroker>;
 }
 
-const defaultLauncher: Required<ControlLauncher> = {
+const defaultLauncher: ControlLauncher = {
   ensureBroker,
   getBrokerStatus,
   stopBroker,
@@ -59,18 +60,18 @@ export async function runControl(
 ): Promise<number> {
   const action = argv[0] ?? 'start';
   if (action === 'start') {
-    const config = loadBrokerConfig(argv.slice(1), env);
+    const config = loadBrokerConfig(argv.slice(1), env, launcher.homeDir);
     await launcher.ensureBroker!(config);
     output.stdout(`${JSON.stringify(await launcher.getBrokerStatus!(config))}\n`);
   } else if (action === 'status') {
-    const config = loadBrokerEndpointConfig(argv.slice(1), env);
+    const config = loadBrokerEndpointConfig(argv.slice(1), env, launcher.homeDir);
     output.stdout(`${JSON.stringify(await launcher.getBrokerStatus!(config))}\n`);
   } else if (action === 'stop') {
-    const config = loadBrokerEndpointConfig(argv.slice(1), env);
+    const config = loadBrokerEndpointConfig(argv.slice(1), env, launcher.homeDir);
     await launcher.stopBroker!(config);
     output.stdout(`${JSON.stringify({ running: false, port: config.port })}\n`);
   } else if (action === 'diagnose') {
-    const config = loadBrokerEndpointConfig(argv.slice(1), env);
+    const config = loadBrokerEndpointConfig(argv.slice(1), env, launcher.homeDir);
     const inspection = await launcher.inspectBroker!(config);
     output.stdout(argv.includes('--json') ? `${JSON.stringify(diagnoseJson(inspection))}\n` : humanDiagnose(inspection));
     return EXIT_CODE[inspection.kind];

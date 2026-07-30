@@ -506,21 +506,21 @@ function humanDiagnose(inspection) {
 async function runControl(argv, env, output, launcher = defaultLauncher2) {
   const action = argv[0] ?? "start";
   if (action === "start") {
-    const config = loadBrokerConfig(argv.slice(1), env);
+    const config = loadBrokerConfig(argv.slice(1), env, launcher.homeDir);
     await launcher.ensureBroker(config);
     output.stdout(`${JSON.stringify(await launcher.getBrokerStatus(config))}
 `);
   } else if (action === "status") {
-    const config = loadBrokerEndpointConfig(argv.slice(1), env);
+    const config = loadBrokerEndpointConfig(argv.slice(1), env, launcher.homeDir);
     output.stdout(`${JSON.stringify(await launcher.getBrokerStatus(config))}
 `);
   } else if (action === "stop") {
-    const config = loadBrokerEndpointConfig(argv.slice(1), env);
+    const config = loadBrokerEndpointConfig(argv.slice(1), env, launcher.homeDir);
     await launcher.stopBroker(config);
     output.stdout(`${JSON.stringify({ running: false, port: config.port })}
 `);
   } else if (action === "diagnose") {
-    const config = loadBrokerEndpointConfig(argv.slice(1), env);
+    const config = loadBrokerEndpointConfig(argv.slice(1), env, launcher.homeDir);
     const inspection = await launcher.inspectBroker(config);
     output.stdout(argv.includes("--json") ? `${JSON.stringify(diagnoseJson(inspection))}
 ` : humanDiagnose(inspection));

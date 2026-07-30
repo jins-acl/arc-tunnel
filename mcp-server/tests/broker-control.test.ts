@@ -1,3 +1,6 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { runControl } from '../src/broker-control';
 import { testBrokerConfig } from './helpers/auth';
 
@@ -87,12 +90,27 @@ describe('broker control diagnose', () => {
 
   it('rejects start without a token and gives the installer instruction', async () => {
     const capture = output();
+    const configuredHome = fs.mkdtempSync(path.join(os.tmpdir(), 'arc-control-configured-'));
+    const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'arc-control-empty-'));
+    fs.mkdirSync(path.join(configuredHome, '.arc-tunnel'), { recursive: true });
+    fs.writeFileSync(
+      path.join(configuredHome, '.arc-tunnel', 'config.json'),
+      JSON.stringify({ token: testBrokerConfig().token })
+    );
+    const homedir = jest.spyOn(os, 'homedir').mockReturnValue(configuredHome);
 
-    await expect(runControl(['start'], {}, capture.write, {
-      ensureBroker: async () => undefined,
-      getBrokerStatus: async () => ({ running: false, port: 8765 })
-    }))
-      .rejects.toThrow('node scripts/install.js');
+    try {
+      await expect(runControl(['start'], {}, capture.write, {
+        homeDir: emptyHome,
+        ensureBroker: async () => undefined,
+        getBrokerStatus: async () => ({ running: false, port: 8765 })
+      }))
+        .rejects.toThrow('node scripts/install.js');
+    } finally {
+      homedir.mockRestore();
+      fs.rmSync(configuredHome, { recursive: true, force: true });
+      fs.rmSync(emptyHome, { recursive: true, force: true });
+    }
   });
 
   it('starts with a configured token', async () => {
