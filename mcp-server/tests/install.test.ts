@@ -79,6 +79,18 @@ describe('installer broker authentication configuration', () => {
     expect(fs.readFileSync(configPath(), 'utf8')).toBe(original);
   });
 
+  it.each(['B', 'C', 'D'])('rejects and replaces the noncanonical Base64URL alias ending in %s', (finalCharacter) => {
+    const alias = `${VALID_TOKEN.slice(0, -1)}${finalCharacter}`;
+    writeConfig(`{"port":9123,"token":"${alias}"}`);
+
+    expect(installer.isValidAuthToken(alias)).toBe(false);
+
+    const result = ensureConfig({ randomBytes: () => Buffer.alloc(32) });
+
+    expect(result).toEqual({ configPath: configPath(), token: VALID_TOKEN, generated: true });
+    expect(JSON.parse(fs.readFileSync(configPath(), 'utf8'))).toEqual({ port: 9123, token: VALID_TOKEN });
+  });
+
   it('replaces an invalid existing token while retaining a valid custom port', () => {
     writeConfig('{"port":9123,"token":"not-a-valid-token"}');
 

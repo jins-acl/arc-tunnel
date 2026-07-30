@@ -42,7 +42,9 @@ const AUTH_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const DEFAULT_BROKER_PORT = 8765;
 
 function isValidAuthToken(value) {
-  return typeof value === 'string' && AUTH_TOKEN_PATTERN.test(value);
+  return typeof value === 'string'
+    && AUTH_TOKEN_PATTERN.test(value)
+    && Buffer.from(value, 'base64url').toString('base64url') === value;
 }
 
 function isValidPort(value) {
