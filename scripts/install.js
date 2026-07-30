@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const MCP_SERVER_PATH = path.join(REPO_ROOT, 'mcp-server', 'dist', 'mcp-server.js');
@@ -35,6 +36,80 @@ function backupFile(filePath) {
   const backupPath = `${filePath}.backup.${Date.now()}`;
   fs.copyFileSync(filePath, backupPath);
   log(`Backed up existing config: ${backupPath}`);
+}
+
+const AUTH_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const DEFAULT_BROKER_PORT = 8765;
+
+function isValidAuthToken(value) {
+  return typeof value === 'string' && AUTH_TOKEN_PATTERN.test(value);
+}
+
+function isValidPort(value) {
+  return Number.isInteger(value) && value >= 1 && value <= 65535;
+}
+
+function writeConfigAtomically(configPath, contents, dependencies = {}) {
+  const fileSystem = dependencies.fs || fs;
+  const randomBytes = dependencies.randomBytes || crypto.randomBytes;
+  const configDir = path.dirname(configPath);
+  const temporaryPath = `${configPath}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
+  let renamed = false;
+
+  fileSystem.mkdirSync(configDir, { recursive: true });
+
+  try {
+    fileSystem.writeFileSync(temporaryPath, contents, { encoding: 'utf8', mode: 0o600 });
+    fileSystem.renameSync(temporaryPath, configPath);
+    renamed = true;
+    fileSystem.chmodSync(configPath, 0o600);
+  } catch (error) {
+    if (!renamed) {
+      try {
+        fileSystem.unlinkSync(temporaryPath);
+      } catch (cleanupError) {
+        if (cleanupError.code !== 'ENOENT') throw error;
+      }
+    }
+    throw error;
+  }
+}
+
+function ensureBrokerAuthConfig(homeDir, dependencies = {}) {
+  const fileSystem = dependencies.fs || fs;
+  const randomBytes = dependencies.randomBytes || crypto.randomBytes;
+  const output = dependencies.log || log;
+  const configPath = path.join(homeDir, '.arc-tunnel', 'config.json');
+  let existingConfig = null;
+
+  try {
+    existingConfig = JSON.parse(fileSystem.readFileSync(configPath, 'utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw new Error(`Invalid Arc Tunnel config: ${configPath}`);
+    }
+  }
+
+  if (existingConfig !== null && (typeof existingConfig !== 'object' || Array.isArray(existingConfig))) {
+    throw new Error(`Invalid Arc Tunnel config: ${configPath}`);
+  }
+
+  const port = isValidPort(existingConfig && existingConfig.port)
+    ? existingConfig.port
+    : DEFAULT_BROKER_PORT;
+  const token = existingConfig && existingConfig.token;
+
+  if (isValidAuthToken(token)) {
+    return { configPath, token, generated: false };
+  }
+
+  const generatedToken = randomBytes(32).toString('base64url');
+  writeConfigAtomically(configPath, JSON.stringify({ port, token: generatedToken }, null, 2) + '\n', {
+    fs: fileSystem,
+    randomBytes
+  });
+  output(`Generated Broker authentication token. Paste it into the browser extension popup: ${generatedToken}`);
+  return { configPath, token: generatedToken, generated: true };
 }
 
 // ─── Agent detectors ───
@@ -155,6 +230,8 @@ function install() {
     process.exit(1);
   }
 
+  ensureBrokerAuthConfig(os.homedir());
+
   const detected = AGENTS.filter(a => a.detect());
 
   if (detected.length === 0) {
@@ -260,4 +337,10 @@ function install() {
   log('Arc Tunnel is ready to use! 🚀');
 }
 
-install();
+if (require.main === module) install();
+
+module.exports = {
+  ensureBrokerAuthConfig,
+  isValidAuthToken,
+  writeConfigAtomically
+};
