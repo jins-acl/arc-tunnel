@@ -52,14 +52,35 @@ const assertSafeWebSocketUrls = (file, content) => {
     } catch {
       throw new Error(`${file} contains an invalid WebSocket URL example`);
     }
+    const afterScheme = raw.slice(raw.indexOf('://') + 3);
     const location = `${url.pathname}${url.search}${url.hash}`;
     if (url.username || url.password
+      || /token/i.test(afterScheme)
       || /(?:^|[/?#&;])(?:token|auth(?:entication)?|credential)(?:[=/:~-]|$)/i.test(location)
       || /(?:^|[/?#&;=:@])[A-Za-z0-9_-]{43}(?=$|[/?#&;=:@])/.test(location)) {
       throw new Error(`${file} contains a credential-bearing WebSocket URL example`);
     }
   }
 };
+const unsafeWebSocketContractCases = [
+  'ws://secret@127.0.0.1:8765/extension',
+  'ws://127.0.0.1:8765/token/secret',
+  'ws://127.0.0.1:8765/extension?token=secret',
+  'ws://127.0.0.1:8765/extension?access_token=secret',
+  'ws://127.0.0.1:8765/extension?brokerToken=secret',
+  'ws://127.0.0.1:8765/extension#authToken=secret'
+];
+const missedUnsafeWebSocketCases = unsafeWebSocketContractCases.filter(example => {
+  try {
+    assertSafeWebSocketUrls('synthetic WebSocket guard contract', example);
+    return true;
+  } catch {
+    return false;
+  }
+});
+if (missedUnsafeWebSocketCases.length) {
+  throw new Error(`WebSocket URL guard missed credential cases: ${missedUnsafeWebSocketCases.join(', ')}`);
+}
 const root = parsePackage('package.json');
 const mcp = parsePackage('mcp-server/package.json');
 const extension = parsePackage('extension/package.json');
@@ -208,7 +229,12 @@ for (const [file, content] of [
   }
 }
 
-for (const file of ['README.md', 'AGENTS.md', ...fs.readdirSync('configs').map(name => `configs/${name}`)]) {
+for (const file of [
+  'README.md',
+  'AGENTS.md',
+  'docs/superpowers/specs/2026-07-30-arc-tunnel-lightweight-auth-hardening-design.md',
+  ...fs.readdirSync('configs').map(name => `configs/${name}`)
+]) {
   assertSafeWebSocketUrls(file, read(file));
 }
 
