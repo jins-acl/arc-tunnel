@@ -1,83 +1,76 @@
 # Arc Tunnel
 
-Arc Tunnel lets multiple AI Agents automate tabs in one real Chrome or Edge profile.
-Each Agent window owns a lightweight MCP client; all clients and the browser extension
-meet at one shared Broker.
+Arc Tunnel 是一个面向多 Agent 的本地浏览器控制工具。多个 Codex、Claude Code、
+Kimi、Hermes 或 OpenClaw 会话可以通过同一个 Broker，共享控制真实的 Chrome 或
+Edge 浏览器，并在不同标签页上并行工作。
 
-## What the multi-Agent Broker improves
+## 核心特点
 
-The Broker redesign changes Arc Tunnel from one browser server per Agent process into
-one shared browser-control service with an independent session for every Agent.
+- 一个长期运行的 Broker 统一管理浏览器连接，避免多个 Agent 抢占端口。
+- 每个 Agent 拥有独立会话和标签页所有权，响应不会串到其他任务。
+- 不同标签页可以并行执行，同一标签页的操作会自动串行化。
+- Agent 断开后自动释放标签页声明，页面保持打开，可由其他 Agent 接手。
+- 普通操作优先使用轻量浏览器接口，需要时才临时连接调试器。
+- Broker 仅监听 `127.0.0.1`，浏览器控制连接必须通过令牌认证。
 
-| Workflow area | Before | Now | Practical benefit |
-|---|---|---|---|
-| Process model | Every MCP process tried to host the extension WebSocket server | Lightweight MCP clients connect to one long-lived Broker | Starting another Agent no longer creates a port-binding race |
-| Browser connection | The extension could effectively serve one MCP process | One extension connection is routed through the Broker to many Agent sessions | Codex, Claude, Kimi, Hermes, and OpenClaw can share the same real browser profile |
-| Work isolation | Agents could target the same tab without coordinated ownership | Each session owns its window and tabs; existing tabs require `claim_tab` | Commands and responses stay with the Agent that owns the work |
-| Concurrency | Avoiding collisions generally meant running work sequentially | Commands are serialized per tab but different tabs run concurrently | Independent browser tasks can make progress at the same time |
-| Manual tabs | A manually opened tab had no explicit assignment workflow | Any Agent can claim an unclaimed tab and release it afterward | Human-created browser context remains usable without restarting anything |
-| Agent exit | Process exit could also tear down browser connectivity | The Broker remains alive; claims are released after a 30-second grace period and pages stay open | Another Agent can safely continue abandoned work |
-| Recording cleanup | Interrupted recording operations could retain listeners or debugger state | Recording start/stop is serialized and disconnect cleanup is retried before resynchronization | A disconnected Agent cannot leave an orphan recording that blocks later sessions |
-| Port handling | Multiple processes could loop on `EADDRINUSE` or fail with `EPIPE` | One launcher elects the Broker, validates its health, and reports foreign port occupants without stopping them | Startup failures are immediate and actionable |
-| Recovery | Reconnection could trust stale browser ownership or stale socket events | Extension reconnect resynchronizes inventory; stale sockets and disconnected requests are fenced out | Old sessions cannot mutate the current Broker state |
-| Network boundary | Role and endpoint separation was implicit | `/agent` and `/extension` use a versioned handshake on `127.0.0.1`; web-page Origins are rejected | The shared service remains local and protocol mismatches fail clearly |
-
-The normal multi-Agent workflow is:
-
-1. Start the Broker explicitly, or let the first MCP client start it.
-2. Point the extension popup and every Agent's `WS_PORT` at the same Broker port.
-3. Use one Agent window per task. New tabs are created in that Agent's browser window.
-4. Before using an existing tab, call `claim_tab`; call `release_tab` when finished.
-5. Run separate-tab work concurrently. The Broker prevents foreign-tab access and
-   serializes operations that target the same tab.
-6. If an Agent disconnects, leave its pages open. After the grace period, another
-   Agent can discover and claim those tabs.
-
-Tab ownership is a coordination boundary, not a browser security boundary. All Agents
-still share the same Chrome or Edge profile, including cookies, accounts, local storage,
-and extension permissions.
-
-## Architecture
+## 工作原理
 
 ```text
-Agent host --stdio--> lightweight MCP client --WebSocket /agent--> Broker
-Browser extension ---------------------------WebSocket /extension--> Broker
+Agent 主机 --stdio--> 轻量 MCP 客户端 --WebSocket /agent--> Broker
+浏览器扩展 --------------------------WebSocket /extension--> Broker
 ```
 
-The client command remains `node mcp-server/dist/mcp-server.js`. The first client can
-start the Broker; later clients discover and connect to it. The extension uses the
-`/extension` endpoint and Agent clients use `/agent`.
+每个 Agent 启动一个 `mcp-server/dist/mcp-server.js` 客户端。第一个客户端可以自动
+启动 Broker，后续客户端会发现并复用它。浏览器扩展只需连接一次 Broker。
 
-## Install
+标签页所有权用于协调 Agent，不提供账号或 Cookie 隔离。所有 Agent 仍共享同一个
+浏览器配置文件、登录状态、Cookie、本地存储和扩展权限。
 
-Pre-built `mcp-server/dist/` and `extension/dist/` artifacts are committed, so using a
-release does not require npm. Load `extension/dist/` as an unpacked extension, then
-configure an Agent with a template from `configs/` or run:
+## 环境要求
+
+- Node.js `>=22`
+- Chrome 或 Edge
+- 支持 MCP 的 Agent 客户端
+
+仓库已经提交 `mcp-server/dist/` 和 `extension/dist/` 构建产物。直接使用发布版本时，
+无需先执行 npm 构建。
+
+## 快速安装
 
 ```bash
 node scripts/install.js
 ```
 
-The installer detects supported tools and updates their configuration. Review backups
-it creates beside changed files. Templates support Claude Code, Hermes, OpenClaw, Kimi,
-and Codex.
+安装器会检测已支持的 Agent，更新对应的 MCP 配置，并在修改前创建备份。也可以从
+`configs/` 目录手动选择配置模板。
 
-运行 Arc Tunnel 需要 Node.js `>=22`。安装器会在
-`~/.arc-tunnel/config.json` 中生成认证令牌；已有的有效令牌会原样保留，不会在
-日常重跑时轮换。安装器只在首次生成令牌时显示一次；仅当没有
-`ARC_TUNNEL_TOKEN` 环境覆盖时，这个新生成的文件令牌才是应复制到扩展弹窗的
-生效令牌。模板只保留 MCP 客户端路径和 `WS_PORT`，客户端会自行读取用户级
-Arc Tunnel 配置，不要把令牌复制进 Agent 模板。
+首次安装会在 `~/.arc-tunnel/config.json` 中生成配置：
 
-With no environment override, a newly generated file token is the active popup
-credential. With a valid `ARC_TUNNEL_TOKEN` override, the installer instead labels the
-generated file token as a fallback: use the effective environment token from its
-controlled source, or unset the override and restart the Broker and every Agent client
-before using that fallback. An empty or malformed environment override blocks startup
-rather than falling back; remove or replace it before startup. The installer never
-prints the environment override value.
+```json
+{ "port": 8765, "token": "..." }
+```
 
-## Broker lifecycle and ports
+令牌不会写入 Agent 模板、命令行参数或 WebSocket URL。已有的有效令牌会被保留，
+不会因重复运行安装器而自动轮换。
+
+如果设置了 `ARC_TUNNEL_TOKEN`，环境变量令牌优先于配置文件令牌；扩展弹窗也必须
+使用同一个生效令牌。空值或格式错误的环境变量会阻止启动，不会静默回退。
+
+## 加载浏览器扩展
+
+1. 打开 `chrome://extensions/` 或 `edge://extensions/`。
+2. 开启开发者模式，选择“加载已解压的扩展程序”。
+3. 选择仓库中的 `extension/dist/`。
+4. 在扩展弹窗中填写 Broker 地址和生效令牌，然后保存。
+5. 确认状态变为 `Connected`。
+
+默认地址为 `ws://127.0.0.1:8765`，扩展会将根路径规范化为 `/extension`。使用自定义
+端口时，扩展和所有 Agent 的 `WS_PORT` 必须保持一致。
+
+扩展只接受字面地址 `127.0.0.1`、明确端口以及 `/` 或 `/extension` 路径。旧版三个
+`localhost:8765` 默认值仅用于自动迁移，新配置请始终使用 `127.0.0.1`。
+
+## Broker 管理
 
 ```bash
 node scripts/start.js status
@@ -89,123 +82,62 @@ node scripts/start.js diagnose [--port N]
 node scripts/start.js diagnose [--port N] --json
 ```
 
-The default is port `8765`. Configuration precedence is CLI `--port` → `WS_PORT` → `~/.arc-tunnel/config.json` → `8765`.
-A persisted configuration has this shape:
+默认端口是 `8765`。端口优先级为：命令行 `--port` → `WS_PORT` → 用户配置文件 →
+`8765`。`status` 会显示运行中的 Broker PID 和端口；不要停止占用目标端口的未知进程。
 
-```json
-{ "port": 8765, "token": "..." }
+只读运行面板位于：
+
+```text
+http://127.0.0.1:<端口>/dashboard
 ```
 
-All Agent client configurations must use the Broker's port. When using a custom port,
-set the extension popup to the same port as well. `status` reports the PID and port of a
-running Broker. `stop` removes its lifecycle state.
+面板、`/health` 和 `diagnose` 只展示聚合状态，不包含 URL、Cookie、脚本、页面内容、
+令牌或浏览器标识。浏览器控制 WebSocket 仍需要认证。
 
-令牌解析规则与端口规则彼此独立：`ARC_TUNNEL_TOKEN` 优先于用户级配置文件
-中的令牌，端口仍按上面的 CLI、环境变量、配置文件、默认值顺序解析。
-令牌不放在命令行参数或 WebSocket URL 中，因为这些位置容易进入进程列表、
-Shell 历史和诊断日志；自动启动的 Broker 通过继承环境接收已经解析的凭据。
+## 多 Agent 使用方式
 
-The read-only Operations Control Center is available at
-`http://127.0.0.1:<port>/dashboard`. Its status cards, event filters, and copied
-diagnostics expose aggregate operational state only. The dashboard and `diagnose`
-output exclude URLs, IDs, cookies, scripts, parameters, and page content.
+1. 每个任务使用一个独立 Agent 窗口。
+2. 新建标签页会自动归当前 Agent 所有。
+3. 操作已有标签页前调用 `claim_tab`。
+4. 完成后调用 `release_tab`。
+5. 不同 Agent 可以同时操作不同标签页。
 
-`/health`、`/dashboard` 和 `diagnose` 使用未认证的回环聚合状态接口，输出不含
-令牌、页面内容或浏览器标识；WebSocket 浏览器控制能力仍必须认证。
+同一个标签页同一时间只能由一个 Agent 持有。客户端断开后，相关声明会在宽限期后
+释放，浏览器页面不会因此关闭。
 
-## Multi-Agent tab ownership
+## 可用工具
 
-Call `claim_tab` before automating an existing tab and `release_tab` when finished.
-Closing a client releases its claims. A tab can be claimed by only one Agent at a time,
-so two Agents cannot race on the same tab. Different Agents may operate different tabs
-concurrently.
-
-Use one Agent window per task/Agent identity. Agent windows have independent MCP
-sessions and tab claims, but browser tabs remain in the same Chrome/Edge profile.
-Cookies and other profile-level browser state are therefore shared; tab ownership is
-coordination, not security isolation.
-
-## Extension setup
-
-1. Open `chrome://extensions/` or `edge://extensions/`.
-2. Enable Developer mode and choose **Load unpacked**.
-3. Select `extension/dist/`.
-4. In the popup, verify the shared Broker port and follow the effective-token guidance
-   below before saving the password field.
-
-The extension defaults to the unambiguous IPv4 loopback URL `ws://127.0.0.1:8765` and
-converts a saved root URL such as `ws://127.0.0.1:8765/` to the current
-`/extension` endpoint. During migration, the Broker still accepts the legacy `/` path
-only when the WebSocket Origin starts with `chrome-extension://`; new configurations
-should use `/extension`.
-
-On upgrade, the extension rewrites only the former default values
-`ws://localhost:8765`, `ws://localhost:8765/`, and
-`ws://localhost:8765/extension` to their `127.0.0.1` equivalents. These three exact
-legacy `localhost` defaults are migration-only inputs; other `localhost` values and
-every non-loopback or structurally invalid URL are rejected before connection.
-
-设置了有效的 `ARC_TUNNEL_TOKEN` 时，扩展必须使用同一个生效令牌；请从设置该
-环境变量的受控来源取得它，不要改用配置文件中的令牌。另一种做法是先清除该环境变量，
-取消环境覆盖后重启 Broker 和所有 Agent 客户端，再使用
-`~/.arc-tunnel/config.json` 中的持久化令牌。不要用会把令牌打印到终端的命令
-获取它。
-
-扩展弹窗中的密码输入框默认遮蔽令牌。若状态变为 `auth_failed`，扩展不会用同一
-错误令牌持续重连，弹窗显示 `Authentication failed`。请按上述优先级取得正确的
-生效令牌，粘贴后保存。令牌不会出现在弹窗状态文字、URL、控制台或复制的诊断
-信息中。
-
-### 认证迁移
-
-从旧版本升级时按以下顺序操作：
-
-1. 拉取新源码，并按开发流程构建最新 bundle。
-2. 运行 `node scripts/install.js`。
-3. 确认生效令牌来源：若设置了有效的 `ARC_TUNNEL_TOKEN`，从其受控来源取得同一个
-   环境令牌；若未设置，则使用安装器一次性显示的新令牌或持久化文件中的现有令牌。
-   若环境覆盖为空或格式错误，须在启动前移除或替换，不能静默回退到文件令牌。
-4. 加载或重新加载 `extension/dist/`。
-5. 在扩展弹窗中的密码输入框粘贴并保存同一个生效令牌。
-6. 确认状态为 `Connected`，再运行
-   `node scripts/start.js diagnose --json` 检查聚合状态。
-
-## Tools and features
-
-| Area | Tools |
+| 类别 | 工具 |
 |---|---|
-| Snapshot and interaction | `snapshot`, `interact` |
-| Navigation and tabs | `navigate`, `create_tab`, `close_tab`, `list_tabs` |
-| Ownership | `claim_tab`, `release_tab` |
-| Content and diagnostics | `screenshot`, `get_content`, `get_console_logs`, `wait_for_element` |
-| Page and profile state | `execute_script`, `manage_storage` |
-| Recording | `start_recording`, `stop_recording`, `replay_recording` |
-| Sessions | `save_session`, `restore_session` |
+| 页面快照与交互 | `snapshot`、`interact` |
+| 导航与标签页 | `navigate`、`create_tab`、`close_tab`、`list_tabs` |
+| 所有权管理 | `claim_tab`、`release_tab` |
+| 内容与诊断 | `screenshot`、`get_content`、`get_console_logs`、`wait_for_element` |
+| 脚本与存储 | `execute_script`、`manage_storage` |
+| 操作录制 | `start_recording`、`stop_recording`、`replay_recording` |
+| 会话保存 | `save_session`、`restore_session` |
 
-`snapshot` returns ref-based interactive elements for `interact`. `navigate` supports
-goto, back, forward, and reload. Content can be returned as HTML, text, structured data,
-or Markdown. Recording captures user actions for later replay; saved sessions restore
-tabs within the owning Agent's browser window.
+`snapshot` 会返回可供 `interact` 使用的元素引用。`navigate` 支持打开地址、前进、
+后退和刷新。页面内容可以返回 HTML、文本、结构化数据或 Markdown。
 
-### Lightweight and debugger paths
+轻量命令优先使用 `chrome.tabs` 和 `chrome.scripting`。必须使用调试协议时才连接
+`chrome.debugger`；最后一次操作结束 15 秒后自动断开。录制期间会保持调试器连接。
 
-Lightweight commands use browser APIs such as `chrome.tabs` and `chrome.scripting` and
-avoid attaching the debugger. Debugger-only commands attach `chrome.debugger` when
-needed; lightweight-first commands can fall back to it when necessary. After the last
-debugger operation or hold is released, the implemented idle grace is 15 seconds before
-detach. Recording may hold the debugger until recording stops.
+## 常见排查
 
-## Connection verification and troubleshooting
+扩展显示断开时，依次检查：
 
-After restarting the Agent, open the extension popup and confirm it is connected. If it
-is not, check `node scripts/start.js status [--port N]`, confirm every `WS_PORT` and the
-popup port match, and verify the extension is loaded from the current `extension/dist/`.
-Use `status` before `start`; a foreign process on the selected port is reported rather
-than stopped. Protocol mismatch or repeated reconnect messages usually mean the client,
-Broker, and extension bundles were built from different revisions; rebuild and reload
-all committed artifacts together.
+1. 运行 `node scripts/start.js status [--port N]` 确认 Broker 状态。
+2. 确认扩展端口与所有 Agent 的 `WS_PORT` 一致。
+3. 确认扩展加载的是当前 `extension/dist/`。
+4. 确认扩展保存的是当前生效令牌。
+5. 运行 `node scripts/start.js diagnose --json` 查看聚合诊断。
 
-## Development
+如果弹窗显示 `Authentication failed`，请重新保存正确的生效令牌。扩展不会使用同一
+错误令牌持续重连。协议版本不一致或反复重连通常说明客户端、Broker 和扩展来自不同
+构建版本，需要重新构建并重新加载全部产物。
+
+## 开发与验证
 
 ```bash
 npm ci --prefix mcp-server
@@ -214,76 +146,29 @@ npm run verify
 npm run audit:prod
 ```
 
-Both builds regenerate committed distribution artifacts. The MCP build creates the
-lightweight client (`mcp-server/dist/mcp-server.js`), shared Broker
-(`mcp-server/dist/arc-tunnel-broker.js`), and lifecycle control
-(`mcp-server/dist/arc-tunnel-control.js`) bundles; the browser build creates
-`extension/dist/`. For component-specific debugging, run the child `test`, typecheck,
-or `build` commands from `mcp-server/` or `extension/`.
-
-### Real-browser resilience verification
-
-With the current `extension/dist/` loaded and connected to the shared Broker, run:
+浏览器韧性验证：
 
 ```bash
 node scripts/verify-browser-resilience.js [--port 8765]
 ```
 
-The verifier creates a loopback HTTP server, one lightweight MCP client, and one owned
-browser tab. It checks pre-call console history, MCP image screenshot delivery, bounded
-`TIMEOUT` responses from a deliberately frozen page, screenshot recovery, and tab
-closure. On success or failure it closes only the tab, client, and HTTP server that it
-created. It never stops the shared Broker and does not close any pre-existing tab.
-
-认证恢复需要在真实浏览器中验证：先在扩展弹窗保存一个格式有效但内容错误的
-令牌，确认弹窗显示 `Authentication failed`、状态稳定进入 `auth_failed` 且不会
-重连循环；再保存正确的生效令牌，确认恢复为 `Connected`。若有效的环境覆盖仍
-存在，这里必须使用该环境令牌；空值或格式错误的覆盖须先移除或替换。只有取消
-覆盖并重启 Broker 和 Agent 客户端后，持久化文件令牌才会生效。随后运行 D/F/C
-韧性检查：
-
-```bash
-node scripts/verify-browser-resilience.js [--port 8765]
-```
-
-多 Agent 所有权与截图隔离检查使用：
+多 Agent 所有权与 JPEG 截图隔离验证：
 
 ```bash
 node scripts/verify-multi-agent.js [--port 8765] [--manual-tab N]
 ```
 
-多 Agent 验证器要求每个 Agent 只能从自己拥有的标签页取得非空 JPEG，并确认
-对其他 Agent 标签页的截图请求返回 `TAB_NOT_OWNED`；验证日志不会输出图片的
-base64 内容。
+验证器只清理自己创建的标签页、客户端和临时服务，不会停止共享 Broker，也不会关闭
+已有浏览器标签页。
 
-## Security
+## 安全说明
 
-The Broker binds only `127.0.0.1`, is not exposed on the LAN, and rejects WebSocket
-upgrades with ordinary `http://` or `https://` Origins. The legacy `/` extension route
-additionally requires a `chrome-extension://` Origin. The extension has tabs, scripting,
-debugger, storage, and cookies permissions. It can access tabs, cookies, storage, and
-page scripts, so connect only trusted local Agent clients. `execute_script` has full page
-access. Agents share one browser profile and its cookies; tab claims coordinate work but
-are not a security boundary.
+Broker 仅绑定 `127.0.0.1`，不会暴露到局域网，并拒绝普通网页来源发起的 WebSocket
+升级。扩展拥有标签页、脚本、调试器、存储和 Cookie 权限，只应连接可信的本地 Agent。
 
-The extension accepts only the `ws:` scheme with the literal host `127.0.0.1`, an
-explicit port from 1 through 65535, and path `/` or `/extension`. It rejects `wss:`,
-userinfo, queries, fragments, alternate IP spellings, non-loopback hosts, missing or
-out-of-range ports, and other paths before creating a socket. The three exact legacy
-`localhost` defaults listed above remain migration-only inputs. Consequently, the
-extension never sends the authentication token to an off-loopback destination.
+静态令牌可以阻止未持有令牌的本地客户端，但不是同一操作系统用户之间的安全沙箱。
+能够读取用户配置或冒充本地端口的恶意进程不在此边界内。
 
-This static token protects against local clients that do not possess it; it is not a
-same-user sandbox. Hostile same-OS-user processes that can read the user config or
-impersonate the selected local port are outside this static-token boundary.
-
-令牌认证保护的是本地 Broker 能力边界：同一机器上未持有令牌的进程不能调用
-浏览器控制 WebSocket。它不提供 Agent 之间的 Cookie 或身份隔离；所有 Agent
-仍使用共享浏览器配置文件，共享登录态、Cookie、存储和扩展权限。优先使用
-`127.0.0.1`，避免 `localhost` 被解析到无关的 IPv6 监听器；普通 `http://`
-和 `https://` Origin 仍会被拒绝，旧根路径也仍只接受
-`chrome-extension://` Origin。
-
-## License
+## 许可证
 
 MIT
