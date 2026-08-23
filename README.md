@@ -23,8 +23,8 @@ Agent 主机 --stdio--> 轻量 MCP 客户端 --WebSocket /agent--> Broker
 每个 Agent 启动一个 `mcp-server/dist/mcp-server.js` 客户端。第一个客户端可以自动
 启动 Broker，后续客户端会发现并复用它。浏览器扩展只需连接一次 Broker。
 
-标签页所有权用于协调 Agent，不提供账号或 Cookie 隔离。所有 Agent 仍共享同一个
-浏览器配置文件、登录状态、Cookie、本地存储和扩展权限。
+标签页所有权用于协调 Agent，不提供账号或 Cookie 隔离。所有 Agent 仍使用共享浏览器配置文件，
+并共享登录状态、Cookie、本地存储和扩展权限。
 
 ## 环境要求
 
@@ -50,18 +50,20 @@ node scripts/install.js
 { "port": 8765, "token": "..." }
 ```
 
-令牌不会写入 Agent 模板、命令行参数或 WebSocket URL。已有的有效令牌会被保留，
-不会因重复运行安装器而自动轮换。
+令牌不会写入 Agent 模板。令牌不放在命令行参数或 WebSocket URL 中。已有的有效
+令牌会被保留，不会因重复运行安装器而自动轮换。安装器只在首次生成令牌时显示一次。
 
-如果设置了 `ARC_TUNNEL_TOKEN`，环境变量令牌优先于配置文件令牌；扩展弹窗也必须
-使用同一个生效令牌。空值或格式错误的环境变量会阻止启动，不会静默回退。
+`ARC_TUNNEL_TOKEN` 优先于用户级配置文件中的令牌。设置了有效的 `ARC_TUNNEL_TOKEN` 时，扩展必须使用同一个生效令牌。
+如果安装器此时生成文件令牌，它仅是备用令牌，生效令牌应从设置环境变量的受控来源取得。
+空值或格式错误的环境覆盖会阻止启动，必须移除或替换；安装器不会显示环境覆盖值。
+也可以清除该环境变量，取消环境覆盖后重启 Broker 和所有 Agent 客户端，再使用配置文件令牌。
 
 ## 加载浏览器扩展
 
 1. 打开 `chrome://extensions/` 或 `edge://extensions/`。
 2. 开启开发者模式，选择“加载已解压的扩展程序”。
 3. 选择仓库中的 `extension/dist/`。
-4. 在扩展弹窗中填写 Broker 地址和生效令牌，然后保存。
+4. 在扩展弹窗中的密码输入框填写生效令牌，然后保存。
 5. 确认状态变为 `Connected`。
 
 默认地址为 `ws://127.0.0.1:8765`，扩展会将根路径规范化为 `/extension`。使用自定义
@@ -69,6 +71,14 @@ node scripts/install.js
 
 扩展只接受字面地址 `127.0.0.1`、明确端口以及 `/` 或 `/extension` 路径。旧版三个
 `localhost:8765` 默认值仅用于自动迁移，新配置请始终使用 `127.0.0.1`。
+
+### 升级步骤
+
+1. 拉取最新代码并运行 `node scripts/install.js`。
+2. 重新加载 `extension/dist/`。
+3. 在扩展弹窗粘贴并保存同一个生效令牌。
+4. 确认状态变为 `Connected`。
+5. 运行 `node scripts/start.js diagnose --json`。
 
 ## Broker 管理
 
@@ -82,8 +92,9 @@ node scripts/start.js diagnose [--port N]
 node scripts/start.js diagnose [--port N] --json
 ```
 
-默认端口是 `8765`。端口优先级为：命令行 `--port` → `WS_PORT` → 用户配置文件 →
-`8765`。`status` 会显示运行中的 Broker PID 和端口；不要停止占用目标端口的未知进程。
+默认端口是 `8765`。端口优先级为：命令行 `--port` → `WS_PORT` → `~/.arc-tunnel/config.json` → `8765`。
+`status` 会显示运行中的 Broker PID 和端口；
+不要停止占用目标端口的未知进程。
 
 只读运行面板位于：
 
@@ -91,8 +102,8 @@ node scripts/start.js diagnose [--port N] --json
 http://127.0.0.1:<端口>/dashboard
 ```
 
-面板、`/health` 和 `diagnose` 只展示聚合状态，不包含 URL、Cookie、脚本、页面内容、
-令牌或浏览器标识。浏览器控制 WebSocket 仍需要认证。
+面板、`/health` 和 `diagnose` 只展示聚合状态，不包含 URL、ID、Cookie、脚本、参数和页面内容，
+也不包含令牌或浏览器标识。浏览器控制 WebSocket 仍需要认证。
 
 ## 多 Agent 使用方式
 
@@ -133,9 +144,12 @@ http://127.0.0.1:<端口>/dashboard
 4. 确认扩展保存的是当前生效令牌。
 5. 运行 `node scripts/start.js diagnose --json` 查看聚合诊断。
 
-如果弹窗显示 `Authentication failed`，请重新保存正确的生效令牌。扩展不会使用同一
-错误令牌持续重连。协议版本不一致或反复重连通常说明客户端、Broker 和扩展来自不同
-构建版本，需要重新构建并重新加载全部产物。
+如果弹窗进入 `auth_failed` 并显示 `Authentication failed`，请重新保存正确的生效令牌。
+扩展不会使用同一错误令牌持续重连。协议版本不一致或反复重连通常说明客户端、
+Broker 和扩展来自不同构建版本，需要重新构建并重新加载全部产物。
+
+认证恢复：先保存一个格式有效但内容错误的令牌，确认出现 `Authentication failed`；
+再保存正确的生效令牌，确认状态恢复为 `Connected`。
 
 ## 开发与验证
 
@@ -145,6 +159,9 @@ npm ci --prefix extension
 npm run verify
 npm run audit:prod
 ```
+
+构建会生成 `mcp-server/dist/mcp-server.js`、`mcp-server/dist/arc-tunnel-broker.js`、
+`mcp-server/dist/arc-tunnel-control.js` 和 `extension/dist/`。
 
 浏览器韧性验证：
 
@@ -158,16 +175,22 @@ node scripts/verify-browser-resilience.js [--port 8765]
 node scripts/verify-multi-agent.js [--port 8765] [--manual-tab N]
 ```
 
+验证要求每个 Agent 从自己拥有的标签页取得非空 JPEG，并确认对其他 Agent 标签页的
+截图请求返回 `TAB_NOT_OWNED`。
+
 验证器只清理自己创建的标签页、客户端和临时服务，不会停止共享 Broker，也不会关闭
 已有浏览器标签页。
 
 ## 安全说明
 
-Broker 仅绑定 `127.0.0.1`，不会暴露到局域网，并拒绝普通网页来源发起的 WebSocket
-升级。扩展拥有标签页、脚本、调试器、存储和 Cookie 权限，只应连接可信的本地 Agent。
+Broker 仅绑定 `127.0.0.1`，不会暴露到局域网，并拒绝来自普通 `http://` 或
+`https://` 页面的 WebSocket 升级；旧根路径只接受 `chrome-extension://` 来源。
+扩展绝不会将认证令牌发送到非回环地址。扩展拥有标签页、脚本、调试器、存储和
+Cookie 权限，只应连接可信的本地 Agent。
 
 静态令牌可以阻止未持有令牌的本地客户端，但不是同一操作系统用户之间的安全沙箱。
-能够读取用户配置或冒充本地端口的恶意进程不在此边界内。
+它保护的是本地 Broker 能力边界。能够读取用户配置或冒充本地端口的恶意进程不在此
+边界内。
 
 ## 许可证
 

@@ -132,14 +132,12 @@ for (const file of ['LICENSE', '.github/workflows/verify.yml']) {
 }
 
 const docs = ['README.md', 'AGENTS.md'];
-const requiredDocText = [
-  'CLI `--port` → `WS_PORT` → `~/.arc-tunnel/config.json` → `8765`',
+const sharedRequiredDocText = [
   '127.0.0.1',
   'http://',
   'https://',
   'chrome-extension://',
   '/extension',
-  '15 seconds',
   'claim_tab',
   'release_tab',
   'start_recording',
@@ -150,7 +148,6 @@ const requiredDocText = [
   'diagnose',
   '/dashboard',
   'npm run verify',
-  'URLs, IDs, cookies, scripts, parameters, and page content',
   'mcp-server/dist/mcp-server.js',
   'mcp-server/dist/arc-tunnel-broker.js',
   'mcp-server/dist/arc-tunnel-control.js',
@@ -159,13 +156,27 @@ const requiredDocText = [
 
 for (const file of docs) {
   const content = read(file);
-  for (const text of requiredDocText) {
+  for (const text of sharedRequiredDocText) {
     if (!content.includes(text)) throw new Error(`${file} is missing: ${text}`);
   }
 }
 
 const readme = read('README.md');
 const agents = read('AGENTS.md');
+for (const text of [
+  '命令行 `--port` → `WS_PORT` → `~/.arc-tunnel/config.json` → `8765`',
+  '15 秒',
+  'URL、ID、Cookie、脚本、参数和页面内容'
+]) {
+  if (!readme.includes(text)) throw new Error(`README.md is missing Chinese guidance: ${text}`);
+}
+for (const text of [
+  'CLI `--port` → `WS_PORT` → `~/.arc-tunnel/config.json` → `8765`',
+  '15 seconds',
+  'URLs, IDs, cookies, scripts, parameters, and page content'
+]) {
+  if (!agents.includes(text)) throw new Error(`AGENTS.md is missing English guidance: ${text}`);
+}
 const design = read('docs/superpowers/specs/2026-07-30-arc-tunnel-lightweight-auth-hardening-design.md');
 const implementationPlan = read('docs/superpowers/plans/2026-07-30-arc-tunnel-lightweight-auth-hardening.md');
 for (const text of [
@@ -210,8 +221,8 @@ if (!/unset the environment override, restart the Broker and every Agent client/
   throw new Error('AGENTS.md is missing restart guidance after unsetting the environment override');
 }
 
-const readmeSecurity = sectionBetween('README.md', readme, '## Security', '## License');
-const readmeInstall = sectionBetween('README.md', readme, '## Install', '## Broker lifecycle and ports');
+const readmeSecurity = sectionBetween('README.md', readme, '## 安全说明', '## 许可证');
+const readmeInstall = sectionBetween('README.md', readme, '## 快速安装', '## 加载浏览器扩展');
 const agentsInstall = sectionBetween('AGENTS.md', agents, '## Install and configure', '## Broker lifecycle');
 const agentsExtension = sectionBetween('AGENTS.md', agents, '## Extension setup', '## Browser control and debugger lifecycle');
 const designConstraints = sectionBetween(
@@ -253,19 +264,19 @@ const planTask11 = sectionBetween(
 assertSemanticContracts([
   ['README.md installer guidance', readmeInstall, [
     ['valid environment override makes a generated file token fallback-only',
-      /valid `ARC_TUNNEL_TOKEN` override[\s\S]*generated file token[\s\S]*fallback/i],
+      /`ARC_TUNNEL_TOKEN` 优先[\s\S]*生成文件令牌[\s\S]*备用令牌/],
     ['invalid present override blocks startup and must be removed or replaced without disclosure',
-      /empty or malformed[\s\S]*override[\s\S]*blocks startup[\s\S]*remove or replace[\s\S]*never prints?[\s\S]*override value/i]
+      /空值或格式错误[\s\S]*环境覆盖[\s\S]*阻止启动[\s\S]*移除或替换[\s\S]*不会显示环境覆盖值/]
   ]],
-  ['README.md security boundary', readmeSecurity, [
+  ['README.md security boundary', readme, [
     ['literal IPv4 loopback WebSocket host with explicit port and restricted path',
-      /literal host `127\.0\.0\.1`[\s\S]*explicit port[\s\S]*path `\/` or `\/extension`/i],
+      /`127\.0\.0\.1`[\s\S]*明确端口[\s\S]*`\/` 或 `\/extension` 路径/],
     ['legacy localhost defaults are migration-only inputs',
-      /three exact legacy `localhost` defaults[\s\S]*migration/i],
+      /旧版三个[\s\S]*`localhost:8765` 默认值[\s\S]*仅用于自动迁移/],
     ['authentication token is never sent off-loopback',
-      /never sends? the authentication token to an off-loopback destination/i],
+      /绝不会将认证令牌发送到非回环地址/],
     ['same-user config theft and local-port impersonation are outside the static-token boundary',
-      /hostile same-OS-user processes[\s\S]*read[\s\S]*user config[\s\S]*impersonate[\s\S]*local port[\s\S]*outside this static-token boundary/i]
+      /读取用户配置[\s\S]*冒充本地端口[\s\S]*恶意进程[\s\S]*不在此[\s\S]*边界内/]
   ]],
   ['AGENTS.md installer guidance', agentsInstall, [
     ['valid environment override makes a generated file token fallback-only',
@@ -341,7 +352,7 @@ for (const [label, content, stalePattern] of [
   if (stalePattern.test(content)) throw new Error(`${label} retains contradictory authentication guidance`);
 }
 
-const readmeMigration = readme.slice(readme.indexOf('### 认证迁移'));
+const readmeMigration = readme.slice(readme.indexOf('### 升级步骤'));
 assertOrdered('README.md', readmeMigration, [
   'node scripts/install.js',
   '重新加载 `extension/dist/`',
@@ -357,7 +368,7 @@ assertOrdered('AGENTS.md', agentsMigration, [
   '`Connected`',
   'node scripts/start.js diagnose --json'
 ]);
-assertOrdered('README.md authentication recovery', readme.slice(readme.indexOf('认证恢复需要')), [
+assertOrdered('README.md authentication recovery', readme.slice(readme.indexOf('认证恢复：')), [
   '格式有效但内容错误',
   'Authentication failed',
   '正确的生效令牌',
@@ -445,7 +456,7 @@ const kimiServer = kimiJsonBlock.mcpServers['arc-tunnel'];
 assertSafeTemplateShape('configs/kimi.md', kimiServer.args, Object.keys(kimiServer.env || {}));
 
 if (!design.includes('**Status:** Approved')) throw new Error('Authentication design status must be Approved');
-if (!/自己拥有的标签页取得非空 JPEG[\s\S]*对其他 Agent 标签页的截图请求返回 `TAB_NOT_OWNED`/.test(readme)) {
+if (!/自己拥有的标签页取得非空 JPEG[\s\S]*对其他 Agent 标签页的\s*截图请求返回 `TAB_NOT_OWNED`/.test(readme)) {
   throw new Error('README.md must require owned JPEG content and foreign TAB_NOT_OWNED');
 }
 if (!/non-empty JPEG image content from its owned tab,\s+while a foreign\s+screenshot returns `TAB_NOT_OWNED`/.test(agents)) {
